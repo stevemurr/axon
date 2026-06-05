@@ -22,7 +22,7 @@ CompositeMeta load_composite_meta(const std::string& path) {
     m.schema_version = j.value("schema_version", 0);
     if (m.schema_version != 2) {
         std::ostringstream oss;
-        oss << "unsupported tone_meta schema_version " << m.schema_version
+        oss << "unsupported axon_meta schema_version " << m.schema_version
             << " (this build understands version 2)";
         throw std::runtime_error(oss.str());
     }
@@ -47,17 +47,17 @@ CompositeMeta load_composite_meta(const std::string& path) {
             m.auto_eq.classes[cls] = dir.get<std::string>();
         }
         if (m.auto_eq.class_order.empty()) {
-            throw std::runtime_error("tone_meta.auto_eq.class_order is empty");
+            throw std::runtime_error("axon_meta.auto_eq.class_order is empty");
         }
         if (m.auto_eq.classes.find(m.auto_eq.default_class) == m.auto_eq.classes.end()) {
             throw std::runtime_error(
-                "tone_meta.auto_eq.default_class '" + m.auto_eq.default_class
+                "axon_meta.auto_eq.default_class '" + m.auto_eq.default_class
                 + "' not present in classes map");
         }
         for (const auto& cls : m.auto_eq.class_order) {
             if (m.auto_eq.classes.find(cls) == m.auto_eq.classes.end()) {
                 throw std::runtime_error(
-                    "tone_meta.auto_eq.class_order entry '" + cls
+                    "axon_meta.auto_eq.class_order entry '" + cls
                     + "' not present in classes map");
             }
         }

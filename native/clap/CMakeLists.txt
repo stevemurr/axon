@@ -39,13 +39,13 @@ target_link_libraries(nablafx_clap PRIVATE
     "-framework CoreFoundation"
 )
 
-# Composite TONE plugin: separate dylib that bundles auto-EQ + saturator +
-# LA-2A behind a single AMT/TRM control surface, with the LUFS leveler and
+# Composite Axon plugin: separate dylib that bundles auto-EQ + saturator +
+# ssl_comp behind a single AMT/TRM control surface, with the LUFS leveler and
 # true-peak ceiling running in-host. spectral_mask_eq.hpp + rational_a.hpp
 # are header-only so they don't appear in the source list.
-add_library(tone_clap MODULE
-    src/tone_plugin.cpp
-    src/tone_gui.mm
+add_library(axon_clap MODULE
+    src/axon_plugin.cpp
+    src/axon_gui.mm
     src/composite_meta.cpp
     src/meta.cpp
     src/lufs_leveler.cpp
@@ -53,17 +53,17 @@ add_library(tone_clap MODULE
     src/param_id.cpp
 )
 
-set_source_files_properties(src/tone_gui.mm PROPERTIES
+set_source_files_properties(src/axon_gui.mm PROPERTIES
     COMPILE_FLAGS "-fobjc-arc"
 )
 
-target_include_directories(tone_clap PRIVATE
+target_include_directories(axon_clap PRIVATE
     ${CLAP_INCLUDE_DIR}
     ${ONNXRUNTIME_INCLUDE_DIR}
     ${JSON_INCLUDE_DIR}
 )
 
-target_link_libraries(tone_clap PRIVATE
+target_link_libraries(axon_clap PRIVATE
     ${ONNXRUNTIME_LIBRARY}
     "-framework CoreFoundation"
     "-framework Cocoa"
@@ -73,7 +73,7 @@ target_link_libraries(tone_clap PRIVATE
 
 # Install the onnxruntime dylib next to ours and make each plugin find it
 # via @loader_path/../Frameworks once it's inside its .clap bundle.
-foreach(_t nablafx_clap tone_clap)
+foreach(_t nablafx_clap axon_clap)
     set_target_properties(${_t} PROPERTIES
         PREFIX ""
         SUFFIX ".so"                 # build.sh renames to the bundle executable
@@ -90,7 +90,7 @@ configure_file(
 )
 
 # -----------------------------------------------------------------------------
-# tone_bench — headless CLAP host for benchmarking the composite plugin.
+# axon_bench — headless CLAP host for benchmarking the composite plugin.
 # Optional: only built if libsndfile is found (homebrew: `brew install libsndfile`).
 # -----------------------------------------------------------------------------
 find_package(PkgConfig QUIET)
@@ -115,17 +115,17 @@ if(NOT _have_sndfile)
 endif()
 
 if(_have_sndfile)
-    add_executable(tone_bench bench/tone_bench.cpp)
-    target_include_directories(tone_bench PRIVATE
+    add_executable(axon_bench bench/axon_bench.cpp)
+    target_include_directories(axon_bench PRIVATE
         ${CLAP_INCLUDE_DIR}
         ${SNDFILE_INCLUDE_DIRS}
     )
-    target_link_directories(tone_bench PRIVATE ${SNDFILE_LIBRARY_DIRS})
-    target_link_libraries(tone_bench PRIVATE
+    target_link_directories(axon_bench PRIVATE ${SNDFILE_LIBRARY_DIRS})
+    target_link_libraries(axon_bench PRIVATE
         ${SNDFILE_LIBRARIES}
         "-framework CoreFoundation"
     )
-    message(STATUS "tone_bench: enabled (sndfile in ${SNDFILE_INCLUDE_DIRS})")
+    message(STATUS "axon_bench: enabled (sndfile in ${SNDFILE_INCLUDE_DIRS})")
 else()
-    message(STATUS "tone_bench: SKIPPED (libsndfile not found; brew install libsndfile)")
+    message(STATUS "axon_bench: SKIPPED (libsndfile not found; brew install libsndfile)")
 endif()

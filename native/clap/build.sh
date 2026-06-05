@@ -7,10 +7,10 @@
 #                   stages a per-model .clap from a `nablafx-export` bundle
 #                   (model.onnx + plugin_meta.json).
 #
-#   composite TONE: build.sh tone <staging_dir> <out.clap>
-#                   stages the composite TONE plugin from a
-#                   `scripts/export_tone.py` bundle (tone_meta.json + 3
-#                   sub-bundle dirs: auto_eq/, saturator/, la2a/).
+#   composite Axon: build.sh axon <staging_dir> <out.clap>
+#                   stages the composite Axon plugin from a
+#                   `scripts/export_axon.py` bundle (axon_meta.json +
+#                   sub-bundle dirs: auto_eq/, saturator/, ssl_comp/).
 #
 # Behavior:
 #   - On first run (or after cmake inputs change) configures and builds the
@@ -25,14 +25,14 @@ usage() {
     cat <<EOF >&2
 usage:
   $(basename "$0") <staging_dir> <out.clap>          # single-model
-  $(basename "$0") tone <staging_dir> <out.clap>     # composite TONE
+  $(basename "$0") axon <staging_dir> <out.clap>     # composite Axon
 EOF
     exit 2
 }
 
 MODE="single"
-if [ "${1:-}" = "tone" ]; then
-    MODE="tone"
+if [ "${1:-}" = "axon" ]; then
+    MODE="axon"
     shift
 fi
 
@@ -54,15 +54,15 @@ if [ "$MODE" = "single" ]; then
         exit 1
     fi
 else
-    if [ ! -f "$STAGING/tone_meta.json" ]; then
-        echo "error: $STAGING is missing tone_meta.json" >&2
+    if [ ! -f "$STAGING/axon_meta.json" ]; then
+        echo "error: $STAGING is missing axon_meta.json" >&2
         exit 1
     fi
-    # Discover all sub-bundle directory names from tone_meta.json
+    # Discover all sub-bundle directory names from axon_meta.json
     # (sub_bundles map for single-instance stages + auto_eq.classes for the
     # multi-class auto-EQ). Hardcoding the list here would silently drop any
     # new role added later (e.g. how ssl_comp got missed when first added).
-    SUB_BUNDLE_DIRS=$(/usr/bin/env python3 - "$STAGING/tone_meta.json" <<'PY'
+    SUB_BUNDLE_DIRS=$(/usr/bin/env python3 - "$STAGING/axon_meta.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 dirs = set()
@@ -74,17 +74,17 @@ print(" ".join(sorted(dirs)))
 PY
 )
     if [ -z "${SUB_BUNDLE_DIRS}" ]; then
-        echo "error: tone_meta.json declares no sub_bundles or auto_eq.classes" >&2
+        echo "error: axon_meta.json declares no sub_bundles or auto_eq.classes" >&2
         exit 1
     fi
     for dir in $SUB_BUNDLE_DIRS; do
         if [ ! -d "$STAGING/$dir" ]; then
-            echo "error: $STAGING is missing sub-bundle $dir/ (declared in tone_meta.json)" >&2
+            echo "error: $STAGING is missing sub-bundle $dir/ (declared in axon_meta.json)" >&2
             exit 1
         fi
     done
     # AUTOEQ_DIRS kept for symmetry with the copy step below.
-    AUTOEQ_DIRS=$(/usr/bin/env python3 - "$STAGING/tone_meta.json" <<'PY'
+    AUTOEQ_DIRS=$(/usr/bin/env python3 - "$STAGING/axon_meta.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 classes = m.get("auto_eq", {}).get("classes") or {}
@@ -100,7 +100,7 @@ BUILD_DIR="$HERE/build"
 NEED_CONFIGURE=0
 [ -f "$BUILD_DIR/build_config.sh" ] || NEED_CONFIGURE=1
 [ -f "$BUILD_DIR/nablafx_clap.so" ] || NEED_CONFIGURE=1
-[ -f "$BUILD_DIR/tone_clap.so"    ] || NEED_CONFIGURE=1
+[ -f "$BUILD_DIR/axon_clap.so"    ] || NEED_CONFIGURE=1
 if [ "$NEED_CONFIGURE" -eq 1 ]; then
     cmake -S "$HERE" -B "$BUILD_DIR" -G "Unix Makefiles" \
         -DCMAKE_BUILD_TYPE=Release
@@ -114,8 +114,8 @@ if [ "$MODE" = "single" ]; then
     META_PATH="$STAGING/plugin_meta.json"
     DYLIB_PATH="$NABLAFX_CLAP_DYLIB"
 else
-    META_PATH="$STAGING/tone_meta.json"
-    DYLIB_PATH="$TONE_CLAP_DYLIB"
+    META_PATH="$STAGING/axon_meta.json"
+    DYLIB_PATH="$AXON_CLAP_DYLIB"
 fi
 
 pyscript='
@@ -138,7 +138,7 @@ EXECUTABLE=$(printf '%s\n' "$PYOUT" | sed -n '3p')
 #   <OUT>/Contents/Frameworks/libonnxruntime.<ver>.dylib
 #   <OUT>/Contents/Frameworks/libonnxruntime.dylib (symlink)
 #   <OUT>/Contents/Resources/...      (model.onnx + plugin_meta.json for single,
-#                                       tone_meta.json + 3 sub-bundle dirs for tone)
+#                                       axon_meta.json + sub-bundle dirs for axon)
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Frameworks" "$OUT/Contents/Resources"
 
@@ -151,8 +151,8 @@ cp "$NABLAFX_CLAP_ORT_DYLIB" "$OUT/Contents/Frameworks/"
 # a dylib that loads the wrong meta file (would crash at host load with no
 # obvious diagnostic).
 COPIED_DYLIB="$OUT/Contents/MacOS/$EXECUTABLE"
-EXPECTED_META=$([ "$MODE" = "tone" ] && echo "tone_meta.json" || echo "plugin_meta.json")
-WRONG_META=$([   "$MODE" = "tone" ] && echo "plugin_meta.json" || echo "tone_meta.json")
+EXPECTED_META=$([ "$MODE" = "axon" ] && echo "axon_meta.json" || echo "plugin_meta.json")
+WRONG_META=$(  [ "$MODE" = "axon" ] && echo "plugin_meta.json" || echo "axon_meta.json")
 if ! /usr/bin/strings "$COPIED_DYLIB" | grep -q "$EXPECTED_META"; then
     echo "error: $COPIED_DYLIB is missing expected meta-string '$EXPECTED_META'." >&2
     echo "       This means the wrong dylib was copied for MODE=$MODE." >&2
@@ -171,7 +171,7 @@ if [ "$MODE" = "single" ]; then
     cp "$STAGING/model.onnx"        "$OUT/Contents/Resources/"
     cp "$STAGING/plugin_meta.json"  "$OUT/Contents/Resources/"
 else
-    cp "$STAGING/tone_meta.json"    "$OUT/Contents/Resources/"
+    cp "$STAGING/axon_meta.json"    "$OUT/Contents/Resources/"
     # SUB_BUNDLE_DIRS already covers single-instance roles + auto_eq classes
     # (see the validation block above). Copy them all in one pass.
     for dir in $SUB_BUNDLE_DIRS; do

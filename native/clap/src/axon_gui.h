@@ -7,8 +7,8 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
-// Opaque handle – defined only inside tone_gui.mm
-typedef struct ToneGUIState ToneGUIState;
+// Opaque handle – defined only inside axon_gui.mm
+typedef struct AxonGUIState AxonGUIState;
 
 // Describes one parameter for the initial handshake.
 //
@@ -26,7 +26,7 @@ typedef struct {
     float               current_value;
     const char* const*  enum_options;
     int                 n_enum_options;
-} ToneParamInfo;
+} AxonParamInfo;
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -41,7 +41,7 @@ typedef struct {
  * @param on_param_change   Called whenever the web UI moves a knob/toggle.
  * @param on_order_change   Called when the user reorders processor cards.
  */
-ToneGUIState* tone_gui_create(
+AxonGUIState* axon_gui_create(
     void*        plugin_ptr,
     const char*  resources_dir,
     void       (*on_param_change)(void* plug, const char* param_id, float value),
@@ -49,7 +49,7 @@ ToneGUIState* tone_gui_create(
 );
 
 /** Release all resources. Safe to call with NULL. */
-void tone_gui_destroy(ToneGUIState* gui);
+void axon_gui_destroy(AxonGUIState* gui);
 
 // ---------------------------------------------------------------------------
 // Windowing
@@ -57,20 +57,20 @@ void tone_gui_destroy(ToneGUIState* gui);
 
 /**
  * Embed the GUI into an existing NSView.
- * Must be called before tone_gui_show().
+ * Must be called before axon_gui_show().
  * @param ns_view_ptr  An NSView* cast to void*.
  * @return true on success.
  */
-bool tone_gui_set_parent(ToneGUIState* gui, void* ns_view_ptr);
+bool axon_gui_set_parent(AxonGUIState* gui, void* ns_view_ptr);
 
-void tone_gui_show(ToneGUIState* gui);
-void tone_gui_hide(ToneGUIState* gui);
+void axon_gui_show(AxonGUIState* gui);
+void axon_gui_hide(AxonGUIState* gui);
 
 /**
  * Returns the fixed pixel dimensions of the GUI window.
- * Safe to call before tone_gui_create().
+ * Safe to call before axon_gui_create().
  */
-void tone_gui_get_size(uint32_t* w, uint32_t* h);
+void axon_gui_get_size(uint32_t* w, uint32_t* h);
 
 // ---------------------------------------------------------------------------
 // State sync  (C++ → WebView)
@@ -81,14 +81,14 @@ void tone_gui_get_size(uint32_t* w, uint32_t* h);
  * May be called before the page has finished loading; the implementation
  * buffers the call and replays it in webView:didFinishNavigation:.
  *
- * @param params       Array of ToneParamInfo, one entry per parameter.
+ * @param params       Array of AxonParamInfo, one entry per parameter.
  * @param n_params     Length of params[].
  * @param order        Processor order array (values 0-5).
  * @param order_count  Length of order[].
  */
-void tone_gui_send_init(
-    ToneGUIState*       gui,
-    const ToneParamInfo* params,
+void axon_gui_send_init(
+    AxonGUIState*       gui,
+    const AxonParamInfo* params,
     int                  n_params,
     const int*           order,
     int                  order_count
@@ -98,13 +98,13 @@ void tone_gui_send_init(
  * Notify the WebView that a single parameter changed (DAW automation, etc.).
  * Thread-safe: dispatches to main queue internally if needed.
  */
-void tone_gui_notify_param(ToneGUIState* gui, const char* param_id, float value);
+void axon_gui_notify_param(AxonGUIState* gui, const char* param_id, float value);
 
 /**
  * Evaluate arbitrary JavaScript in the WebView.
  * Must be called from the main thread.
  */
-void tone_gui_eval_js(ToneGUIState* gui, const char* js);
+void axon_gui_eval_js(AxonGUIState* gui, const char* js);
 
 #ifdef __cplusplus
 } // extern "C"

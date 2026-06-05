@@ -1,7 +1,7 @@
-# tone_bench — performance test suite
+# axon_bench — performance test suite
 
 Headless CLAP host + scripted scenario matrix for benchmarking the
-NeuralMastering composite plugin. Designed so an agent (or CI job) can
+Axon composite plugin. Designed so an agent (or CI job) can
 run the whole suite with one command and either dump JSON or diff
 against a committed baseline.
 
@@ -9,7 +9,7 @@ against a committed baseline.
 
 ```
 bench/
-  tone_bench.cpp      C++ harness: dlopens a .clap, drives audio in fixed
+  axon_bench.cpp      C++ harness: dlopens a .clap, drives audio in fixed
                       blocks, emits per-block timing as JSON
   run_bench.py        Python runner: runs scenarios × buffer sizes, writes
                       last_run.json + last_run.md, optionally diffs vs
@@ -29,7 +29,7 @@ bench/
 
 ```bash
 brew install libsndfile pkg-config         # one-time
-./build.sh tone <staging-dir> /tmp/NeuralMastering.clap
+./build.sh axon <staging-dir> /tmp/Axon.clap
 ./native/clap/bench/run_bench.py
 ```
 
@@ -49,7 +49,6 @@ machine-readable dump with every cell's stats.
 | `full_chain`    | every stage active at moderate-to-high amounts          |
 | `eq_only`       | just the auto-EQ (controller + SpectralMaskEq)          |
 | `sat_only`      | just the saturator (RationalA)                          |
-| `la2a_only`     | just the LA-2A LSTM                                     |
 | `ssl_comp_only` | just the SSL bus comp TCN                               |
 | `bypass`        | every stage's amount at 0 — measures plumbing overhead  |
 
@@ -82,17 +81,17 @@ git commit -m "perf: update bench baseline (<reason>)"
 The baseline is committed so PR review can see the diff; never overwrite
 it without explaining why in the commit message.
 
-## Direct `tone_bench` invocation
+## Direct `axon_bench` invocation
 
 For ad-hoc profiling (e.g. when attaching Instruments), call the binary
 directly:
 
 ```bash
-native/clap/build/tone_bench \
-    --plugin /tmp/NeuralMastering.clap \
+native/clap/build/axon_bench \
+    --plugin /tmp/Axon.clap \
     --in     native/clap/bench/fixtures/bench_input_20s.wav \
     --buffer 256 --iters 200 --warmup 5 \
-    --params 'EQ=0,SDR=0,CMP=0,SSC=1.0,CLS=4,LVL=0,OLV=0' \
+    --params 'EQ=0,SDR=0,SSC=1.0,CLS=4,LVL=0,OLV=0' \
     --json
 ```
 
@@ -100,7 +99,7 @@ JSON shape:
 
 ```json
 {
-  "plugin": "NeuralMastering",
+  "plugin": "Axon",
   "sample_rate": 44100,
   "buffer_size": 256,
   "channels": 2,
@@ -146,8 +145,6 @@ SMX  Sat Mix                  [0..1]
 SHF  Sat HPF     Hz           [20..500]
 STH  Sat Thresh  dB           [-24..0]
 SBS  Sat Bias                 [-0.5..0.5]
-C_L  Comp/Limit               [0..1]
-CMP  Peak Reduction           [0..100]
 SSC  Bus Comp                 [0..1]
 CLS  EQ Class    enum         [0..n_classes-1]   (4 = full_mix)
 EQ   Auto EQ                  [0..1]

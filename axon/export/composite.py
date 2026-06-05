@@ -1,19 +1,19 @@
-"""Composite NeuralMastering plugin export.
+"""Composite Axon plugin export.
 
-Reads pre-built per-stage bundles (la2a, saturator, and N per-class auto_eq —
+Reads pre-built per-stage bundles (saturator and N per-class auto_eq —
 all produced by ``nablafx-export``) and emits a single staging directory ready
-for ``native/clap/build.sh tone`` on macOS.
+for ``native/clap/build.sh axon`` on macOS.
 
 Composite layout written to ``out_dir``::
 
-    tone_meta.json                # this module's schema; see CompositePluginMeta
-    la2a/                         (copied from input bundle)
+    axon_meta.json                # this module's schema; see CompositePluginMeta
     saturator/                    (no model.onnx — pure DSP stage)
+    ssl_comp/                     (copied from input bundle)
     auto_eq_<class>/              (N copies, one per class — controller LSTM ONNX
                                   + identical PEQ DSP block in plugin_meta.json)
 
-The C++ side (``native/clap/src/composite_meta.cpp``) loads ``tone_meta.json``,
-the saturator + la2a sub-``plugin_meta.json``, and one auto_eq sub-meta per
+The C++ side (``native/clap/src/composite_meta.cpp``) loads ``axon_meta.json``,
+the saturator sub-``plugin_meta.json``, and one auto_eq sub-meta per
 class. All auto_eq classes must share the same PEQ DSP layout (frozen freqs
 + identical ranges) so the runtime can swap which controller ONNX is active
 without changing the downstream biquad cascade.
@@ -43,13 +43,6 @@ class _AmountMappingSat:
 
 
 @dataclass(frozen=True)
-class _AmountMappingLa2a:
-    peak_reduction_min: float = 20.0
-    peak_reduction_max: float = 70.0
-    comp_or_limit:      float = 1.0   # held at "Limit" in the composite spec
-
-
-@dataclass(frozen=True)
 class _AmountMappingAutoEq:
     wet_mix_max: float = 1.0
 
@@ -61,19 +54,19 @@ class _AmountMappingSslComp:
 
 @dataclass(frozen=True)
 class CompositePluginMeta:
-    """Top-level meta for the composite NeuralMastering plugin.
+    """Top-level meta for the composite Axon plugin.
 
     The C++ host reads this once at module load to wire AMT → per-stage params,
     locate sub-bundles, and configure the in-host DSP stages (LUFS leveler,
     true-peak ceiling, output trim).
     """
     schema_version: int = SCHEMA_VERSION
-    effect_name:    str = "NeuralMastering"
+    effect_name:    str = "Axon"
     model_id:       str = ""
     sample_rate:    int = 44100
     channels:       int = 1
-    # Single-instance sub-bundles (saturator, la2a). Directory names relative to
-    # the staging dir / the .clap Resources dir.
+    # Single-instance sub-bundles (saturator, ssl_comp). Directory names relative
+    # to the staging dir / the .clap Resources dir.
     sub_bundles:    Dict[str, str] = field(default_factory=dict)
     # Multi-class auto-EQ — one bundle per instrument-class preset.
     auto_eq:        Dict[str, Any] = field(default_factory=dict)
@@ -125,10 +118,6 @@ def _build_default_meta(
                 "default": 0.0, "skew": 1.0, "unit": "dB"},
         "SBS": {"id": "SBS", "name": "Sat Bias",   "min": -0.5,  "max": 0.5,
                 "default": 0.0, "skew": 1.0, "unit": ""},
-        "C_L": {"id": "C_L", "name": "Comp/Limit",     "min": 0.0,   "max": 1.0,
-                "default": 1.0, "skew": 1.0, "unit": "switch"},
-        "CMP": {"id": "CMP", "name": "Peak Reduction", "min": 0.0,   "max": 100.0,
-                "default": 0.0, "skew": 1.0, "unit": ""},
         "SSC": {"id": "SSC", "name": "Bus Comp",       "min": 0.0,   "max": 1.0,
                 "default": 0.0, "skew": 1.0, "unit": ""},
         "CLS": {"id": "CLS", "name": "EQ Class",
@@ -144,12 +133,6 @@ def _build_default_meta(
                 "default": 0.0, "skew": 1.0, "unit": ""},
         "OLT": {"id": "OLT", "name": "Out Lev Target", "min": -36.0, "max": -6.0,
                 "default": -14.0, "skew": 1.0, "unit": "LUFS"},
-        "SPW": {"id": "SPW", "name": "Spatial Wet",   "min": 0.0,   "max": 1.0,
-                "default": 0.0, "skew": 1.0, "unit": ""},
-        "SPR": {"id": "SPR", "name": "Spatial Rate",  "min": 0.1,   "max": 2.0,
-                "default": 0.8, "skew": 1.0, "unit": "Hz"},
-        "SPD": {"id": "SPD", "name": "Spatial Depth", "min": 0.0,   "max": 1.0,
-                "default": 0.5, "skew": 1.0, "unit": ""},
         "TRM": {"id": "TRM", "name": "Output Trim", "min": -12.0, "max": 12.0,
                 "default": 0.0, "skew": 1.0, "unit": "dB"},
     }
@@ -158,14 +141,12 @@ def _build_default_meta(
         sample_rate=sample_rate,
         sub_bundles={
             "saturator": "saturator",
-            "la2a":      "la2a",
             "ssl_comp":  "ssl_comp",
         },
         auto_eq=auto_eq,
         controls=controls,
         amount_mapping={
             "saturator": asdict(_AmountMappingSat()),
-            "la2a":      asdict(_AmountMappingLa2a()),
             "auto_eq":   asdict(_AmountMappingAutoEq()),
             "ssl_comp":  asdict(_AmountMappingSslComp()),
         },
@@ -200,14 +181,14 @@ def _check_sub_bundle(bundle_dir: Path, expected_kind: str, expected_block_kind:
 def export_composite_bundle(
     auto_eq_bundles: Mapping[str, Path],
     saturator_bundle: Path,
-    la2a_bundle: Path,
+    ssl_comp_bundle: Path,
     out_dir: Path,
-    effect_name: str = "NeuralMastering",
+    effect_name: str = "Axon",
     default_class: str = DEFAULT_ACTIVE_CLASS,
     class_order: Optional[List[str]] = None,
 ) -> CompositePluginMeta:
     """Validate sub-bundles, copy them under ``out_dir``, and write
-    ``tone_meta.json``.
+    ``axon_meta.json``.
 
     ``auto_eq_bundles`` is a mapping of class name → directory holding a
     ``nablafx-export`` bundle for that class's controller+DSP. All classes must
@@ -237,8 +218,8 @@ def export_composite_bundle(
         raise ValueError(f"default_class {default_class!r} not in classes {ordered!r}")
 
     auto_eq_paths = {c: Path(auto_eq_bundles[c]).resolve() for c in ordered}
-    saturator_bundle = Path(saturator_bundle).resolve()
-    la2a_bundle      = Path(la2a_bundle).resolve()
+    saturator_bundle  = Path(saturator_bundle).resolve()
+    ssl_comp_bundle   = Path(ssl_comp_bundle).resolve()
     out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -270,30 +251,28 @@ def export_composite_bundle(
             )
         autoeq_metas[cls] = m
 
-    sat_meta  = _check_sub_bundle(saturator_bundle, expected_kind="dsp",
-                                  expected_block_kind="rational_a")
-    la2a_meta = _check_sub_bundle(la2a_bundle,      expected_kind="nn")
+    sat_meta      = _check_sub_bundle(saturator_bundle, expected_kind="dsp",
+                                      expected_block_kind="rational_a")
+    ssl_comp_meta = _check_sub_bundle(ssl_comp_bundle,  expected_kind="nn")
 
     # Sample rate must be uniform across every stage of the chain.
-    sample_rates = {sat_meta["sample_rate"], la2a_meta["sample_rate"]}
+    sample_rates = {sat_meta["sample_rate"], ssl_comp_meta["sample_rate"]}
     sample_rates.update(m["sample_rate"] for m in autoeq_metas.values())
     if len(sample_rates) != 1:
         raise ValueError(
             "sub-bundles disagree on sample_rate: "
-            f"saturator={sat_meta['sample_rate']}, la2a={la2a_meta['sample_rate']}, "
+            f"saturator={sat_meta['sample_rate']}, ssl_comp={ssl_comp_meta['sample_rate']}, "
             "auto_eq=" + ", ".join(f"{c}={m['sample_rate']}"
                                    for c, m in autoeq_metas.items())
         )
     sample_rate = sample_rates.pop()
 
-    # Compose a stable model_id from the chain. Auto-EQ contributes the
-    # joined per-class model_ids so DAWs reload automation against the exact
-    # combination shipped.
+    # Compose a stable model_id from the chain.
     autoeq_id = "_".join(autoeq_metas[c]["model_id"] for c in ordered)
-    model_id = f"nm__{la2a_meta['model_id']}__{sat_meta['model_id']}__{autoeq_id}"
+    model_id = f"nm__{sat_meta['model_id']}__{autoeq_id}"
 
     # Copy sub-bundles into the staging dir under their stable role names.
-    for role, src in (("saturator", saturator_bundle), ("la2a", la2a_bundle)):
+    for role, src in (("saturator", saturator_bundle), ("ssl_comp", ssl_comp_bundle)):
         dst = out_dir / role
         if dst.exists():
             shutil.rmtree(dst)
@@ -309,5 +288,5 @@ def export_composite_bundle(
     meta = CompositePluginMeta(
         **{**asdict(meta), "effect_name": effect_name},
     )
-    (out_dir / "tone_meta.json").write_text(json.dumps(asdict(meta), indent=2) + "\n")
+    (out_dir / "axon_meta.json").write_text(json.dumps(asdict(meta), indent=2) + "\n")
     return meta

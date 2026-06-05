@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run the NeuralMastering performance suite.
+"""Run the Axon performance suite.
 
-Drives `tone_bench` over a fixed scenario × buffer-size matrix, collects
+Drives `axon_bench` over a fixed scenario × buffer-size matrix, collects
 per-block timing stats, and emits both a JSON dump and a Markdown summary.
 Optionally diffs against a committed baseline.json so regressions are
 visible in CI / PR review.
@@ -10,8 +10,8 @@ Designed to be runnable by an agent with one command:
 
     ./native/clap/bench/run_bench.py
 
-The defaults are wired for a dev box that has just run `./build.sh tone`:
-  --bench-bin   native/clap/build/tone_bench
+The defaults are wired for a dev box that has just run `./build.sh axon`:
+  --bench-bin   native/clap/build/axon_bench
   --bundle      auto-discover (./build, /tmp, ~/Library/Audio/Plug-Ins/CLAP)
   --fixture     native/clap/bench/fixtures/bench_input_20s.wav
   --baseline    native/clap/bench/baseline.json (compared if it exists)
@@ -46,22 +46,20 @@ REPO_ROOT = HERE.parent.parent.parent  # native/clap/bench/ -> repo root
 
 # Wet stages: amounts at moderate-to-high values so we see realistic load.
 # CLS=4 selects full_mix, the most-tested auto-EQ class.
-FULL_CHAIN = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,CMP=50,SSC=1.0,CLS=4,LVL=1.0,LVT=-14,OLV=1.0,OLT=-14,TRM=0"
+FULL_CHAIN = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,SSC=1.0,CLS=4,LVL=1.0,LVT=-14,OLV=1.0,OLT=-14,TRM=0"
 
 # Single-stage isolations: zero everything else so attribution is clean.
-EQ_ONLY      = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,CMP=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
-SAT_ONLY     = "EQ=0,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,CMP=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
-LA2A_ONLY    = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,CMP=50,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
-SSL_COMP_ONLY = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,CMP=0,SSC=1.0,CLS=4,LVL=0,OLV=0,TRM=0"
+EQ_ONLY      = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
+SAT_ONLY     = "EQ=0,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
+SSL_COMP_ONLY = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=1.0,CLS=4,LVL=0,OLV=0,TRM=0"
 
 # Bypass: every stage's amount at 0 to measure plumbing overhead only.
-BYPASS = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,CMP=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
+BYPASS = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
 
 SCENARIOS: List[tuple[str, str]] = [
     ("full_chain",    FULL_CHAIN),
     ("eq_only",       EQ_ONLY),
     ("sat_only",      SAT_ONLY),
-    ("la2a_only",     LA2A_ONLY),
     ("ssl_comp_only", SSL_COMP_ONLY),
     ("bypass",        BYPASS),
 ]
@@ -82,9 +80,9 @@ RTF_REGRESS_FRAC = 0.10   # -10% throughput
 
 def discover_bundle() -> Optional[Path]:
     candidates = [
-        REPO_ROOT / "build" / "NeuralMastering.clap",
-        Path("/tmp/NeuralMastering.clap"),
-        Path(os.path.expanduser("~/Library/Audio/Plug-Ins/CLAP/NeuralMastering.clap")),
+        REPO_ROOT / "build" / "Axon.clap",
+        Path("/tmp/Axon.clap"),
+        Path(os.path.expanduser("~/Library/Audio/Plug-Ins/CLAP/Axon.clap")),
     ]
     for c in candidates:
         if (c / "Contents" / "MacOS").is_dir():
@@ -93,12 +91,12 @@ def discover_bundle() -> Optional[Path]:
 
 
 def discover_bench_bin() -> Optional[Path]:
-    p = REPO_ROOT / "native" / "clap" / "build" / "tone_bench"
+    p = REPO_ROOT / "native" / "clap" / "build" / "axon_bench"
     return p if p.is_file() else None
 
 
 # ----------------------------------------------------------------------------
-# Run one tone_bench invocation
+# Run one axon_bench invocation
 # ----------------------------------------------------------------------------
 
 @dataclass
@@ -132,7 +130,7 @@ def run_cell(bench_bin: Path, bundle: Path, fixture: Path,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        sys.stderr.write(f"[{scenario} buf={buffer_size}] tone_bench failed:\n")
+        sys.stderr.write(f"[{scenario} buf={buffer_size}] axon_bench failed:\n")
         sys.stderr.write(proc.stderr)
         sys.exit(1)
     j = json.loads(proc.stdout)
@@ -204,7 +202,7 @@ def format_summary(now: List[CellResult],
                    diffs: Optional[List[Diff]],
                    meta: dict) -> str:
     lines: List[str] = []
-    lines.append(f"# tone_bench results — {meta['plugin']}")
+    lines.append(f"# axon_bench results — {meta['plugin']}")
     lines.append("")
     lines.append(f"- bundle: `{meta['bundle']}`")
     lines.append(f"- fixture: `{meta['fixture']}` ({meta['fixture_sec']:.1f}s @ {meta['sample_rate']} Hz)")
@@ -265,9 +263,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bench-bin", type=Path, default=None,
-                   help="path to tone_bench binary")
+                   help="path to axon_bench binary")
     p.add_argument("--bundle", type=Path, default=None,
-                   help="path to NeuralMastering.clap bundle")
+                   help="path to Axon.clap bundle")
     p.add_argument("--fixture", type=Path,
                    default=HERE / "fixtures" / "bench_input_20s.wav")
     p.add_argument("--baseline", type=Path, default=HERE / "baseline.json")
@@ -286,17 +284,17 @@ def main() -> int:
     args = p.parse_args()
 
     if sys.platform != "darwin":
-        print("error: tone_bench is macOS-arm64 only (see CMakeLists.txt)")
+        print("error: axon_bench is macOS-arm64 only (see CMakeLists.txt)")
         return 1
 
     bench_bin = args.bench_bin or discover_bench_bin()
     if bench_bin is None or not bench_bin.is_file():
-        print(f"error: tone_bench binary not found at {bench_bin or '<auto>'}")
-        print(f"       build with: ./build.sh tone <staging> /tmp/NeuralMastering.clap")
+        print(f"error: axon_bench binary not found at {bench_bin or '<auto>'}")
+        print(f"       build with: ./build.sh axon <staging> /tmp/Axon.clap")
         return 1
     bundle = args.bundle or discover_bundle()
     if bundle is None or not (bundle / "Contents" / "MacOS").is_dir():
-        print(f"error: NeuralMastering.clap bundle not found at {bundle or '<auto>'}")
+        print(f"error: Axon.clap bundle not found at {bundle or '<auto>'}")
         print(f"       searched: ./build, /tmp, ~/Library/Audio/Plug-Ins/CLAP")
         return 1
     if not args.fixture.is_file():
@@ -340,7 +338,7 @@ def main() -> int:
     print()
 
     meta = {
-        "plugin": "NeuralMastering",
+        "plugin": "Axon",
         "bundle": str(bundle),
         "fixture": str(args.fixture),
         "fixture_sec": fixture_sec,

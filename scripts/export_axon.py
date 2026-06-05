@@ -1,42 +1,40 @@
-"""Build the composite NeuralMastering staging bundle.
+"""Build the composite Axon staging bundle.
 
 Three modes:
 
   Bundles already exported (the typical Mac-clone-and-build path)::
 
-      python scripts/export_tone.py from-bundles \\
-          --auto-eq-bass-bundle      artifacts/tone-bundles/auto_eq_bass \\
-          --auto-eq-drums-bundle     artifacts/tone-bundles/auto_eq_drums \\
-          --auto-eq-vocals-bundle    artifacts/tone-bundles/auto_eq_vocals \\
-          --auto-eq-other-bundle     artifacts/tone-bundles/auto_eq_other \\
-          --auto-eq-full-mix-bundle  artifacts/tone-bundles/auto_eq_full_mix \\
-          --saturator-bundle         artifacts/tone-bundles/saturator \\
-          --la2a-bundle              artifacts/tone-bundles/la2a \\
-          --out                      build/tone-staging
+      python scripts/export_axon.py from-bundles \\
+          --auto-eq-bass-bundle      artifacts/axon-bundles/auto_eq_bass \\
+          --auto-eq-drums-bundle     artifacts/axon-bundles/auto_eq_drums \\
+          --auto-eq-vocals-bundle    artifacts/axon-bundles/auto_eq_vocals \\
+          --auto-eq-other-bundle     artifacts/axon-bundles/auto_eq_other \\
+          --auto-eq-full-mix-bundle  artifacts/axon-bundles/auto_eq_full_mix \\
+          --saturator-bundle         artifacts/axon-bundles/saturator \\
+          --ssl-comp-bundle          artifacts/axon-bundles/ssl_comp \\
+          --out                      build/axon-staging
 
   From-runs (export each stage from a Hydra run dir, then compose). Each
   ``--auto-eq-<class>-run`` is optional — the composite needs at least one
   class but accepts any subset; ``--default-class`` must be one of the classes
   you provide::
 
-      python scripts/export_tone.py from-runs \\
+      python scripts/export_axon.py from-runs \\
           --auto-eq-full-mix-run /shared/artifacts/auto_eq_musdb_full_mix/.../<ts> \\
           --auto-eq-bass-run     /shared/artifacts/auto_eq_musdb_bass/.../<ts> \\
           --saturator-run        /shared/artifacts/saturator_synth/.../<ts> \\
-          --la2a-run             /shared/artifacts/la2a/.../<ts> \\
-          --la2a-ckpt            /shared/artifacts/la2a/.../checkpoints/epoch=8-step=89600.ckpt \\
+          --ssl-comp-run         /shared/artifacts/ssl_comp/.../<ts> \\
           --default-class        full_mix \\
-          --out                  build/tone-staging
+          --out                  build/axon-staging
 
   From-class-dir (auto-discover the latest checkpoint under each
   ``/shared/artifacts/auto_eq_musdb_<class>/outputs/<date>/<time>/``)::
 
-      python scripts/export_tone.py from-class-dir \\
+      python scripts/export_axon.py from-class-dir \\
           --auto-eq-root /shared/artifacts \\
           --saturator-run /shared/artifacts/saturator_synth/.../<ts> \\
-          --la2a-run      /shared/artifacts/la2a/.../<ts> \\
-          --la2a-ckpt     <best_la2a_ckpt> \\
-          --out           build/tone-staging
+          --ssl-comp-run  /shared/artifacts/ssl_comp/.../<ts> \\
+          --out           build/axon-staging
 
 The ``from-runs`` and ``from-class-dir`` modes shell out to ``nablafx-export``
 for each stage so the same export code path runs as you'd get from manual
@@ -54,7 +52,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import nablafx  # noqa: F401 — applies rational-activations patch
-from neural_mastering.export.composite import (
+from axon.export.composite import (
     DEFAULT_ACTIVE_CLASS,
     DEFAULT_CLASS_ORDER,
     export_composite_bundle,
@@ -136,7 +134,7 @@ def _from_bundles(args) -> int:
     meta = export_composite_bundle(
         auto_eq_bundles={c: Path(p) for c, p in autoeq_bundles.items()},
         saturator_bundle=Path(args.saturator_bundle),
-        la2a_bundle=Path(args.la2a_bundle),
+        ssl_comp_bundle=Path(args.ssl_comp_bundle),
         out_dir=Path(args.out),
         effect_name=args.effect_name,
         default_class=args.default_class,
@@ -153,10 +151,10 @@ def _from_runs(args) -> int:
         return 2
     autoeq_ckpts = _collect_autoeq_ckpts(args)
 
-    work = Path(tempfile.mkdtemp(prefix="tone-export-"))
+    work = Path(tempfile.mkdtemp(prefix="axon-export-"))
     try:
-        sat_dir  = work / "saturator"
-        la2a_dir = work / "la2a"
+        sat_dir      = work / "saturator"
+        ssl_comp_dir = work / "ssl_comp"
 
         _run([
             "nablafx-export", "--run-dir", args.saturator_run,
@@ -164,17 +162,16 @@ def _from_runs(args) -> int:
             "--out", str(sat_dir),
         ])
         _run([
-            "nablafx-export", "--run-dir", args.la2a_run,
-            *(["--ckpt", args.la2a_ckpt] if args.la2a_ckpt else []),
-            "--effect", "LA2A", "--letters", "C,P",
-            "--out", str(la2a_dir),
+            "nablafx-export", "--run-dir", args.ssl_comp_run,
+            *(["--ckpt", args.ssl_comp_ckpt] if args.ssl_comp_ckpt else []),
+            "--out", str(ssl_comp_dir),
         ])
         autoeq_bundles = _autoeq_bundles_from_runs(autoeq_runs, autoeq_ckpts, work)
 
         meta = export_composite_bundle(
             auto_eq_bundles=autoeq_bundles,
             saturator_bundle=sat_dir,
-            la2a_bundle=la2a_dir,
+            ssl_comp_bundle=ssl_comp_dir,
             out_dir=Path(args.out),
             effect_name=args.effect_name,
             default_class=args.default_class,
@@ -221,20 +218,19 @@ def _from_class_dir(args) -> int:
               file=sys.stderr)
         return 2
 
-    work = Path(tempfile.mkdtemp(prefix="tone-export-"))
+    work = Path(tempfile.mkdtemp(prefix="axon-export-"))
     try:
-        sat_dir  = work / "saturator"
-        la2a_dir = work / "la2a"
+        sat_dir      = work / "saturator"
+        ssl_comp_dir = work / "ssl_comp"
         _run([
             "nablafx-export", "--run-dir", args.saturator_run,
             *(["--ckpt", args.saturator_ckpt] if args.saturator_ckpt else []),
             "--out", str(sat_dir),
         ])
         _run([
-            "nablafx-export", "--run-dir", args.la2a_run,
-            *(["--ckpt", args.la2a_ckpt] if args.la2a_ckpt else []),
-            "--effect", "LA2A", "--letters", "C,P",
-            "--out", str(la2a_dir),
+            "nablafx-export", "--run-dir", args.ssl_comp_run,
+            *(["--ckpt", args.ssl_comp_ckpt] if args.ssl_comp_ckpt else []),
+            "--out", str(ssl_comp_dir),
         ])
         autoeq_bundles = _autoeq_bundles_from_runs(
             autoeq_runs, {c: None for c in autoeq_runs}, work
@@ -242,7 +238,7 @@ def _from_class_dir(args) -> int:
         meta = export_composite_bundle(
             auto_eq_bundles=autoeq_bundles,
             saturator_bundle=sat_dir,
-            la2a_bundle=la2a_dir,
+            ssl_comp_bundle=ssl_comp_dir,
             out_dir=Path(args.out),
             effect_name=args.effect_name,
             default_class=args.default_class,
@@ -268,15 +264,15 @@ def _add_class_run_args(parser: argparse.ArgumentParser, kind: str) -> None:
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
     """Args available on every subparser AND the top-level parser, so callers
     can put them before or after the subcommand without surprise."""
-    parser.add_argument("--effect-name", default="NeuralMastering")
+    parser.add_argument("--effect-name", default="Axon")
     parser.add_argument("--default-class", default=DEFAULT_ACTIVE_CLASS,
                         help=f"Class loaded by default in the plugin "
                              f"(one of {','.join(DEFAULT_CLASS_ORDER)}).")
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="export_tone",
-                                description="Build composite NeuralMastering staging bundle.")
+    p = argparse.ArgumentParser(prog="export_axon",
+                                description="Build composite Axon staging bundle.")
     _add_common_args(p)
     sp = p.add_subparsers(dest="cmd", required=True)
 
@@ -285,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_common_args(pb)
     _add_class_run_args(pb, "bundle")
     pb.add_argument("--saturator-bundle", required=True)
-    pb.add_argument("--la2a-bundle",      required=True)
+    pb.add_argument("--ssl-comp-bundle",  required=True)
     pb.add_argument("--out",              required=True)
     pb.set_defaults(func=_from_bundles)
 
@@ -294,11 +290,11 @@ def main(argv: list[str] | None = None) -> int:
     _add_common_args(pr)
     _add_class_run_args(pr, "run")
     _add_class_run_args(pr, "ckpt")
-    pr.add_argument("--saturator-run", required=True)
+    pr.add_argument("--saturator-run",  required=True)
     pr.add_argument("--saturator-ckpt", default=None)
-    pr.add_argument("--la2a-run",      required=True)
-    pr.add_argument("--la2a-ckpt",     default=None)
-    pr.add_argument("--out",           required=True)
+    pr.add_argument("--ssl-comp-run",   required=True)
+    pr.add_argument("--ssl-comp-ckpt",  default=None)
+    pr.add_argument("--out",            required=True)
     pr.set_defaults(func=_from_runs)
 
     pc = sp.add_parser("from-class-dir",
@@ -307,11 +303,11 @@ def main(argv: list[str] | None = None) -> int:
     _add_common_args(pc)
     pc.add_argument("--auto-eq-root", required=True,
                     help="Parent dir holding auto_eq_musdb_<class>/ subdirs.")
-    pc.add_argument("--saturator-run", required=True)
+    pc.add_argument("--saturator-run",  required=True)
     pc.add_argument("--saturator-ckpt", default=None)
-    pc.add_argument("--la2a-run",      required=True)
-    pc.add_argument("--la2a-ckpt",     default=None)
-    pc.add_argument("--out",           required=True)
+    pc.add_argument("--ssl-comp-run",   required=True)
+    pc.add_argument("--ssl-comp-ckpt",  default=None)
+    pc.add_argument("--out",            required=True)
     pc.set_defaults(func=_from_class_dir)
 
     args = p.parse_args(argv)

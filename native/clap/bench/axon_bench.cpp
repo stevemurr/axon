@@ -1,10 +1,10 @@
-// Headless CLAP host for benchmarking the NeuralMastering composite plugin.
+// Headless CLAP host for benchmarking the Axon composite plugin.
 //
 // Loads a .clap bundle, drives a fixed input wav through it in fixed-size
 // blocks, and reports per-block timing stats (p50/p95/p99/max) plus the
 // realtime factor. Designed to be runnable from a script:
 //
-//   tone_bench --plugin build/NeuralMastering.clap \
+//   axon_bench --plugin build/Axon.clap \
 //              --in    bench-input.wav \
 //              --out   /tmp/out.wav \
 //              --buffer 256 \
@@ -54,7 +54,7 @@ struct Args {
 
 static void usage(const char* prog) {
     std::fprintf(stderr,
-        "usage: %s --plugin <NeuralMastering.clap> --in <in.wav> [options]\n"
+        "usage: %s --plugin <Axon.clap> --in <in.wav> [options]\n"
         "  --plugin <path>          path to the .clap bundle\n"
         "  --in <wav>               input audio file\n"
         "  --out <wav>              optional output file (writes last iter)\n"
@@ -147,7 +147,7 @@ static clap_host_t make_host() {
     clap_host_t h{};
     h.clap_version    = CLAP_VERSION_INIT;
     h.host_data       = nullptr;
-    h.name            = "tone_bench";
+    h.name            = "axon_bench";
     h.vendor          = "nablafx";
     h.url             = "";
     h.version         = "0.1";

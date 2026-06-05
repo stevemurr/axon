@@ -1,7 +1,7 @@
-// Composite TONE CLAP plugin: 1 dylib that wires
+// Composite Axon CLAP plugin: 1 dylib that wires
 //
 //   audio → LufsLeveler → ort(autoeq controller) → SpectralMaskEq
-//                       → RationalA (saturator)  → ort(la2a)
+//                       → RationalA (saturator)  → ort(ssl_comp)
 //                       → TruePeakCeiling → output trim
 //
 // The composite has two host-exposed knobs (AMT, TRM) defined in the
@@ -38,7 +38,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "tone_gui.h"
+#include "axon_gui.h"
 
 #include <dlfcn.h>
 
@@ -54,7 +54,7 @@
 #include "spectral_mask_eq.hpp"
 #include "true_peak_ceiling.hpp"
 
-namespace nablafx_tone {
+namespace nablafx_axon {
 
 namespace fs = std::filesystem;
 using nablafx::CompositeMeta;
@@ -67,7 +67,6 @@ using nablafx::RationalAParams;
 using nablafx::SpectralMaskEq;
 using nablafx::SpectralMaskEqParams;
 using nablafx::TruePeakCeiling;
-using nablafx::DimensionD;
 using nablafx::load_composite_meta;
 using nablafx::load_meta;
 using nablafx::param_id_for;
@@ -223,7 +222,7 @@ struct SpectrumAnalyzer {
     std::string build_js(const std::array<int, kNumStages>& order) const {
         std::string s;
         s.reserve(8192);
-        s = "toneSpectrum({\"order\":[";
+        s = "axonSpectrum({\"order\":[";
         for (int i = 0; i < kNumStages; ++i) { if (i) s += ','; s += std::to_string(order[i]); }
         s += "],\"db\":[";
         char buf[16];
@@ -284,14 +283,14 @@ private:
 // ---------------------------------------------------------------------------
 
 struct ModuleState {
-    CompositeMeta              tone_meta;
-    // One PluginMeta per auto-EQ class. Indexed by tone_meta.auto_eq.class_order;
+    CompositeMeta              axon_meta;
+    // One PluginMeta per auto-EQ class. Indexed by axon_meta.auto_eq.class_order;
     // the lookup map mirrors the same data keyed by class name for convenience.
     std::vector<PluginMeta>                              autoeq_metas;
     std::unordered_map<std::string, std::size_t>         autoeq_class_index;
     PluginMeta                 sat_meta;
     PluginMeta                 ssl_comp_meta;          // optional; loaded if
-                                                       // tone_meta.sub_bundles
+                                                       // axon_meta.sub_bundles
                                                        // has "ssl_comp"
     bool                       ssl_comp_loaded{false};
     std::string                bundle_dir;            // .../Axon.clap/Contents
@@ -326,7 +325,7 @@ static std::string find_bundle_contents_() {
 static void populate_descriptor_(ModuleState& st) {
     // Build a short plugin ID from effect_name (model_id can be 300+ chars,
     // which overflows fixed-size ID buffers in some CLAP hosts).
-    std::string short_name = st.tone_meta.effect_name;
+    std::string short_name = st.axon_meta.effect_name;
     std::transform(short_name.begin(), short_name.end(), short_name.begin(),
                    [](unsigned char c){ return std::tolower(c); });
     for (auto& c : short_name)
@@ -340,7 +339,7 @@ static void populate_descriptor_(ModuleState& st) {
 
     st.descriptor.clap_version = CLAP_VERSION_INIT;
     st.descriptor.id           = st.plugin_id_str.c_str();
-    st.descriptor.name         = st.tone_meta.effect_name.c_str();
+    st.descriptor.name         = st.axon_meta.effect_name.c_str();
     st.descriptor.vendor       = "nablafx";
     st.descriptor.url          = "https://github.com/mcomunita/nablafx";
     st.descriptor.manual_url   = "";
@@ -639,7 +638,7 @@ struct Plugin {
     std::array<int, kNumStages> processor_order{0, 1, 2, 3, 4};
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
-    // tone_meta.auto_eq.class_order). Updated from the audio thread when the
+    // axon_meta.auto_eq.class_order). Updated from the audio thread when the
     // CLS control changes, so the AutoEQ stage routes through
     // chains[ch].autoeq_ort_per_class[active_autoeq_cls].
     int active_autoeq_cls{0};
@@ -654,7 +653,7 @@ struct Plugin {
     std::array<int,kNumStages> pending_order{0,1,2,3,4};
 
     // CLAP GUI handle (main thread only).
-    ToneGUIState* gui_state{nullptr};
+    AxonGUIState* gui_state{nullptr};
 
     // Dynamic latency tracking.
     // current_latency is written by the audio thread and read by latency_get
@@ -733,7 +732,7 @@ static bool params_value_to_text(const clap_plugin_t* p, clap_id id, double valu
     for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
         if (param_id_for(plug->meta->effect_name, plug->meta->controls[i].id) == id
             && plug->meta->controls[i].id == "CLS") {
-            const auto& classes = g_state->tone_meta.auto_eq.class_order;
+            const auto& classes = g_state->axon_meta.auto_eq.class_order;
             int idx = std::clamp(static_cast<int>(std::lround(value)),
                                  0, static_cast<int>(classes.size()) - 1);
             std::snprintf(out, out_size, "%s", classes[idx].c_str());
@@ -750,7 +749,7 @@ static bool params_text_to_value(const clap_plugin_t* p, clap_id id, const char*
     for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
         if (param_id_for(plug->meta->effect_name, plug->meta->controls[i].id) == id
             && plug->meta->controls[i].id == "CLS") {
-            const auto& classes = g_state->tone_meta.auto_eq.class_order;
+            const auto& classes = g_state->axon_meta.auto_eq.class_order;
             for (size_t k = 0; k < classes.size(); ++k) {
                 if (classes[k] == text) {
                     *out = static_cast<double>(k);
@@ -897,7 +896,7 @@ static bool plugin_init(const clap_plugin_t* p) {
 }
 static void plugin_destroy(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
-    if (plug->gui_state) { tone_gui_destroy(plug->gui_state); plug->gui_state = nullptr; }
+    if (plug->gui_state) { axon_gui_destroy(plug->gui_state); plug->gui_state = nullptr; }
     delete plug;
 }
 
@@ -913,17 +912,17 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
         plug->autoeq_env_decay = std::exp(-1.0f / std::max(blocks_per_tau, 1.0f));
     }
     plug->leveler = LufsLeveler(LufsLeveler::Config{
-        /*target_lufs=*/g_state->tone_meta.leveler.target_lufs,
+        /*target_lufs=*/g_state->axon_meta.leveler.target_lufs,
     });
-    plug->leveler.reset(sample_rate, g_state->tone_meta.leveler.target_lufs);
+    plug->leveler.reset(sample_rate, g_state->axon_meta.leveler.target_lufs);
     plug->out_leveler = LufsLeveler(LufsLeveler::Config{
-        /*target_lufs=*/g_state->tone_meta.leveler.target_lufs,
+        /*target_lufs=*/g_state->axon_meta.leveler.target_lufs,
     });
-    plug->out_leveler.reset(sample_rate, g_state->tone_meta.leveler.target_lufs);
+    plug->out_leveler.reset(sample_rate, g_state->axon_meta.leveler.target_lufs);
 
     // Seed active class from CLS control; clamp to a valid class index.
     {
-        const auto& classes = g_state->tone_meta.auto_eq.class_order;
+        const auto& classes = g_state->axon_meta.auto_eq.class_order;
         int cls_idx = g_state->autoeq_default_idx;
         for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
             if (plug->meta->controls[i].id == "CLS") {
@@ -938,14 +937,14 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     plug->chains.clear();
     plug->chains.resize(plug->channels);
     for (auto& ch : plug->chains) {
-        const auto& classes = g_state->tone_meta.auto_eq.class_order;
+        const auto& classes = g_state->axon_meta.auto_eq.class_order;
         ch.autoeq_ort_per_class.clear();
         ch.autoeq_ort_per_class.reserve(classes.size());
         ch.autoeq_spec_per_class.clear();
         ch.autoeq_spec_per_class.resize(classes.size());
         for (size_t i = 0; i < classes.size(); ++i) {
             const std::string& cls = classes[i];
-            const std::string& dir = g_state->tone_meta.auto_eq.classes.at(cls);
+            const std::string& dir = g_state->axon_meta.auto_eq.classes.at(cls);
             ch.autoeq_ort_per_class.push_back(std::make_unique<OrtMiniSession>(
                 *g_state->ort_env,
                 g_state->resources_dir + "/" + dir + "/model.onnx",
@@ -977,7 +976,7 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
             ch.ssl_comp_ort = std::make_unique<OrtMiniSession>(
                 *g_state->ort_env,
                 g_state->resources_dir + "/" +
-                    g_state->tone_meta.sub_bundles.at("ssl_comp") + "/model.onnx",
+                    g_state->axon_meta.sub_bundles.at("ssl_comp") + "/model.onnx",
                 g_state->ssl_comp_meta);
             ch.ssl_comp_in_ring.assign(N, 0.0f);
             ch.ssl_comp_out_buf.assign(N, 0.0f);
@@ -995,10 +994,10 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
         }
 
         TruePeakCeiling::Config tcfg{
-            /*ceiling_dbtp=*/g_state->tone_meta.ceiling.ceiling_dbtp,
-            /*lookahead_ms=*/g_state->tone_meta.ceiling.lookahead_ms,
-            /*attack_ms=*/g_state->tone_meta.ceiling.attack_ms,
-            /*release_ms=*/g_state->tone_meta.ceiling.release_ms,
+            /*ceiling_dbtp=*/g_state->axon_meta.ceiling.ceiling_dbtp,
+            /*lookahead_ms=*/g_state->axon_meta.ceiling.lookahead_ms,
+            /*attack_ms=*/g_state->axon_meta.ceiling.attack_ms,
+            /*release_ms=*/g_state->axon_meta.ceiling.release_ms,
         };
         ch.ceiling = TruePeakCeiling(tcfg);
         ch.ceiling.reset(sample_rate);
@@ -1027,8 +1026,8 @@ static void plugin_stop_processing(const clap_plugin_t*) {}
 
 static void plugin_reset(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
-    plug->leveler.reset(plug->sample_rate, g_state->tone_meta.leveler.target_lufs);
-    plug->out_leveler.reset(plug->sample_rate, g_state->tone_meta.leveler.target_lufs);
+    plug->leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
+    plug->out_leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
     for (auto& ch : plug->chains) {
         for (auto& s : ch.autoeq_ort_per_class) {
             if (s) s->reset_state();
@@ -1090,14 +1089,14 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.out_lvl_wet=olv; s.out_lvl_target_lufs=olt;
     s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf;
     s.sat_thresh_lin=std::pow(10.f, sth/20.f); s.sat_bias=sbs;
-    s.autoeq_wet_mix=eq*g_state->tone_meta.amt_autoeq.wet_mix_max;
-    const int n_cls = static_cast<int>(g_state->tone_meta.auto_eq.class_order.size());
+    s.autoeq_wet_mix=eq*g_state->axon_meta.amt_autoeq.wet_mix_max;
+    const int n_cls = static_cast<int>(g_state->axon_meta.auto_eq.class_order.size());
     s.autoeq_cls_idx = std::clamp(cls_idx, 0, n_cls > 0 ? n_cls - 1 : 0);
     s.trim_lin=std::pow(10.f,trm_db/20.f);
     s.eq_range=eqr;
     s.eq_boost_scale=eqb;
     s.eq_speed_ms=eqs;
-    s.ssl_comp_wet = ssc * g_state->tone_meta.amt_ssl_comp.wet_mix_max;
+    s.ssl_comp_wet = ssc * g_state->axon_meta.amt_ssl_comp.wet_mix_max;
     return s;
 }
 
@@ -1445,7 +1444,7 @@ static void apply_events_(Plugin* plug, const clap_input_events_t* in_events) {
 }
 
 // GUI-thread callbacks — write pending changes into thread-safe queues.
-static void tone_on_param_change(void* plug_ptr, const char* param_id, float value) {
+static void axon_on_param_change(void* plug_ptr, const char* param_id, float value) {
     auto* plug = static_cast<Plugin*>(plug_ptr);
     for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
         if (plug->meta->controls[i].id == param_id) {
@@ -1455,7 +1454,7 @@ static void tone_on_param_change(void* plug_ptr, const char* param_id, float val
         }
     }
 }
-static void tone_on_order_change(void* plug_ptr, const int* order, int count) {
+static void axon_on_order_change(void* plug_ptr, const int* order, int count) {
     auto* plug = static_cast<Plugin*>(plug_ptr);
     if (count != kNumStages) return;
     std::lock_guard<std::mutex> lk(plug->order_mutex);
@@ -1571,12 +1570,12 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
 static void gui_send_full_state_(Plugin* plug) {
     if (!plug->gui_state) return;
     const size_t n = plug->meta->controls.size();
-    std::vector<ToneParamInfo> params(n);
+    std::vector<AxonParamInfo> params(n);
     // Cache class-name pointers for the CLS enum picker. The vector itself
-    // backs the const char* array we pass in ToneParamInfo::enum_options;
-    // both must outlive the tone_gui_send_init() call (it copies the strings
+    // backs the const char* array we pass in AxonParamInfo::enum_options;
+    // both must outlive the axon_gui_send_init() call (it copies the strings
     // into the JS payload synchronously on the main thread or buffers them).
-    const auto& classes = g_state->tone_meta.auto_eq.class_order;
+    const auto& classes = g_state->axon_meta.auto_eq.class_order;
     std::vector<const char*> class_ptrs;
     class_ptrs.reserve(classes.size());
     for (const auto& s : classes) class_ptrs.push_back(s.c_str());
@@ -1597,7 +1596,7 @@ static void gui_send_full_state_(Plugin* plug) {
             params[i].n_enum_options = static_cast<int>(class_ptrs.size());
         }
     }
-    tone_gui_send_init(plug->gui_state,
+    axon_gui_send_init(plug->gui_state,
                        params.data(), static_cast<int>(n),
                        plug->processor_order.data(), kNumStages);
 }
@@ -1614,21 +1613,21 @@ static bool gui_create(const clap_plugin_t* p, const char* api, bool is_floating
     if (!gui_is_api_supported(p, api, is_floating)) return false;
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     if (plug->gui_state) return true;  // already exists
-    plug->gui_state = tone_gui_create(
+    plug->gui_state = axon_gui_create(
         plug,
         g_state->resources_dir.c_str(),
-        tone_on_param_change,
-        tone_on_order_change);
+        axon_on_param_change,
+        axon_on_order_change);
     return plug->gui_state != nullptr;
 }
 static void gui_destroy_fn(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
-    tone_gui_destroy(plug->gui_state);
+    axon_gui_destroy(plug->gui_state);
     plug->gui_state = nullptr;
 }
 static bool gui_set_scale(const clap_plugin_t*, double) { return false; }
 static bool gui_get_size(const clap_plugin_t*, uint32_t* w, uint32_t* h) {
-    tone_gui_get_size(w, h);
+    axon_gui_get_size(w, h);
     return true;
 }
 static bool gui_can_resize(const clap_plugin_t*) { return false; }
@@ -1641,14 +1640,14 @@ static bool gui_get_resize_hints(const clap_plugin_t*, clap_gui_resize_hints_t* 
     return false;
 }
 static bool gui_adjust_size(const clap_plugin_t*, uint32_t* w, uint32_t* h) {
-    tone_gui_get_size(w, h);
+    axon_gui_get_size(w, h);
     return true;
 }
 static bool gui_set_size(const clap_plugin_t*, uint32_t, uint32_t) { return true; }
 static bool gui_set_parent(const clap_plugin_t* p, const clap_window_t* window) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     if (!plug->gui_state) return false;
-    return tone_gui_set_parent(plug->gui_state, window->cocoa);
+    return axon_gui_set_parent(plug->gui_state, window->cocoa);
 }
 static bool gui_set_transient(const clap_plugin_t*, const clap_window_t*) { return false; }
 static void gui_suggest_title(const clap_plugin_t*, const char*) {}
@@ -1656,12 +1655,12 @@ static bool gui_show(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     if (!plug->gui_state) return false;
     gui_send_full_state_(plug);
-    tone_gui_show(plug->gui_state);
+    axon_gui_show(plug->gui_state);
     return true;
 }
 static bool gui_hide(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
-    tone_gui_hide(plug->gui_state);
+    axon_gui_hide(plug->gui_state);
     return true;
 }
 
@@ -1703,7 +1702,7 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
     if (!plug->gui_state) return;
     if (plug->spectrum.process_if_ready(plug->sample_rate)) {
         const std::string js = plug->spectrum.build_js(plug->processor_order);
-        tone_gui_eval_js(plug->gui_state, js.c_str());
+        axon_gui_eval_js(plug->gui_state, js.c_str());
     }
 }
 
@@ -1719,7 +1718,7 @@ static const clap_plugin_t* factory_create_plugin(const clap_plugin_factory_t*,
 
     auto* plug = new Plugin{};
     plug->host     = host;
-    plug->meta     = &g_state->tone_meta;
+    plug->meta     = &g_state->axon_meta;
     plug->channels = 2;
 
     plug->plugin.desc             = &g_state->descriptor;
@@ -1756,15 +1755,15 @@ static bool entry_init(const char* /*plugin_path*/) {
         if (st->bundle_dir.empty()) return false;
         st->resources_dir = st->bundle_dir + "/Resources";
 
-        st->tone_meta = load_composite_meta(st->resources_dir + "/tone_meta.json");
+        st->axon_meta = load_composite_meta(st->resources_dir + "/axon_meta.json");
         st->sat_meta    = load_meta(st->resources_dir + "/" +
-                                    st->tone_meta.sub_bundles.at("saturator")
+                                    st->axon_meta.sub_bundles.at("saturator")
                                     + "/plugin_meta.json");
         // SSL bus comp is optional — older bundles don't ship it. If present,
         // load its meta so we can size per-channel ring buffers at activate.
-        if (st->tone_meta.sub_bundles.count("ssl_comp")) {
+        if (st->axon_meta.sub_bundles.count("ssl_comp")) {
             st->ssl_comp_meta = load_meta(
-                st->resources_dir + "/" + st->tone_meta.sub_bundles.at("ssl_comp")
+                st->resources_dir + "/" + st->axon_meta.sub_bundles.at("ssl_comp")
                 + "/plugin_meta.json");
             st->ssl_comp_loaded = true;
         }
@@ -1776,9 +1775,9 @@ static bool entry_init(const char* /*plugin_path*/) {
         // controller ONNX is swapped on a class change.
         st->autoeq_metas.clear();
         st->autoeq_class_index.clear();
-        st->autoeq_metas.reserve(st->tone_meta.auto_eq.class_order.size());
-        for (const auto& cls : st->tone_meta.auto_eq.class_order) {
-            const std::string& dir = st->tone_meta.auto_eq.classes.at(cls);
+        st->autoeq_metas.reserve(st->axon_meta.auto_eq.class_order.size());
+        for (const auto& cls : st->axon_meta.auto_eq.class_order) {
+            const std::string& dir = st->axon_meta.auto_eq.classes.at(cls);
             PluginMeta m = load_meta(st->resources_dir + "/" + dir + "/plugin_meta.json");
             if (m.dsp_blocks.empty()) {
                 throw std::runtime_error(
@@ -1788,7 +1787,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             st->autoeq_metas.push_back(std::move(m));
         }
         if (st->autoeq_metas.empty()) {
-            throw std::runtime_error("tone_meta.auto_eq is empty");
+            throw std::runtime_error("axon_meta: auto_eq is empty");
         }
 
         // Pull the DSP block payloads we need at chain construction time.
@@ -1803,7 +1802,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             st->autoeq_dsp_per_class.push_back(m.dsp_blocks[0]);
         }
         st->autoeq_default_idx = static_cast<int>(
-            st->autoeq_class_index.at(st->tone_meta.auto_eq.default_class));
+            st->autoeq_class_index.at(st->axon_meta.auto_eq.default_class));
 
         st->ort_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "nablafx-tone");
         populate_descriptor_(*st);
@@ -1821,13 +1820,13 @@ static const void* entry_get_factory(const char* factory_id) {
     return nullptr;
 }
 
-}  // namespace nablafx_tone
+}  // namespace nablafx_axon
 
 extern "C" {
 CLAP_EXPORT const clap_plugin_entry_t clap_entry = {
     CLAP_VERSION_INIT,
-    nablafx_tone::entry_init,
-    nablafx_tone::entry_deinit,
-    nablafx_tone::entry_get_factory,
+    nablafx_axon::entry_init,
+    nablafx_axon::entry_deinit,
+    nablafx_axon::entry_get_factory,
 };
 }

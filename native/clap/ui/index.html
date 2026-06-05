@@ -378,7 +378,7 @@ function prettyEnum(s) {
 
 function sendParam(id, value) {
   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tone) {
-    window.webkit.messageHandlers.tone.postMessage({ type: 'setParam', id, value });
+    window.webkit.messageHandlers.axon.postMessage({ type: 'setParam', id, value });
   }
   paramValues[id] = value;
   refreshKnob(id);
@@ -387,7 +387,7 @@ function sendParam(id, value) {
 
 function sendOrderToHost(order) {
   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tone) {
-    window.webkit.messageHandlers.tone.postMessage({ type: 'reorder', order });
+    window.webkit.messageHandlers.axon.postMessage({ type: 'reorder', order });
   }
 }
 
@@ -767,7 +767,7 @@ function refreshTrimKnob() {
 // PUBLIC API  (called from C++ via evaluateJavaScript)
 // ============================================================
 
-window.toneInit = function(state) {
+window.axonInit = function(state) {
   paramMeta   = state.paramMeta   || {};
   paramValues = state.paramValues || {};
   procOrder   = state.processorOrder || [0,1,2,3,4,5,6];
@@ -1094,12 +1094,12 @@ window.toneInit = function(state) {
   // Called with no data on init to draw the empty grid.
   drawSpectrum(null);
 
-  window.toneSpectrum = function(data) {
+  window.axonSpectrum = function(data) {
     drawSpectrum(data);
   };
 })();
 
-window.toneSetParam = function(id, value) {
+window.axonSetParam = function(id, value) {
   paramValues[id] = value;
 
   if (id === 'TRM') {

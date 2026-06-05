@@ -4,7 +4,7 @@
 # Recipe (v18 stack — export-compatible):
 #   freeze_freqs=true (C++ split-export precomputes biquad coefficients off
 #   fixed band freqs), processor + dyn block_size=128 (matches kBlockSize in
-#   native/clap/src/tone_plugin.cpp), lr=3e-3 with cosine warmup (200 steps),
+#   native/clap/src/axon_plugin.cpp), lr=3e-3 with cosine warmup (200 steps),
 #   grad clip norm=1.0, precision=fp32 (bf16 ComplexHalf NaN'd FFT),
 #   2000 max steps, batch_size=64.
 #

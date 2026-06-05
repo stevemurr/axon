@@ -1,4 +1,4 @@
-// Standalone sanity test for the composite tone_meta.json loader. Runs on
+// Standalone sanity test for the composite axon_meta.json loader. Runs on
 // Linux because composite_meta.cpp has no CLAP / ORT deps.
 //
 // Build:
@@ -7,7 +7,7 @@
 //       -o test_composite_meta
 //
 // Run (point at the staged composite dir):
-//   ./test_composite_meta /tmp/tone-staging/tone_meta.json
+//   ./test_composite_meta /tmp/axon-staging/axon_meta.json
 
 #include "../src/composite_meta.hpp"
 
@@ -18,10 +18,10 @@
 
 int main(int argc, char** argv) {
     const char* path = (argc > 1) ? argv[1]
-                                   : std::getenv("TONE_META_JSON");
+                                   : std::getenv("AXON_META_JSON");
     if (!path) {
         std::fprintf(stderr,
-            "usage: test_composite_meta <tone_meta.json>  (or set TONE_META_JSON)\n");
+            "usage: test_composite_meta <axon_meta.json>  (or set AXON_META_JSON)\n");
         return 2;
     }
     auto m = nablafx::load_composite_meta(path);
@@ -40,27 +40,23 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "  %s (%s) [%g..%g] def=%g unit=%s\n",
                      c.id.c_str(), c.name.c_str(), c.min, c.max, c.def, c.unit.c_str());
     }
-    std::fprintf(stderr, "sat:    pre=+%g dB max, post=%g dB, wet_mix_max=%g\n",
+    std::fprintf(stderr, "sat:     pre=+%g dB max, post=%g dB, wet_mix_max=%g\n",
                  m.amt_sat.pre_gain_db_max, m.amt_sat.post_gain_db_max, m.amt_sat.wet_mix_max);
-    std::fprintf(stderr, "la2a:   PR [%g..%g], C/L=%g\n",
-                 m.amt_la2a.peak_reduction_min, m.amt_la2a.peak_reduction_max,
-                 m.amt_la2a.comp_or_limit);
-    std::fprintf(stderr, "autoeq: wet_mix_max=%g\n", m.amt_autoeq.wet_mix_max);
+    std::fprintf(stderr, "ssl_comp: wet_mix_max=%g\n", m.amt_ssl_comp.wet_mix_max);
+    std::fprintf(stderr, "autoeq:  wet_mix_max=%g\n", m.amt_autoeq.wet_mix_max);
     std::fprintf(stderr, "leveler: target_lufs=%g\n", m.leveler.target_lufs);
     std::fprintf(stderr, "ceiling: %g dBTP, %g ms LA, atk=%g rel=%g\n",
                  m.ceiling.ceiling_dbtp, m.ceiling.lookahead_ms,
                  m.ceiling.attack_ms, m.ceiling.release_ms);
 
-    assert(m.schema_version == 1);
-    assert(m.effect_name == "NeuralMastering");
+    assert(m.schema_version == 2);
+    assert(m.effect_name == "Axon");
     assert(m.sample_rate == 44100);
-    assert(m.sub_bundles.count("auto_eq") && m.sub_bundles.count("saturator")
-                                           && m.sub_bundles.count("la2a"));
-    assert(m.controls.size() == 2);
+    assert(m.sub_bundles.count("saturator") && m.sub_bundles.count("ssl_comp"));
+    assert(!m.sub_bundles.count("la2a"));
     assert(m.amt_sat.pre_gain_db_max  == 12.0f);
     assert(m.amt_sat.post_gain_db_max == -12.0f);
-    assert(m.amt_la2a.peak_reduction_min == 20.0f);
-    assert(m.amt_la2a.peak_reduction_max == 70.0f);
+    assert(m.amt_ssl_comp.wet_mix_max == 1.0f);
     assert(m.leveler.target_lufs == -14.0f);
     assert(m.ceiling.ceiling_dbtp == -1.0f);
     std::fprintf(stderr, "[composite_meta] PASS\n");

@@ -1,4 +1,4 @@
-// tone_meta.json — top-level meta for the composite TONE plugin.
+// axon_meta.json — top-level meta for the composite TONE plugin.
 //
 // Written on the Python side by ``nablafx.export.composite``; read here on
 // module load to wire the host-exposed AMT/TRM/CLS knobs to per-stage

@@ -1,5 +1,5 @@
-// tone_gui.mm
-// Objective-C++ implementation of the TONE CLAP plugin GUI bridge.
+// axon_gui.mm
+// Objective-C++ implementation of the Axon CLAP plugin GUI bridge.
 // macOS arm64, ARC enabled.
 
 #import <Cocoa/Cocoa.h>
@@ -9,20 +9,20 @@
 #include <cstdio>
 #include <cstring>
 
-#include "tone_gui.h"
+#include "axon_gui.h"
 
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
 
-@interface ToneMessageHandler : NSObject <WKScriptMessageHandler>
+@interface AxonMessageHandler : NSObject <WKScriptMessageHandler>
 @end
 
 // ---------------------------------------------------------------------------
 // Internal C++ struct (not exposed in the header)
 // ---------------------------------------------------------------------------
 
-struct ToneGUIState {
+struct AxonGUIState {
     // Callbacks into the plugin
     void*       plugin_ptr           = nullptr;
     void      (*on_param_change)(void*, const char*, float) = nullptr;
@@ -34,7 +34,7 @@ struct ToneGUIState {
     // ObjC objects kept alive under ARC via __strong
     __strong NSView*             container_view  = nil;
     __strong WKWebView*          web_view        = nil;
-    __strong ToneMessageHandler* msg_handler     = nil;
+    __strong AxonMessageHandler* msg_handler     = nil;
     __strong WKWebViewConfiguration* wk_config   = nil;
 
     // Navigation delegate (holds weak back-ref to this struct)
@@ -49,15 +49,15 @@ struct ToneGUIState {
 // Script message handler  (JS → C++)
 // ---------------------------------------------------------------------------
 
-@interface ToneMessageHandler () {
-    ToneGUIState* _state;
+@interface AxonMessageHandler () {
+    AxonGUIState* _state;
 }
-- (instancetype)initWithState:(ToneGUIState*)state;
+- (instancetype)initWithState:(AxonGUIState*)state;
 @end
 
-@implementation ToneMessageHandler
+@implementation AxonMessageHandler
 
-- (instancetype)initWithState:(ToneGUIState*)state {
+- (instancetype)initWithState:(AxonGUIState*)state {
     self = [super init];
     if (self) { _state = state; }
     return self;
@@ -103,15 +103,15 @@ struct ToneGUIState {
 // Navigation delegate  (page-loaded notification)
 // ---------------------------------------------------------------------------
 
-@interface ToneNavDelegate : NSObject <WKNavigationDelegate> {
-    ToneGUIState* _state;
+@interface AxonNavDelegate : NSObject <WKNavigationDelegate> {
+    AxonGUIState* _state;
 }
-- (instancetype)initWithState:(ToneGUIState*)state;
+- (instancetype)initWithState:(AxonGUIState*)state;
 @end
 
-@implementation ToneNavDelegate
+@implementation AxonNavDelegate
 
-- (instancetype)initWithState:(ToneGUIState*)state {
+- (instancetype)initWithState:(AxonGUIState*)state {
     self = [super init];
     if (self) { _state = state; }
     return self;
@@ -173,7 +173,7 @@ static std::string json_escape(const char* s) {
 // Public C API implementation
 // ---------------------------------------------------------------------------
 
-ToneGUIState* tone_gui_create(
+AxonGUIState* axon_gui_create(
     void*       plugin_ptr,
     const char* resources_dir,
     void      (*on_param_change)(void*, const char*, float),
@@ -181,15 +181,15 @@ ToneGUIState* tone_gui_create(
 ) {
     // Must run on the main thread
     if (!NSThread.isMainThread) {
-        __block ToneGUIState* result = nullptr;
+        __block AxonGUIState* result = nullptr;
         dispatch_sync(dispatch_get_main_queue(), ^{
-            result = tone_gui_create(plugin_ptr, resources_dir,
+            result = axon_gui_create(plugin_ptr, resources_dir,
                                      on_param_change, on_order_change);
         });
         return result;
     }
 
-    ToneGUIState* state = new ToneGUIState();
+    AxonGUIState* state = new AxonGUIState();
     state->plugin_ptr       = plugin_ptr;
     state->on_param_change  = on_param_change;
     state->on_order_change  = on_order_change;
@@ -199,8 +199,8 @@ ToneGUIState* tone_gui_create(
     WKWebViewConfiguration* config = [[WKWebViewConfiguration alloc] init];
     WKUserContentController* ucc   = [[WKUserContentController alloc] init];
 
-    ToneMessageHandler* handler = [[ToneMessageHandler alloc] initWithState:state];
-    [ucc addScriptMessageHandler:handler name:@"tone"];
+    AxonMessageHandler* handler = [[AxonMessageHandler alloc] initWithState:state];
+    [ucc addScriptMessageHandler:handler name:@"axon"];
     config.userContentController = ucc;
 
     // Allow JavaScript (macOS 11+ API; suppress deprecation on older SDKs).
@@ -229,7 +229,7 @@ ToneGUIState* tone_gui_create(
     state->web_view = wv;
 
     // --- Navigation delegate ---
-    ToneNavDelegate* navDel = [[ToneNavDelegate alloc] initWithState:state];
+    AxonNavDelegate* navDel = [[AxonNavDelegate alloc] initWithState:state];
     wv.navigationDelegate   = navDel;
     state->nav_delegate     = navDel;
 
@@ -257,13 +257,13 @@ ToneGUIState* tone_gui_create(
     return state;
 }
 
-void tone_gui_destroy(ToneGUIState* gui) {
+void axon_gui_destroy(AxonGUIState* gui) {
     if (!gui) return;
 
     auto destroy_block = ^{
         if (gui->web_view) {
             [gui->web_view.configuration.userContentController
-             removeScriptMessageHandlerForName:@"tone"];
+             removeScriptMessageHandlerForName:@"axon"];
             [gui->web_view removeFromSuperview];
             gui->web_view = nil;
         }
@@ -285,7 +285,7 @@ void tone_gui_destroy(ToneGUIState* gui) {
     delete gui;
 }
 
-bool tone_gui_set_parent(ToneGUIState* gui, void* ns_view_ptr) {
+bool axon_gui_set_parent(AxonGUIState* gui, void* ns_view_ptr) {
     if (!gui || !ns_view_ptr) return false;
 
     auto set_parent_block = ^bool{
@@ -310,28 +310,28 @@ bool tone_gui_set_parent(ToneGUIState* gui, void* ns_view_ptr) {
     }
 }
 
-void tone_gui_show(ToneGUIState* gui) {
+void axon_gui_show(AxonGUIState* gui) {
     if (!gui) return;
     auto blk = ^{ if (gui->container_view) gui->container_view.hidden = NO; };
     if (NSThread.isMainThread) blk();
     else dispatch_async(dispatch_get_main_queue(), blk);
 }
 
-void tone_gui_hide(ToneGUIState* gui) {
+void axon_gui_hide(AxonGUIState* gui) {
     if (!gui) return;
     auto blk = ^{ if (gui->container_view) gui->container_view.hidden = YES; };
     if (NSThread.isMainThread) blk();
     else dispatch_async(dispatch_get_main_queue(), blk);
 }
 
-void tone_gui_get_size(uint32_t* w, uint32_t* h) {
+void axon_gui_get_size(uint32_t* w, uint32_t* h) {
     if (w) *w = 700;
     if (h) *h = 560;
 }
 
-void tone_gui_send_init(
-    ToneGUIState*        gui,
-    const ToneParamInfo* params,
+void axon_gui_send_init(
+    AxonGUIState*        gui,
+    const AxonParamInfo* params,
     int                  n_params,
     const int*           order,
     int                  order_count
@@ -341,10 +341,10 @@ void tone_gui_send_init(
     // Build JSON: { paramMeta:{...}, paramValues:{...}, processorOrder:[...] }
     std::string js;
     js.reserve(2048);
-    js += "toneInit({\"paramMeta\":{";
+    js += "axonInit({\"paramMeta\":{";
 
     for (int i = 0; i < n_params; ++i) {
-        const ToneParamInfo& p = params[i];
+        const AxonParamInfo& p = params[i];
         if (i) js += ',';
         js += json_escape(p.id);
         js += ":{\"name\":";
@@ -370,7 +370,7 @@ void tone_gui_send_init(
 
     js += "},\"paramValues\":{";
     for (int i = 0; i < n_params; ++i) {
-        const ToneParamInfo& p = params[i];
+        const AxonParamInfo& p = params[i];
         if (i) js += ',';
         js += json_escape(p.id);
         char buf[64];
@@ -403,7 +403,7 @@ void tone_gui_send_init(
     }
 }
 
-void tone_gui_eval_js(ToneGUIState* gui, const char* js) {
+void axon_gui_eval_js(AxonGUIState* gui, const char* js) {
     if (!gui || !js) return;
     if (!NSThread.isMainThread) return;  // caller must be on main thread
     if (!gui->web_view || !gui->page_loaded) return;
@@ -411,7 +411,7 @@ void tone_gui_eval_js(ToneGUIState* gui, const char* js) {
     [gui->web_view evaluateJavaScript:nsjs completionHandler:nil];
 }
 
-void tone_gui_notify_param(ToneGUIState* gui, const char* param_id, float value) {
+void axon_gui_notify_param(AxonGUIState* gui, const char* param_id, float value) {
     if (!gui || !param_id) return;
 
     std::string id_str = param_id;
@@ -421,7 +421,7 @@ void tone_gui_notify_param(ToneGUIState* gui, const char* param_id, float value)
         if (!gui->web_view || !gui->page_loaded) return;
         char buf[256];
         snprintf(buf, sizeof(buf),
-                 "toneSetParam(%s,%g);",
+                 "axonSetParam(%s,%g);",
                  json_escape(id_str.c_str()).c_str(),
                  (double)val);
         NSString* js = [NSString stringWithUTF8String:buf];

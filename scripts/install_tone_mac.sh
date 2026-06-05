@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Turnkey installer for the composite NeuralMastering CLAP plugin on macOS (arm64).
+# Turnkey installer for the composite Axon CLAP plugin on macOS (arm64).
 #
 # Usage:
 #   scripts/install_tone_mac.sh [--bundle DIR] [--out DIR] [--no-install]
@@ -33,7 +33,7 @@ usage: $(basename "$0") [--bundle <staging_dir>] [--out <out.clap>] [--no-instal
 
   --bundle DIR    Composite staging dir (default: ./build/tone-staging or
                   ./artifacts/tone-bundle, whichever exists).
-  --out PATH      Output .clap bundle path (default: ./build/NeuralMastering.clap).
+  --out PATH      Output .clap bundle path (default: ./build/Axon.clap).
   --no-install    Build only; don't copy to ~/Library/Audio/Plug-Ins/CLAP/.
 EOF
     exit 2
@@ -46,7 +46,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE=""
-OUT="$REPO_ROOT/build/NeuralMastering.clap"
+OUT="$REPO_ROOT/build/Axon.clap"
 DO_INSTALL=1
 
 while [ $# -gt 0 ]; do
@@ -92,7 +92,7 @@ if [ ! -f "$BUNDLE/tone_meta.json" ]; then
     exit 1
 fi
 
-echo "[install_tone_mac] building NeuralMastering.clap"
+echo "[install_tone_mac] building Axon.clap"
 echo "  staging: $BUNDLE"
 echo "  out:     $OUT"
 
@@ -103,10 +103,11 @@ if [ "$DO_INSTALL" -eq 1 ]; then
     mkdir -p "$INSTALL_DIR"
     INSTALLED="$INSTALL_DIR/$(basename "$OUT")"
 
-    # Clean up stale bundles from before the TONE → NeuralMastering rename and
-    # any prior single-model dev installs. Hosts otherwise scan everything in
+    # Clean up stale bundles from prior renames (TONE → NeuralMastering → Axon)
+    # and any single-model dev installs. Hosts otherwise scan everything in
     # this directory and may load an old/broken bundle that crashes the host.
     for stale in "$INSTALL_DIR/TONE.clap" "$INSTALL_DIR/tone.clap" \
+                 "$INSTALL_DIR/NeuralMastering.clap" \
                  "$INSTALL_DIR/com.nablafx.tone_"*.clap \
                  "$INSTALL_DIR/com.nablafx.neuralmastering_"*.clap; do
         if [ -e "$stale" ] && [ "$stale" != "$INSTALLED" ]; then
@@ -119,7 +120,7 @@ if [ "$DO_INSTALL" -eq 1 ]; then
     cp -R "$OUT" "$INSTALLED"
     echo "[install_tone_mac] installed to $INSTALLED"
     echo
-    echo "Done. Restart your DAW (or rescan plug-ins) and look for NeuralMastering."
+    echo "Done. Restart your DAW (or rescan plug-ins) and look for Axon."
 else
     echo "[install_tone_mac] build complete (skipped install per --no-install)"
 fi

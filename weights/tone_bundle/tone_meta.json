@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "effect_name": "NeuralMastering",
+  "effect_name": "Axon",
   "model_id": "nm__outputs_lstm_2026-04-24-20-10-16__outputs_staticrationalnonlinearity_2026-04-25-10-32-20__outputs_parametriceq_2026-04-28-16-43-37_outputs_parametriceq_2026-04-28-19-51-35_outputs_parametriceq_2026-04-29-02-06-34_outputs_parametriceq_2026-04-28-22-59-07_outputs_parametriceq_2026-04-28-13-35-26",
   "sample_rate": 44100,
   "channels": 1,

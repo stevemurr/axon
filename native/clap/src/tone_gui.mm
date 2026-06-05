@@ -248,7 +248,7 @@ ToneGUIState* tone_gui_create(
         // Fallback: show an error page
         NSString* fallback = @"<html><body style='background:#111;color:#f66;"
                               "font-family:monospace;padding:20px'>"
-                              "<h2>NeuralMastering GUI</h2>"
+                              "<h2>Axon GUI</h2>"
                               "<p>Could not load index.html from resources.</p>"
                               "</body></html>";
         [wv loadHTMLString:fallback baseURL:nil];

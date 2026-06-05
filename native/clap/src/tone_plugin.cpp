@@ -294,7 +294,7 @@ struct ModuleState {
                                                        // tone_meta.sub_bundles
                                                        // has "ssl_comp"
     bool                       ssl_comp_loaded{false};
-    std::string                bundle_dir;            // .../NeuralMastering.clap/Contents
+    std::string                bundle_dir;            // .../Axon.clap/Contents
     std::string                resources_dir;         // .../Contents/Resources
     std::string                plugin_id_str;         // "com.nablafx.<model_id>"
     clap_plugin_descriptor_t   descriptor{};
@@ -346,7 +346,7 @@ static void populate_descriptor_(ModuleState& st) {
     st.descriptor.manual_url   = "";
     st.descriptor.support_url  = "";
     st.descriptor.version      = "1.0.0";
-    st.descriptor.description  = "NeuralMastering — adaptive mastering chain (auto-EQ + saturator + LA-2A + leveler + ceiling)";
+    st.descriptor.description  = "Axon — adaptive mastering chain (auto-EQ + saturator + LA-2A + leveler + ceiling)";
     st.descriptor.features     = st.feature_ptrs.data();
 }
 

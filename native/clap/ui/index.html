@@ -19,7 +19,7 @@
   }
 
   html, body {
-    width: 700px; height: 560px;
+    width: 820px; height: 560px;
     overflow: hidden;
     background: var(--bg);
     color: var(--text);
@@ -47,17 +47,6 @@
     color: var(--text);
   }
   #logo span { color: var(--accent); }
-  #header-trim {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  #header-trim .trim-label {
-    font-size: 10px;
-    color: var(--dim);
-    letter-spacing: 0.1em;
-  }
-
   /* ── Chain strip ─────────────────────────────────────────── */
   #chain {
     display: flex;
@@ -291,35 +280,133 @@
     text-transform: uppercase;
   }
 
+  /* ── Sat filter display ─────────────────────────────────── */
+  #sat-filter-wrap {
+    display: none;
+    margin-top: 14px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: #0d0d0d;
+  }
+  #sat-filter-canvas { display: block; }
+
   /* ── Layout shell ────────────────────────────────────────── */
   #app {
     display: flex;
     flex-direction: column;
-    width: 700px;
+    width: 820px;
     height: 560px;
   }
+  /* ── Body row: main column + right-side meter panel ───────── */
+  #body-row {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
+  #main-col {
+    width: 700px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  /* ── Meter panel ─────────────────────────────────────────── */
+  #meter-panel {
+    width: 120px;
+    flex-shrink: 0;
+    background: #0d0d0d;
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 8px 8px 10px;
+    gap: 8px;
+  }
+  #meter-title {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: var(--dim);
+    text-align: center;
+  }
+  #meter-modes {
+    display: flex;
+    gap: 3px;
+  }
+  .meter-mode {
+    flex: 1;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-align: center;
+    padding: 4px 0;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 3px;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .meter-mode.on {
+    color: #0d0d0d;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  #meter-canvas { display: block; width: 104px; height: 360px; }
+  #meter-readouts {
+    display: flex;
+    gap: 6px;
+  }
+  .meter-ro {
+    flex: 1;
+    text-align: center;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 4px 0 5px;
+    background: #141414;
+  }
+  .meter-ro .lbl { font-size: 8px; color: var(--dim); letter-spacing: 0.1em; }
+  .meter-ro .val { font-size: 14px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+  .meter-ro .val.in-zone { color: var(--accent); }
 </style>
 </head>
 <body>
 <div id="app">
   <div id="header">
     <div id="logo">A<span>X</span>ON</div>
-    <div id="header-trim">
-      <span class="trim-label">TRIM</span>
-      <div id="trim-knob-slot"></div>
+  </div>
+  <div id="body-row">
+   <div id="main-col">
+    <div id="chain"></div>
+    <div id="spectrum-view">
+      <canvas id="spectrum-canvas" width="676" height="148"></canvas>
+      <button id="eq-view-toggle" title="Toggle EQ view">
+        <span id="eq-view-curve" class="active">CURVE</span><span id="eq-view-bins">BINS</span>
+      </button>
     </div>
-  </div>
-  <div id="chain"></div>
-  <div id="spectrum-view">
-    <canvas id="spectrum-canvas" width="676" height="148"></canvas>
-    <button id="eq-view-toggle" title="Toggle EQ view">
-      <span id="eq-view-curve" class="active">CURVE</span><span id="eq-view-bins">BINS</span>
-    </button>
-  </div>
-  <div id="surface">
+    <div id="surface">
     <div id="surface-title">SELECT A PROCESSOR</div>
     <div id="controls"></div>
-  </div>
+    <div id="sat-filter-wrap">
+      <canvas id="sat-filter-canvas" width="660" height="108"></canvas>
+    </div>
+    </div>
+   </div><!-- /main-col -->
+   <div id="meter-panel">
+     <div id="meter-title">LEVELS</div>
+     <div id="meter-modes">
+       <div class="meter-mode on" data-mode="lufs">LUFS</div>
+       <div class="meter-mode" data-mode="rms">RMS</div>
+       <div class="meter-mode" data-mode="peak">PEAK</div>
+     </div>
+     <canvas id="meter-canvas" width="208" height="720"></canvas>
+     <div id="meter-readouts">
+       <div class="meter-ro"><div class="lbl">IN</div><div class="val" id="meter-in-val">–</div></div>
+       <div class="meter-ro"><div class="lbl">OUT</div><div class="val" id="meter-out-val">–</div></div>
+     </div>
+   </div><!-- /meter-panel -->
+  </div><!-- /body-row -->
 </div>
 
 <script>
@@ -328,18 +415,17 @@
 // ============================================================
 
 const PROCESSORS = [
-  { id: 0, name: 'IN LEVEL',  params: ['LVL', 'LVT'],              wetParams: ['LVL'] },
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
-  { id: 2, name: 'SATURATOR', params: ['SDR', 'SVO', 'SMX', 'SHF', 'STH', 'SBS'], wetParams: ['SMX'] },
-  { id: 3, name: 'OUT LEVEL', params: ['OLV', 'OLT'],              wetParams: ['OLV'] },
+  { id: 2, name: 'SATURATOR', params: ['SDR', 'SVO', 'SMX', 'STH', 'SBS'], wetParams: ['SMX'] },
   { id: 4, name: 'BUS COMP',  params: ['SSC'],                     wetParams: ['SSC'] },
+  { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS'], wetParams: ['MLI'] },
 ];
 
 // Runtime state
 let paramMeta   = {};   // id → { name, min, max, def, unit }
 let paramValues = {};   // id → float
-let procOrder   = [0,1,2,3,4,5,6];
-let selectedProc = 0;
+let procOrder   = [1,2,4,5];
+let selectedProc = 1;
 
 // ============================================================
 // VALUE FORMATTING
@@ -377,7 +463,7 @@ function prettyEnum(s) {
 // ============================================================
 
 function sendParam(id, value) {
-  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tone) {
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.axon) {
     window.webkit.messageHandlers.axon.postMessage({ type: 'setParam', id, value });
   }
   paramValues[id] = value;
@@ -385,9 +471,12 @@ function sendParam(id, value) {
   refreshChain();
 }
 
-function sendOrderToHost(order) {
-  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tone) {
-    window.webkit.messageHandlers.axon.postMessage({ type: 'reorder', order });
+function sendOrderToHost(visibleOrder) {
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.axon) {
+    // C++ expects all kNumStages=5 IDs. InputLeveler(0) always first,
+    // OutputLeveler(3) always last; visible stages reorder in between.
+    const fullOrder = [0, ...visibleOrder, 3];
+    window.webkit.messageHandlers.axon.postMessage({ type: 'reorder', order: fullOrder });
   }
 }
 
@@ -639,10 +728,12 @@ function renderSurface() {
   const proc = PROCESSORS.find(p => p.id === selectedProc);
   const title = document.getElementById('surface-title');
   const controls = document.getElementById('controls');
+  const satWrap = document.getElementById('sat-filter-wrap');
   controls.innerHTML = '';
 
   if (!proc) {
     title.textContent = 'SELECT A PROCESSOR';
+    satWrap.style.display = 'none';
     return;
   }
 
@@ -652,7 +743,223 @@ function renderSurface() {
     const ctrl = buildControl(id);
     if (ctrl) controls.appendChild(ctrl);
   }
+
+  const showFilter = selectedProc === 2;
+  satWrap.style.display = showFilter ? 'block' : 'none';
+  if (showFilter) drawSatFilter();
 }
+
+// ============================================================
+// SAT FILTER DISPLAY
+// ============================================================
+
+const SAT_FLO = 20, SAT_FHI = 20000, SAT_SR = 44100;
+
+function satFreqToX(f, W) {
+  return (Math.log10(f / SAT_FLO) / Math.log10(SAT_FHI / SAT_FLO)) * W;
+}
+function satXToFreq(x, W) {
+  return SAT_FLO * Math.pow(SAT_FHI / SAT_FLO, Math.max(0, Math.min(1, x / W)));
+}
+
+let satFilterDrag = null; // 'HPF' | 'LPF' | null
+
+function drawSatFilter() {
+  const canvas = document.getElementById('sat-filter-canvas');
+  if (!canvas) return;
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, W, H);
+
+  const DB_BOT = -48;
+  const freqToX = f => satFreqToX(f, W);
+  const dbToY   = db => (db / DB_BOT) * H;  // 0 dB → top (y=0), -48 dB → bottom (y=H)
+
+  // Vertical frequency grid
+  ctx.strokeStyle = '#1c1c1c';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  [50, 100, 200, 500, 1000, 2000, 5000, 10000].forEach(f => {
+    const x = Math.round(freqToX(f)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  });
+
+  // Horizontal dB grid
+  ctx.strokeStyle = '#191919';
+  [-12, -24, -36].forEach(db => {
+    const y = Math.round(dbToY(db)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  });
+
+  // Labels — frequency
+  ctx.font = '8px -apple-system, sans-serif';
+  ctx.fillStyle = '#2e2e2e';
+  ctx.textAlign = 'center';
+  [[100,'100'],[1000,'1k'],[10000,'10k']].forEach(([f, lbl]) => {
+    ctx.fillText(lbl, freqToX(f), H - 3);
+  });
+  // Labels — dB
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#2e2e2e';
+  [[-12,'-12'],[-24,'-24']].forEach(([db, lbl]) => {
+    ctx.fillText(lbl, 3, dbToY(db) - 2);
+  });
+
+  // ── 1st-order bilinear HPF coefficients (matches C++) ─────
+  const hpfHz = paramValues['SHF'] ?? (paramMeta['SHF']?.def ?? 20);
+  const hK = Math.tan(Math.PI * hpfHz / SAT_SR);
+  const hn = 1 / (1 + hK);
+  const hB0 = hn, hB1 = -hn, hA1 = (hK - 1) * hn;
+
+  // ── 1st-order bilinear LPF coefficients ───────────────────
+  const lpfHz = paramValues['SLF'] ?? (paramMeta['SLF']?.def ?? 20000);
+  const lK = Math.tan(Math.PI * lpfHz / SAT_SR);
+  const ln = 1 / (1 + lK);
+  const lB0 = lK * ln, lB1 = lK * ln, lA1 = (lK - 1) * ln;
+
+  // 1st-order freq response (b2=a2=0 reduces to this form)
+  function fo1Db(f, b0, b1, a1) {
+    const w  = 2 * Math.PI * f / SAT_SR;
+    const cw = Math.cos(w), sw = Math.sin(w);
+    const nR = b0 + b1 * cw, nI = b1 * sw;
+    const dR = 1  + a1 * cw, dI = a1 * sw;
+    return 10 * Math.log10(Math.max((nR*nR+nI*nI)/(dR*dR+dI*dI), 1e-20));
+  }
+
+  const NPTS = 300;
+  const xs = new Float32Array(NPTS);
+  const ys = new Float32Array(NPTS);
+  for (let i = 0; i < NPTS; i++) {
+    const f  = SAT_FLO * Math.pow(SAT_FHI / SAT_FLO, i / (NPTS - 1));
+    const db = fo1Db(f, hB0, hB1, hA1) + fo1Db(f, lB0, lB1, lA1);
+    xs[i] = freqToX(f);
+    ys[i] = dbToY(Math.max(DB_BOT, db));
+  }
+
+  // Stopband fill (above curve → subtle warm tint; regions below 0 dB where signal is cut)
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  for (let i = 0; i < NPTS; i++) ctx.lineTo(xs[i], ys[i]);
+  ctx.lineTo(W, 0);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(231,111,81,0.08)';
+  ctx.fill();
+
+  // Passband fill (below curve → teal tint; region where signal passes through at ~0 dB)
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for (let i = 0; i < NPTS; i++) ctx.lineTo(xs[i], ys[i]);
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(42,157,143,0.12)';
+  ctx.fill();
+
+  // Curve line
+  ctx.save();
+  ctx.shadowBlur  = 6;
+  ctx.shadowColor = '#2a9d8f';
+  ctx.strokeStyle = '#2a9d8f';
+  ctx.lineWidth   = 1.5;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  for (let i = 0; i < NPTS; i++) i === 0 ? ctx.moveTo(xs[i], ys[i]) : ctx.lineTo(xs[i], ys[i]);
+  ctx.stroke();
+  ctx.restore();
+
+  // Dashed verticals at cutoffs
+  const hpfX = freqToX(hpfHz);
+  const lpfX = freqToX(lpfHz);
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+
+  ctx.strokeStyle = 'rgba(42,157,143,0.45)';
+  ctx.beginPath(); ctx.moveTo(hpfX + 0.5, 0); ctx.lineTo(hpfX + 0.5, H); ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(231,111,81,0.45)';
+  ctx.beginPath(); ctx.moveTo(lpfX + 0.5, 0); ctx.lineTo(lpfX + 0.5, H); ctx.stroke();
+
+  ctx.setLineDash([]);
+
+  // Drag handles — circles at top of each cutoff line
+  const HR = 5;
+  ctx.lineWidth = 1.5;
+
+  ctx.fillStyle   = 'rgba(42,157,143,0.85)';
+  ctx.strokeStyle = '#2a9d8f';
+  ctx.beginPath(); ctx.arc(hpfX, HR + 2, HR, 0, 2 * Math.PI);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle   = 'rgba(231,111,81,0.85)';
+  ctx.strokeStyle = '#e76f51';
+  ctx.beginPath(); ctx.arc(lpfX, HR + 2, HR, 0, 2 * Math.PI);
+  ctx.fill(); ctx.stroke();
+
+  // Cutoff frequency labels (below handle)
+  ctx.font = '8px -apple-system, sans-serif';
+  ctx.fillStyle = 'rgba(42,157,143,0.85)';
+  const hpfLbl = hpfHz < 1000 ? `${Math.round(hpfHz)} Hz` : `${(hpfHz/1000).toFixed(1)} kHz`;
+  ctx.textAlign = hpfX > W * 0.85 ? 'right' : 'left';
+  ctx.fillText(hpfLbl, hpfX + (hpfX > W * 0.85 ? -7 : 7), 22);
+
+  ctx.fillStyle = 'rgba(231,111,81,0.85)';
+  const lpfLbl = lpfHz < 1000 ? `${Math.round(lpfHz)} Hz` : `${(lpfHz/1000).toFixed(1)} kHz`;
+  ctx.textAlign = lpfX < W * 0.15 ? 'left' : 'right';
+  ctx.fillText(lpfLbl, lpfX + (lpfX < W * 0.15 ? 7 : -7), 22);
+
+  // Corner tags
+  ctx.font = '7px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#333';
+  ctx.fillText('HPF', 5, 10);
+  ctx.textAlign = 'right';
+  ctx.fillText('LPF', W - 5, 10);
+}
+
+// Drag interactivity for sat filter canvas
+(function() {
+  const canvas = document.getElementById('sat-filter-canvas');
+  if (!canvas) return;
+
+  function clientToCanvasX(e) {
+    const rect = canvas.getBoundingClientRect();
+    return (e.clientX - rect.left) * canvas.width / rect.width;
+  }
+  function hitTest(cx) {
+    const hpfHz = paramValues['SHF'] ?? (paramMeta['SHF']?.def ?? 20);
+    const lpfHz = paramValues['SLF'] ?? (paramMeta['SLF']?.def ?? 20000);
+    if (Math.abs(cx - satFreqToX(hpfHz, canvas.width)) < 14) return 'HPF';
+    if (Math.abs(cx - satFreqToX(lpfHz, canvas.width)) < 14) return 'LPF';
+    return null;
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    satFilterDrag = hitTest(clientToCanvasX(e));
+    if (satFilterDrag) e.preventDefault();
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    const cx = clientToCanvasX(e);
+    canvas.style.cursor = (hitTest(cx) || satFilterDrag) ? 'ew-resize' : 'default';
+    if (!satFilterDrag) return;
+    const f = satXToFreq(cx, canvas.width);
+    if (satFilterDrag === 'HPF') {
+      const m = paramMeta['SHF'];
+      const v = Math.max(m?.min ?? 20, Math.min(m?.max ?? 500, f));
+      paramValues['SHF'] = v;
+      sendParam('SHF', v);
+    } else {
+      const m = paramMeta['SLF'];
+      const v = Math.max(m?.min ?? 1000, Math.min(m?.max ?? 20000, f));
+      paramValues['SLF'] = v;
+      sendParam('SLF', v);
+    }
+    drawSatFilter();
+  });
+
+  window.addEventListener('mouseup', () => { satFilterDrag = null; });
+})();
 
 // ============================================================
 // CHAIN STRIP
@@ -747,33 +1054,16 @@ function refreshChain() {
 }
 
 // ============================================================
-// HEADER TRIM KNOB
-// ============================================================
-
-function renderTrimKnob() {
-  const slot = document.getElementById('trim-knob-slot');
-  const ctrl = buildControl('TRM');
-  if (ctrl && slot) {
-    slot.innerHTML = '';
-    slot.appendChild(ctrl);
-  }
-}
-
-function refreshTrimKnob() {
-  refreshKnob('TRM');
-}
-
-// ============================================================
 // PUBLIC API  (called from C++ via evaluateJavaScript)
 // ============================================================
 
 window.axonInit = function(state) {
   paramMeta   = state.paramMeta   || {};
   paramValues = state.paramValues || {};
-  procOrder   = state.processorOrder || [0,1,2,3,4,5,6];
-  selectedProc = procOrder[0] ?? 0;
+  const VISIBLE = new Set(PROCESSORS.map(p => p.id));
+  procOrder   = (state.processorOrder || [1,2,4,5]).filter(id => VISIBLE.has(id));
+  selectedProc = procOrder[0] ?? 1;
 
-  renderTrimKnob();
   renderChain();
   renderSurface();
 };
@@ -844,7 +1134,7 @@ window.axonInit = function(state) {
 
     // Center Y = 0 dB reference.
     const CY = H / 2;
-    const DB_RANGE = 6;  // ±6 dB fills the full height
+    const DB_RANGE = 12;  // ±12 dB fills the full height
     function deltaToY(db) {
       return CY - clamp(db / DB_RANGE, -1, 1) * CY;
     }
@@ -858,9 +1148,9 @@ window.axonInit = function(state) {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
     });
 
-    // Horizontal dB grid (±2, ±4).
+    // Horizontal dB grid (±4, ±8).
     ctx.strokeStyle = '#191919';
-    [-4, -2, 2, 4].forEach(db => {
+    [-8, -4, 4, 8].forEach(db => {
       const y = Math.round(deltaToY(db)) + 0.5;
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     });
@@ -873,7 +1163,7 @@ window.axonInit = function(state) {
       ctx.fillText(label, freqToX(f, W), H - 14);
     });
     ctx.textAlign = 'left';
-    [[4,'+4'], [-4,'-4']].forEach(([db, label]) => {
+    [[8,'+8'], [-8,'-8']].forEach(([db, label]) => {
       ctx.fillText(label, 3, deltaToY(db) + (db > 0 ? -2 : 9));
     });
     ctx.fillText('0', 3, CY - 2);
@@ -1099,13 +1389,137 @@ window.axonInit = function(state) {
   };
 })();
 
+// ============================================================
+// LEVEL METERS  (IN / OUT — LUFS / RMS / PEAK)
+// ============================================================
+(function() {
+  const canvas = document.getElementById('meter-canvas');
+  const ctx    = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;   // backing pixels (208 × 720)
+
+  // Per-mode scale + which field of the meter payload drives it.
+  const MODES = {
+    lufs: { field: 'lufs_s', min: -36, max: 0, step: 6, unit: 'LUFS' },
+    rms:  { field: 'rms',    min: -48, max: 0, step: 6, unit: 'dB'   },
+    peak: { field: 'peak',   min: -48, max: 0, step: 6, unit: 'dB'   },
+  };
+  // Mastering target window (LUFS).
+  const TGT_LO = -14, TGT_HI = -11;
+
+  let mode = localStorage.getItem('meterMode') || 'lufs';
+  let last = null;   // most recent payload
+
+  const PAD_T = 16, PAD_B = 30, PAD_L = 30, PAD_R = 8;
+  const barTop = PAD_T, barBot = H - PAD_B, barH = barBot - barTop;
+  const areaL  = PAD_L, areaR = W - PAD_R, areaW = areaR - areaL;
+  const gap = 14;
+  const barW = (areaW - gap) / 2;
+
+  function yFor(db, m) {
+    const v = Math.max(m.min, Math.min(m.max, db));
+    return barTop + (m.max - v) / (m.max - m.min) * barH;
+  }
+  function fillColor(db) {
+    if (mode === 'lufs') {
+      if (db >= TGT_LO && db <= TGT_HI) return '#4cc9a8';   // in target
+      if (db > TGT_HI) return '#e76f51';                    // too loud
+      return '#37726f';                                     // below target
+    }
+    if (db >= -1) return '#e76f51';
+    if (db >= -6) return '#e9c46a';
+    return '#4cc9a8';
+  }
+
+  function drawBar(x, db, label, m) {
+    // Track.
+    ctx.fillStyle = '#181818';
+    ctx.fillRect(x, barTop, barW, barH);
+    // Fill from bottom to value.
+    if (db > m.min) {
+      const y = yFor(db, m);
+      ctx.fillStyle = fillColor(db);
+      ctx.fillRect(x, y, barW, barBot - y);
+    }
+    // Bar outline.
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, barTop + 0.5, barW - 1, barH - 1);
+    // Column label.
+    ctx.fillStyle = '#888';
+    ctx.font = '700 13px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, x + barW / 2, H - 10);
+  }
+
+  function draw() {
+    const m = MODES[mode];
+    ctx.clearRect(0, 0, W, H);
+
+    // dB grid + labels.
+    ctx.font = '11px -apple-system, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let db = m.max; db >= m.min; db -= m.step) {
+      const y = yFor(db, m);
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath(); ctx.moveTo(areaL, y); ctx.lineTo(areaR, y); ctx.stroke();
+      ctx.fillStyle = '#666';
+      ctx.fillText(String(db), areaL - 4, y);
+    }
+
+    // LUFS target zone band (-14 … -11).
+    if (mode === 'lufs') {
+      const yHi = yFor(TGT_HI, m), yLo = yFor(TGT_LO, m);
+      ctx.fillStyle = 'rgba(76,201,168,0.16)';
+      ctx.fillRect(areaL, yHi, areaW, yLo - yHi);
+      ctx.strokeStyle = 'rgba(76,201,168,0.55)';
+      ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(areaL, yHi); ctx.lineTo(areaR, yHi); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(areaL, yLo); ctx.lineTo(areaR, yLo); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    const di = last ? last.in  : null;
+    const dop = last ? last.out : null;
+    const vIn  = di  ? di[m.field]  : m.min;
+    const vOut = dop ? dop[m.field] : m.min;
+    drawBar(areaL,             vIn,  'IN',  m);
+    drawBar(areaL + barW + gap, vOut, 'OUT', m);
+
+    // Numeric readouts under the canvas.
+    const inZone = v => (mode === 'lufs' && v >= TGT_LO && v <= TGT_HI);
+    const fmt = v => (v <= m.min + 0.01 || v <= -119) ? '–∞' : v.toFixed(1);
+    const elI = document.getElementById('meter-in-val');
+    const elO = document.getElementById('meter-out-val');
+    elI.textContent = fmt(vIn);
+    elO.textContent = fmt(vOut);
+    elI.classList.toggle('in-zone', inZone(vIn));
+    elO.classList.toggle('in-zone', inZone(vOut));
+  }
+
+  // Mode buttons.
+  document.querySelectorAll('.meter-mode').forEach(btn => {
+    if (btn.dataset.mode === mode) btn.classList.add('on');
+    else btn.classList.remove('on');
+    btn.addEventListener('click', () => {
+      mode = btn.dataset.mode;
+      localStorage.setItem('meterMode', mode);
+      document.querySelectorAll('.meter-mode').forEach(b =>
+        b.classList.toggle('on', b.dataset.mode === mode));
+      draw();
+    });
+  });
+
+  draw();   // empty grid on init
+
+  window.axonMeters = function(data) {
+    last = data;
+    draw();
+  };
+})();
+
 window.axonSetParam = function(id, value) {
   paramValues[id] = value;
-
-  if (id === 'TRM') {
-    refreshTrimKnob();
-    return;
-  }
 
   // Refresh knob, toggle, or enum picker in the control surface
   if (document.querySelector(`.knob-wrap[data-id="${id}"]`)) {
@@ -1115,6 +1529,8 @@ window.axonSetParam = function(id, value) {
   } else if (document.querySelector(`.enum-wrap[data-id="${id}"]`)) {
     refreshEnum(id);
   }
+
+  if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
 
   refreshChain();
 };

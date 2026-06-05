@@ -80,6 +80,15 @@
       "skew": 1.0,
       "unit": "Hz"
     },
+    "SLF": {
+      "id": "SLF",
+      "name": "Sat LPF",
+      "min": 1000.0,
+      "max": 20000.0,
+      "default": 20000.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
     "STH": {
       "id": "STH",
       "name": "Sat Thresh",
@@ -178,6 +187,51 @@
       "default": 0.0,
       "skew": 1.0,
       "unit": "dB"
+    },
+    "MLI": {
+      "id": "MLI",
+      "name": "Limiter",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 1.0,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "MLC": {
+      "id": "MLC",
+      "name": "Ceiling",
+      "min": -12.0,
+      "max": 0.0,
+      "default": -1.0,
+      "skew": 1.0,
+      "unit": "dBFS"
+    },
+    "MLD": {
+      "id": "MLD",
+      "name": "Drive",
+      "min": 0.0,
+      "max": 24.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "dB"
+    },
+    "MLG": {
+      "id": "MLG",
+      "name": "Adaptive Gain",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.5,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "MLS": {
+      "id": "MLS",
+      "name": "Adaptive Speed",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.5,
+      "skew": 1.0,
+      "unit": ""
     }
   },
   "amount_mapping": {

@@ -49,7 +49,9 @@
 #include "dimension_d.hpp"
 #include "lufs_leveler.hpp"
 #include "meta.hpp"
+#include "meter.hpp"
 #include "param_id.hpp"
+#include "mel_limiter.hpp"
 #include "rational_a.hpp"
 #include "spectral_mask_eq.hpp"
 #include "true_peak_ceiling.hpp"
@@ -76,7 +78,7 @@ using nablafx::param_id_for;
 // processor's TVFiLM cond_block_size. Changing this requires re-exporting both
 // ONNX bundles at the new block size.
 constexpr int kBlockSize  = 128;
-constexpr int kNumStages  = 5;
+constexpr int kNumStages  = 6;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
 // 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
@@ -96,6 +98,7 @@ enum class StageID : int {
     Saturator     = 2,
     OutputLeveler = 3,
     SslComp       = 4,
+    MelLimiter    = 5,
 };
 
 // ---------------------------------------------------------------------------
@@ -576,6 +579,10 @@ struct ChannelChain {
     float sat_hpf_fc{-1.f};               // cached cutoff; -1 = stale
     float sat_hpf_b0{0.f}, sat_hpf_b1{0.f}, sat_hpf_a1{0.f};
     float sat_hpf_x1{0.f}, sat_hpf_y1{0.f};
+    // 1st-order LPF for treble-limited saturation (bilinear transform).
+    float sat_lpf_fc{-1.f};
+    float sat_lpf_b0{0.f}, sat_lpf_b1{0.f}, sat_lpf_a1{0.f};
+    float sat_lpf_x1{0.f}, sat_lpf_y1{0.f};
     // SSL-style bus comp (separate stage from LA-2A). Stateless long-RF
     // causal TCN: needs a trace_len-sized input ring per channel because the
     // ORT call expects all RF samples of context per invocation. Allocated
@@ -634,8 +641,12 @@ struct Plugin {
     // ~500 ms regardless of host sr. Attack is instantaneous.
     float                autoeq_env_decay{0.f};
 
+    // Multiband adaptive limiter (stereo, initialized at activate).
+    nablafx::MelLimiter  mel_limiter;
+
     // Processor ordering — driven by GUI drag-and-drop.
-    std::array<int, kNumStages> processor_order{0, 1, 2, 3, 4};
+    // Default: InputLeveler → AutoEQ → Saturator → SslComp → MelLimiter → OutputLeveler
+    std::array<int, kNumStages> processor_order{0, 1, 2, 4, 5, 3};
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -650,7 +661,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{0,1,2,3,4};
+    std::array<int,kNumStages> pending_order{0,1,2,4,5,3};
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -665,6 +676,14 @@ struct Plugin {
 
     // Spectrum analyzer (audio thread accumulates, main thread computes + renders).
     SpectrumAnalyzer spectrum;
+
+    // In/out level meters (audio thread updates; published to UI via atomics).
+    nablafx::LoudnessMeter  meter_in;
+    nablafx::LoudnessMeter  meter_out;
+    std::atomic<float> m_in_lufs_s{-120.f}, m_in_lufs_m{-120.f},
+                       m_in_rms{-120.f},    m_in_peak{-120.f};
+    std::atomic<float> m_out_lufs_s{-120.f}, m_out_lufs_m{-120.f},
+                       m_out_rms{-120.f},    m_out_peak{-120.f};
 
     // Shared levelers — input and output, both apply linked L/R gain.
     LufsLeveler              leveler;
@@ -790,7 +809,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
     uint32_t lat = kBlockSize;
     lat += static_cast<uint32_t>(plug.chains[0].ceiling.latency_samples());
 
-    float eq_wet = 0.f, ssc_wet = 0.f;
+    float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f;
     int   cls_idx = 0;
     for (size_t i = 0; i < plug.meta->controls.size(); ++i) {
         const auto& c = plug.meta->controls[i];
@@ -798,6 +817,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
         if      (c.id == "EQ")  eq_wet  = v;
         else if (c.id == "SSC") ssc_wet = v;
         else if (c.id == "CLS") cls_idx = static_cast<int>(std::lround(v));
+        else if (c.id == "MLI") ml_wet  = v;
     }
 
     if (eq_wet > 0.f && !g_state->autoeq_dsp_per_class.empty()) {
@@ -812,6 +832,9 @@ static uint32_t compute_latency_(const Plugin& plug) {
 
     if (g_state->ssl_comp_loaded && ssc_wet > 0.f)
         lat += static_cast<uint32_t>(kSslHop - kBlockSize);
+
+    if (ml_wet > 0.f)
+        lat += static_cast<uint32_t>(nablafx::MelLimiter::kLatency);
 
     return lat;
 }
@@ -920,6 +943,8 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     });
     plug->out_leveler.reset(sample_rate, g_state->axon_meta.leveler.target_lufs);
 
+    plug->mel_limiter.init(static_cast<int>(sample_rate));
+
     // Seed active class from CLS control; clamp to a valid class index.
     {
         const auto& classes = g_state->axon_meta.auto_eq.class_order;
@@ -1009,6 +1034,8 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     }
 
     plug->spectrum.init();
+    plug->meter_in.reset(plug->sample_rate);
+    plug->meter_out.reset(plug->sample_rate);
 
     plug->current_latency.store(compute_latency_(*plug), std::memory_order_relaxed);
     plug->activated = true;
@@ -1028,6 +1055,9 @@ static void plugin_reset(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     plug->leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
     plug->out_leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
+    plug->mel_limiter.reset();
+    plug->meter_in.reset(plug->sample_rate);
+    plug->meter_out.reset(plug->sample_rate);
     for (auto& ch : plug->chains) {
         for (auto& s : ch.autoeq_ort_per_class) {
             if (s) s->reset_state();
@@ -1053,16 +1083,18 @@ struct AmountSnapshot {
     float out_lvl_wet, out_lvl_target_lufs;
     float autoeq_wet_mix;
     int   autoeq_cls_idx;
-    float sat_pre_db, sat_post_db, sat_wet_mix, sat_hpf_hz, sat_thresh_lin, sat_bias;
+    float sat_pre_db, sat_post_db, sat_wet_mix, sat_hpf_hz, sat_lpf_hz, sat_thresh_lin, sat_bias;
     float trim_lin;
     float eq_range;
     float eq_boost_scale;
     float eq_speed_ms;
     float ssl_comp_wet;
+    float ml_wet, ml_ceiling_lin, ml_drive_lin, ml_adaptive_gain, ml_adaptive_speed;
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
-    float lvl=1.f,lvt=-14.f,sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,sth=0.f,sbs=0.f;
+    float lvl=1.f,lvt=-14.f,sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
+    float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f;
     float eq=0.5f,trm_db=0.f;
     float olv=1.f,olt=-14.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
@@ -1073,7 +1105,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         float v=std::clamp(plug.control_values[i],c.min,c.max);
         if(c.id=="LVL") lvl=v; else if(c.id=="LVT") lvt=v;
         else if(c.id=="SDR") sdr=v; else if(c.id=="SVO") svo=v;
-        else if(c.id=="SMX") smx=v; else if(c.id=="SHF") shf=v;
+        else if(c.id=="SMX") smx=v; else if(c.id=="SHF") shf=v; else if(c.id=="SLF") slf=v;
         else if(c.id=="STH") sth=v; else if(c.id=="SBS") sbs=v;
         else if(c.id=="EQ")  eq=v;
         else if(c.id=="CLS") cls_idx=static_cast<int>(std::lround(v));
@@ -1083,11 +1115,14 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="OLT") olt=v;
         else if(c.id=="TRM") trm_db=v;
         else if(c.id=="SSC") ssc=v;
+        else if(c.id=="MLI") mli=v; else if(c.id=="MLC") mlc=v;
+        else if(c.id=="MLD") mld=v;
+        else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
     }
     AmountSnapshot s{};
     s.lvl_wet=lvl; s.lvl_target_lufs=lvt;
     s.out_lvl_wet=olv; s.out_lvl_target_lufs=olt;
-    s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf;
+    s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf; s.sat_lpf_hz=slf;
     s.sat_thresh_lin=std::pow(10.f, sth/20.f); s.sat_bias=sbs;
     s.autoeq_wet_mix=eq*g_state->axon_meta.amt_autoeq.wet_mix_max;
     const int n_cls = static_cast<int>(g_state->axon_meta.auto_eq.class_order.size());
@@ -1097,6 +1132,11 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.eq_boost_scale=eqb;
     s.eq_speed_ms=eqs;
     s.ssl_comp_wet = ssc * g_state->axon_meta.amt_ssl_comp.wet_mix_max;
+    s.ml_wet            = mli;
+    s.ml_ceiling_lin    = std::pow(10.f, mlc / 20.f);  // dBFS → linear
+    s.ml_drive_lin      = std::pow(10.f, mld / 20.f);  // dB → linear gain
+    s.ml_adaptive_gain  = mlg;
+    s.ml_adaptive_speed = mls;
     return s;
 }
 
@@ -1118,6 +1158,10 @@ void flush_chain_block_(Plugin& plug,
                         const AmountSnapshot& amt) {
 
     std::array<float,kBlockSize> dry{}, wet_a{}, wet_b{};
+
+    // Meter the raw plugin input (pre-chain).
+    plug.meter_in.process(work_l, (n_ch >= 2 ? work_r : nullptr),
+                          static_cast<int>(n_ch), kBlockSize);
 
     for (int pos = 0; pos < kNumStages; ++pos) {
         const int stage_idx = plug.processor_order[pos];
@@ -1214,9 +1258,10 @@ void flush_chain_block_(Plugin& plug,
         case StageID::Saturator: {
             const float pre  = std::pow(10.f, amt.sat_pre_db / 20.f);
             const float pst  = std::pow(10.f, amt.sat_post_db / 20.f);
-            const float T    = amt.sat_thresh_lin;     // input axis scale (unity = 1.0)
+            const float T    = amt.sat_thresh_lin;
             const float invT = 1.f / T;
             const bool  use_hpf = amt.sat_hpf_hz > 21.f;
+            const bool  use_lpf = amt.sat_lpf_hz < 19000.f;
             float* ch_buf[2] = {work_l, work_r};
             for (uint32_t ch = 0; ch < n_ch; ++ch) {
                 float* blk   = ch_buf[ch];
@@ -1224,9 +1269,8 @@ void flush_chain_block_(Plugin& plug,
                 // DC offset introduced by bias; subtracted after eval to keep output AC.
                 const float dc = static_cast<float>(
                     chain.saturator.eval(static_cast<double>(amt.sat_bias)));
-                if (use_hpf) {
-                    // Recompute 1st-order bilinear HPF coefficients when fc changes.
-                    if (std::abs(amt.sat_hpf_hz - chain.sat_hpf_fc) > 0.5f) {
+                if (use_hpf || use_lpf) {
+                    if (use_hpf && std::abs(amt.sat_hpf_hz - chain.sat_hpf_fc) > 0.5f) {
                         const float K = std::tan(
                             static_cast<float>(M_PI) * amt.sat_hpf_hz
                             / static_cast<float>(plug.sample_rate));
@@ -1236,22 +1280,43 @@ void flush_chain_block_(Plugin& plug,
                         chain.sat_hpf_a1 = (K - 1.f) * norm;
                         chain.sat_hpf_fc = amt.sat_hpf_hz;
                     }
-                    // Filter into wet_a (hi band); lo = blk - hi.
-                    for (int i = 0; i < kBlockSize; ++i) {
-                        const float x = blk[i];
-                        wet_a[i] = chain.sat_hpf_b0 * x
-                                 + chain.sat_hpf_b1 * chain.sat_hpf_x1
-                                 - chain.sat_hpf_a1 * chain.sat_hpf_y1;
-                        chain.sat_hpf_x1 = x;
-                        chain.sat_hpf_y1 = wet_a[i];
+                    if (use_lpf && std::abs(amt.sat_lpf_hz - chain.sat_lpf_fc) > 0.5f) {
+                        const float K = std::tan(
+                            static_cast<float>(M_PI) * amt.sat_lpf_hz
+                            / static_cast<float>(plug.sample_rate));
+                        const float norm = 1.f / (1.f + K);
+                        chain.sat_lpf_b0 = K * norm;
+                        chain.sat_lpf_b1 = K * norm;
+                        chain.sat_lpf_a1 = (K - 1.f) * norm;
+                        chain.sat_lpf_fc = amt.sat_lpf_hz;
                     }
-                    // Saturate hi band with threshold + bias into wet_b.
+                    // Apply HPF then optional LPF to extract the saturation band.
+                    // wet_a = band; bypass = blk - band; recombined below.
+                    for (int i = 0; i < kBlockSize; ++i) {
+                        float s = blk[i];
+                        if (use_hpf) {
+                            const float x = s;
+                            s = chain.sat_hpf_b0 * x
+                              + chain.sat_hpf_b1 * chain.sat_hpf_x1
+                              - chain.sat_hpf_a1 * chain.sat_hpf_y1;
+                            chain.sat_hpf_x1 = x;
+                            chain.sat_hpf_y1 = s;
+                        }
+                        if (use_lpf) {
+                            const float x = s;
+                            s = chain.sat_lpf_b0 * x
+                              + chain.sat_lpf_b1 * chain.sat_lpf_x1
+                              - chain.sat_lpf_a1 * chain.sat_lpf_y1;
+                            chain.sat_lpf_x1 = x;
+                            chain.sat_lpf_y1 = s;
+                        }
+                        wet_a[i] = s;
+                    }
                     for (int i = 0; i < kBlockSize; ++i) {
                         const float x_in = wet_a[i] * pre * invT + amt.sat_bias;
                         wet_b[i] = (static_cast<float>(chain.saturator.eval(
                             static_cast<double>(x_in))) - dc) * T * pst;
                     }
-                    // Recombine: lo + blend(hi_dry, hi_wet).
                     for (int i = 0; i < kBlockSize; ++i)
                         blk[i] = (blk[i] - wet_a[i])
                                 + (1.f - amt.sat_wet_mix) * wet_a[i]
@@ -1380,6 +1445,19 @@ void flush_chain_block_(Plugin& plug,
             break;
         }
 
+        case StageID::MelLimiter: {
+            if (amt.ml_wet <= 0.f) break;
+            nablafx::MelLimiter::Params mlp;
+            mlp.ceiling_lin    = amt.ml_ceiling_lin;
+            mlp.drive_lin      = amt.ml_drive_lin;
+            mlp.adaptive_gain  = amt.ml_adaptive_gain;
+            mlp.adaptive_speed = amt.ml_adaptive_speed;
+            mlp.wet_mix        = amt.ml_wet;
+            plug.mel_limiter.process(work_l, work_r, static_cast<int>(n_ch),
+                                     kBlockSize, mlp);
+            break;
+        }
+
         case StageID::OutputLeveler: {
             if (amt.out_lvl_wet <= 0.f) break;
             plug.out_leveler.set_target(static_cast<double>(amt.out_lvl_target_lufs));
@@ -1416,6 +1494,23 @@ void flush_chain_block_(Plugin& plug,
         plug.chains[ch].ceiling.process(blk,plug.chains[ch].out_buf.data(),kBlockSize);
         plug.chains[ch].out_avail=kBlockSize;
         plug.chains[ch].out_read=0;
+    }
+
+    // Meter the final plugin output (post-ceiling) and publish both meters.
+    plug.meter_out.process(plug.chains[0].out_buf.data(),
+                           (n_ch >= 2 ? plug.chains[1].out_buf.data() : nullptr),
+                           static_cast<int>(n_ch), kBlockSize);
+    {
+        const auto in_r  = plug.meter_in.readout();
+        const auto out_r = plug.meter_out.readout();
+        plug.m_in_lufs_s.store(in_r.lufs_s,  std::memory_order_relaxed);
+        plug.m_in_lufs_m.store(in_r.lufs_m,  std::memory_order_relaxed);
+        plug.m_in_rms.store(in_r.rms_db,     std::memory_order_relaxed);
+        plug.m_in_peak.store(in_r.peak_db,   std::memory_order_relaxed);
+        plug.m_out_lufs_s.store(out_r.lufs_s, std::memory_order_relaxed);
+        plug.m_out_lufs_m.store(out_r.lufs_m, std::memory_order_relaxed);
+        plug.m_out_rms.store(out_r.rms_db,    std::memory_order_relaxed);
+        plug.m_out_peak.store(out_r.peak_db,  std::memory_order_relaxed);
     }
 }
 
@@ -1635,8 +1730,8 @@ static bool gui_get_resize_hints(const clap_plugin_t*, clap_gui_resize_hints_t* 
     hints->can_resize_horizontally = false;
     hints->can_resize_vertically   = false;
     hints->preserve_aspect_ratio   = false;
-    hints->aspect_ratio_width  = 700;
-    hints->aspect_ratio_height = 460;
+    hints->aspect_ratio_width  = 820;
+    hints->aspect_ratio_height = 560;
     return false;
 }
 static bool gui_adjust_size(const clap_plugin_t*, uint32_t* w, uint32_t* h) {
@@ -1703,6 +1798,23 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
     if (plug->spectrum.process_if_ready(plug->sample_rate)) {
         const std::string js = plug->spectrum.build_js(plug->processor_order);
         axon_gui_eval_js(plug->gui_state, js.c_str());
+    }
+
+    // Push in/out meter readings (same ~21 fps cadence as the spectrum).
+    {
+        char mjs[320];
+        std::snprintf(mjs, sizeof(mjs),
+            "axonMeters({\"in\":{\"lufs_s\":%.1f,\"lufs_m\":%.1f,\"rms\":%.1f,\"peak\":%.1f},"
+            "\"out\":{\"lufs_s\":%.1f,\"lufs_m\":%.1f,\"rms\":%.1f,\"peak\":%.1f}})",
+            plug->m_in_lufs_s.load(std::memory_order_relaxed),
+            plug->m_in_lufs_m.load(std::memory_order_relaxed),
+            plug->m_in_rms.load(std::memory_order_relaxed),
+            plug->m_in_peak.load(std::memory_order_relaxed),
+            plug->m_out_lufs_s.load(std::memory_order_relaxed),
+            plug->m_out_lufs_m.load(std::memory_order_relaxed),
+            plug->m_out_rms.load(std::memory_order_relaxed),
+            plug->m_out_peak.load(std::memory_order_relaxed));
+        axon_gui_eval_js(plug->gui_state, mjs);
     }
 }
 

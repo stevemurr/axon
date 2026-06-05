@@ -10,15 +10,13 @@
 
 namespace {
 
-// Closed-loop model: the chain adds `proc` dB of loudness; the compensated
-// output LUFS = in + proc + applied_gain_db. Iterate the integrator against it
-// and confirm it converges so output ≈ input.
+// Feed-forward model: out_lufs is the REAL (uncompensated) output, i.e.
+// in + proc, independent of the gain we apply. The smoother should converge so
+// the monitoring gain g ≈ −proc (delivered = real + g = input).
 double converge(double in_lufs, double proc_db, int iters, bool enabled = true) {
     nablafx::AutoGain ag;
-    for (int i = 0; i < iters; ++i) {
-        const float out = (float)(in_lufs + proc_db) + ag.gain_db();
-        ag.process(enabled, (float)in_lufs, out);
-    }
+    for (int i = 0; i < iters; ++i)
+        ag.process(enabled, (float)in_lufs, (float)(in_lufs + proc_db));
     return ag.gain_db();
 }
 
@@ -43,10 +41,7 @@ void test_converges_quieter() {
 void test_disabled_relaxes_to_unity() {
     nablafx::AutoGain ag;
     // Wind it up while enabled…
-    for (int i = 0; i < 4000; ++i) {
-        const float out = -14.f + 6.f + ag.gain_db();
-        ag.process(true, -14.f, out);
-    }
+    for (int i = 0; i < 4000; ++i) ag.process(true, -14.f, -14.f + 6.f);
     assert(std::fabs(ag.gain_db() - (-6.0)) < 0.5);
     // …then disable: must relax to 0 dB (unity).
     for (int i = 0; i < 4000; ++i) ag.process(false, -14.f, -14.f);

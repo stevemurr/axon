@@ -1478,20 +1478,12 @@ void flush_chain_block_(Plugin& plug,
     if (plug.spectrum.advance_and_transfer())
         plug.host->request_callback(plug.host);
 
-    // Auto gain (level-matched bypass): drive output LUFS toward input LUFS.
-    // Folded into the pre-ceiling trim so the usual attenuating case can't push
-    // peaks back over the true-peak ceiling. The output meter (post-ceiling)
-    // closes the feedback loop.
-    const float ag_lin = plug.auto_gain.process(
-        amt.auto_gain_on,
-        plug.meter_in.readout().lufs_s,
-        plug.meter_out.readout().lufs_s);
-
-    // Trim + TruePeakCeiling — always last, not user-reorderable.
-    const float pre_ceil = amt.trim_lin * ag_lin;
-    if (pre_ceil != 1.f) {
-        for (int i=0;i<kBlockSize;++i) work_l[i]*=pre_ceil;
-        if (n_ch>=2) for (int i=0;i<kBlockSize;++i) work_r[i]*=pre_ceil;
+    // Trim + TruePeakCeiling — always last, not user-reorderable. This is the
+    // REAL master; the OUT meter reads it (so driving the limiter shows the
+    // actual target loudness), and Auto Gain is applied *after* metering.
+    if (amt.trim_lin != 1.f) {
+        for (int i=0;i<kBlockSize;++i) work_l[i]*=amt.trim_lin;
+        if (n_ch>=2) for (int i=0;i<kBlockSize;++i) work_r[i]*=amt.trim_lin;
     }
     for (uint32_t ch=0;ch<n_ch;++ch) {
         float* blk=(ch==0)?work_l:work_r;
@@ -1500,7 +1492,7 @@ void flush_chain_block_(Plugin& plug,
         plug.chains[ch].out_read=0;
     }
 
-    // Meter the final plugin output (post-ceiling) and publish both meters.
+    // Meter the real master (pre Auto Gain) and publish both meters.
     plug.meter_out.process(plug.chains[0].out_buf.data(),
                            (n_ch >= 2 ? plug.chains[1].out_buf.data() : nullptr),
                            static_cast<int>(n_ch), kBlockSize);
@@ -1515,6 +1507,21 @@ void flush_chain_block_(Plugin& plug,
         plug.m_out_lufs_m.store(out_r.lufs_m, std::memory_order_relaxed);
         plug.m_out_rms.store(out_r.rms_db,    std::memory_order_relaxed);
         plug.m_out_peak.store(out_r.peak_db,  std::memory_order_relaxed);
+    }
+
+    // Auto gain (level-matched bypass): a *monitoring* trim that brings the
+    // delivered output down to the input's loudness for fair A/B. Computed
+    // feed-forward from the real (metered) output, applied after metering — so
+    // the OUT meter keeps showing the true master level. It's monitoring-only:
+    // render with Auto Gain off to print the loud master.
+    const float ag = plug.auto_gain.process(amt.auto_gain_on,
+                                            plug.meter_in.readout().lufs_s,
+                                            plug.meter_out.readout().lufs_s);
+    if (ag != 1.f) {
+        for (uint32_t ch=0;ch<n_ch;++ch) {
+            float* ob = plug.chains[ch].out_buf.data();
+            for (int i=0;i<kBlockSize;++i) ob[i] *= ag;
+        }
     }
 }
 

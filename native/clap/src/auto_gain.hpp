@@ -4,15 +4,15 @@
 // engaging the chain is loudness-neutral — you A/B timbre & dynamics honestly
 // instead of being fooled by "louder = better".
 //
-// It's a slow feedback integrator on short-term LUFS: because the output meter
-// reflects the *compensated* output, the loop self-corrects until out ≈ in and
-// the error vanishes. Call once per processing block; multiply the output by the
-// returned linear gain (applied pre-ceiling, so the common attenuating case
-// can't break the true-peak guarantee).
+// Feed-forward on short-term LUFS: out_lufs is the REAL (uncompensated) output
+// loudness, so the target offset (in − out) is independent of the gain we apply
+// — a simple one-pole smoother toward it, no feedback loop. Call once per block
+// and multiply the *delivered* output by the returned gain AFTER metering the
+// real output, so the OUT meter still shows the true master loudness.
 //
 //   AutoGain ag;
-//   float g = ag.process(enabled, meter_in.lufs_s, meter_out.lufs_s);
-//   out *= g;   // before the final ceiling
+//   float g = ag.process(enabled, meter_in.lufs_s, meter_out.lufs_s); // real out
+//   out *= g;   // monitoring trim, after the meter tap
 
 #pragma once
 #include <algorithm>
@@ -26,15 +26,15 @@ public:
 
     // enabled  — whether auto gain is on
     // in_lufs  — input short-term LUFS
-    // out_lufs — short-term LUFS of the (already compensated) output
+    // out_lufs — short-term LUFS of the REAL (uncompensated) output
     // Returns the linear gain to apply this block.
     float process(bool enabled, float in_lufs, float out_lufs) {
         if (enabled) {
-            // Only integrate when real signal is present, so silence (LUFS at
-            // the floor) doesn't wind the gain up.
+            // Only adapt when real signal is present, so silence (LUFS at the
+            // floor) doesn't wind the gain up.
             if (in_lufs > kFloor && out_lufs > kFloor) {
-                const float err = in_lufs - out_lufs;       // want out → in
-                g_db_ = std::clamp(g_db_ + err * kIntegrate, -kMaxDb, kMaxDb);
+                const float target = std::clamp(in_lufs - out_lufs, -kMaxDb, kMaxDb);
+                g_db_ += (target - g_db_) * kSmooth;        // one-pole toward target
             }
         } else {
             // Smoothly relax back to unity when disabled.
@@ -47,10 +47,10 @@ public:
     float gain_db() const { return g_db_; }
 
 private:
-    static constexpr float kFloor     = -50.f;   // LUFS gate
-    static constexpr float kMaxDb     = 24.f;    // clamp
-    static constexpr float kIntegrate = 0.002f;  // per-block loop coefficient
-    static constexpr float kRelease   = 0.995f;  // per-block decay toward 0 when off
+    static constexpr float kFloor   = -50.f;   // LUFS gate
+    static constexpr float kMaxDb   = 24.f;    // clamp
+    static constexpr float kSmooth  = 0.004f;  // per-block one-pole toward target
+    static constexpr float kRelease = 0.995f;  // per-block decay toward 0 when off
 
     float g_db_ = 0.f;
 };

@@ -379,11 +379,13 @@
   .meter-ro .lbl { font-size: 8px; color: var(--dim); letter-spacing: 0.1em; }
   .meter-ro .val { font-size: 14px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
   .meter-ro .val.in-zone { color: var(--accent); }
-  #auto-gain-btn {
+  #meter-toggles { display: flex; gap: 6px; }
+  .meter-toggle {
+    flex: 1;
     text-align: center;
     font-size: 9px;
     font-weight: 700;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     padding: 6px 0;
     background: #1a1a1a;
     border: 1px solid #333;
@@ -391,11 +393,13 @@
     color: var(--dim);
     cursor: pointer;
   }
-  #auto-gain-btn.on {
+  .meter-toggle.on {
     color: #0d0d0d;
     background: var(--accent);
     border-color: var(--accent);
   }
+  /* Bypass is a "monitor raw" state — use the danger hue when active. */
+  #bypass-btn.on { background: var(--danger); border-color: var(--danger); }
 </style>
 </head>
 <body>
@@ -435,8 +439,9 @@
        <div class="meter-ro"><div class="lbl">IN</div><div class="val" id="meter-in-val">–</div></div>
        <div class="meter-ro"><div class="lbl">OUT</div><div class="val" id="meter-out-val">–</div></div>
      </div>
-     <div id="auto-gain-btn" title="Match output loudness to input for fair A/B">
-       AUTO GAIN
+     <div id="meter-toggles">
+       <div id="auto-gain-btn" class="meter-toggle" title="Match output loudness to input for fair A/B">AUTO GAIN</div>
+       <div id="bypass-btn" class="meter-toggle" title="Audition the raw input (level-aligned, no DAW bypass)">BYPASS</div>
      </div>
    </div><!-- /meter-panel -->
   </div><!-- /body-row -->
@@ -1127,7 +1132,7 @@ window.axonInit = function(state) {
 
   renderChain();
   renderSurface();
-  refreshAutoGain();
+  refreshPanelToggles();
 };
 
 // ============================================================
@@ -1720,21 +1725,26 @@ window.axonLimiter = function(d) {
 };
 
 // ============================================================
-// AUTO GAIN toggle (level-matched bypass) — lives in the meter panel
+// Meter-panel toggles (Auto Gain, Bypass) — meta switches, custom placement
 // ============================================================
-function refreshAutoGain() {
-  const btn = document.getElementById('auto-gain-btn');
-  if (btn) btn.classList.toggle('on', (paramValues['AGN'] ?? 0) >= 0.5);
+const PANEL_TOGGLES = [['auto-gain-btn', 'AGN'], ['bypass-btn', 'BYP']];
+function refreshPanelToggles() {
+  for (const [bid, pid] of PANEL_TOGGLES) {
+    const btn = document.getElementById(bid);
+    if (btn) btn.classList.toggle('on', (paramValues[pid] ?? 0) >= 0.5);
+  }
 }
 (function() {
-  const btn = document.getElementById('auto-gain-btn');
-  if (!btn) return;
-  btn.addEventListener('click', () => {
-    const next = ((paramValues['AGN'] ?? 0) >= 0.5) ? 0 : 1;
-    paramValues['AGN'] = next;
-    sendParam('AGN', next);
-    refreshAutoGain();
-  });
+  for (const [bid, pid] of PANEL_TOGGLES) {
+    const btn = document.getElementById(bid);
+    if (!btn) continue;
+    btn.addEventListener('click', () => {
+      const next = ((paramValues[pid] ?? 0) >= 0.5) ? 0 : 1;
+      paramValues[pid] = next;
+      sendParam(pid, next);
+      refreshPanelToggles();
+    });
+  }
 })();
 
 window.axonSetParam = function(id, value) {
@@ -1752,7 +1762,7 @@ window.axonSetParam = function(id, value) {
   if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
   // Dynamic toggle (e.g. host automation) relabels Attack/Release knobs.
   if (id === 'MLA' && selectedProc === 5) renderSurface();
-  if (id === 'AGN') refreshAutoGain();
+  if (id === 'AGN' || id === 'BYP') refreshPanelToggles();
 
   refreshChain();
 };

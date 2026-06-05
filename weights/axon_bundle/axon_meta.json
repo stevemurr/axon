@@ -232,6 +232,15 @@
       "default": 0.0,
       "skew": 1.0,
       "unit": "switch"
+    },
+    "BYP": {
+      "id": "BYP",
+      "name": "Bypass",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
     }
   },
   "amount_mapping": {

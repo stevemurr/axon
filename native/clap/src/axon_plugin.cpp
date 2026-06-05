@@ -620,6 +620,12 @@ struct ChannelChain {
     std::array<float, kBlockSize> out_buf{};
     int                           out_avail = 0;
     int                           out_read  = 0;
+
+    // Raw-input delay FIFO for the internal Bypass (audition the unprocessed
+    // signal). Pushed as input is consumed, popped as output is drained, so it
+    // naturally lags the output by exactly the plugin latency — toggling Bypass
+    // stays time-aligned (and host latency compensation matches the wet path).
+    std::vector<float>            bypass_fifo;
 };
 
 // ---------------------------------------------------------------------------
@@ -650,6 +656,11 @@ struct Plugin {
 
     // Auto gain (level-matched bypass) — drives output LUFS toward input LUFS.
     nablafx::AutoGain    auto_gain;
+
+    // Internal-bypass dry FIFO indices (shared across channels; advance in lock-
+    // step). Ring size is fixed and comfortably larger than any plugin latency.
+    static constexpr int kBypassRing = 1 << 15;   // 32768
+    int bypass_w{0}, bypass_r{0};
 
     // Processor ordering — driven by GUI drag-and-drop. All stages reorderable.
     // Default: AutoEQ → Saturator → SslComp → BassMono → MelLimiter
@@ -1033,7 +1044,9 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
         ch.out_avail = 0;
         ch.out_read  = 0;
         ch.autoeq_peak_env = 0.f;
+        ch.bypass_fifo.assign(Plugin::kBypassRing, 0.f);
     }
+    plug->bypass_w = plug->bypass_r = 0;
 
     plug->spectrum.init();
     plug->bass_mono.prepare(plug->sample_rate);
@@ -1077,7 +1090,10 @@ static void plugin_reset(const clap_plugin_t* p) {
         ch.autoeq_peak_env = 0.f;
         std::fill(ch.in_buf.begin(),  ch.in_buf.end(),  0.0f);
         std::fill(ch.out_buf.begin(), ch.out_buf.end(), 0.0f);
+        if (!ch.bypass_fifo.empty())
+            std::fill(ch.bypass_fifo.begin(), ch.bypass_fifo.end(), 0.0f);
     }
+    plug->bypass_w = plug->bypass_r = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,13 +1115,14 @@ struct AmountSnapshot {
     bool  ml_adaptive_brickwall;
     float bm_wet, bm_freq;
     bool  auto_gain_on;
+    bool  bypass_on;
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
     float sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
-    float agn=0.f;
+    float agn=0.f,byp=0.f;
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
     float ssc=0.f;
@@ -1127,7 +1144,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
         else if(c.id=="MLA") mla=v;
         else if(c.id=="BMI") bmi=v; else if(c.id=="BMF") bmf=v;
-        else if(c.id=="AGN") agn=v;
+        else if(c.id=="AGN") agn=v; else if(c.id=="BYP") byp=v;
     }
     AmountSnapshot s{};
     s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf; s.sat_lpf_hz=slf;
@@ -1149,6 +1166,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.bm_wet  = bmi;
     s.bm_freq = bmf;
     s.auto_gain_on = (agn >= 0.5f);
+    s.bypass_on    = (byp >= 0.5f);
     return s;
 }
 
@@ -1624,13 +1642,19 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
     // All channels fill/drain at the same rate, so use one shared in_pos/out_pos.
     uint32_t in_pos = 0, out_pos = 0;
 
+    constexpr int kBR = Plugin::kBypassRing;
     while (out_pos < n_frames) {
-        // Drain all channels' output rings together.
+        // Drain all channels' output rings together. The dry FIFO is popped in
+        // lock-step (always, to stay aligned); Bypass selects it over the wet.
         while (out_pos < n_frames && plug->chains[0].out_read < plug->chains[0].out_avail) {
-            for (uint32_t ch = 0; ch < n_ch; ++ch)
-                out_ch[ch][out_pos] = plug->chains[ch].out_buf[plug->chains[ch].out_read];
+            const int rd = plug->bypass_r % kBR;
+            for (uint32_t ch = 0; ch < n_ch; ++ch) {
+                const float wet = plug->chains[ch].out_buf[plug->chains[ch].out_read];
+                out_ch[ch][out_pos] = amt.bypass_on ? plug->chains[ch].bypass_fifo[rd] : wet;
+            }
             for (uint32_t ch = 0; ch < n_ch; ++ch)
                 ++plug->chains[ch].out_read;
+            ++plug->bypass_r;
             ++out_pos;
         }
         if (out_pos >= n_frames) break;
@@ -1652,7 +1676,12 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
                         take,
                         plug->chains[ch].in_buf.data() + plug->chains[ch].in_fill);
             plug->chains[ch].in_fill += take;
+            // Mirror the raw input into the Bypass FIFO.
+            float* fifo = plug->chains[ch].bypass_fifo.data();
+            for (uint32_t i = 0; i < take; ++i)
+                fifo[(plug->bypass_w + i) % kBR] = in_ch[ch][in_pos + i];
         }
+        plug->bypass_w += take;
         in_pos += take;
 
         if (plug->chains[0].in_fill < kBlockSize) {

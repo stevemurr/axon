@@ -223,6 +223,15 @@
       "default": 250.0,
       "skew": 1.0,
       "unit": "Hz"
+    },
+    "AGN": {
+      "id": "AGN",
+      "name": "Auto Gain",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
     }
   },
   "amount_mapping": {

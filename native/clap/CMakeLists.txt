@@ -139,6 +139,11 @@ add_executable(test_bass_mono tests/test_bass_mono.cpp)
 target_include_directories(test_bass_mono PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_bass_mono PRIVATE -UNDEBUG)
 
+# test_auto_gain — unit tests for the AutoGain level-match integrator.
+add_executable(test_auto_gain tests/test_auto_gain.cpp)
+target_include_directories(test_auto_gain PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_auto_gain PRIVATE -UNDEBUG)
+
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
     target_include_directories(axon_bench PRIVATE

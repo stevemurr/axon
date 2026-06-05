@@ -47,6 +47,7 @@
 
 #include "composite_meta.hpp"
 #include "dimension_d.hpp"
+#include "auto_gain.hpp"
 #include "bass_mono.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
@@ -647,6 +648,9 @@ struct Plugin {
     // Bass mono-maker (stereo; collapses width below a cutoff).
     nablafx::BassMono    bass_mono;
 
+    // Auto gain (level-matched bypass) — drives output LUFS toward input LUFS.
+    nablafx::AutoGain    auto_gain;
+
     // Processor ordering — driven by GUI drag-and-drop. All stages reorderable.
     // Default: AutoEQ → Saturator → SslComp → BassMono → MelLimiter
     std::array<int, kNumStages> processor_order{1, 2, 4, 6, 5};
@@ -1033,6 +1037,7 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
 
     plug->spectrum.init();
     plug->bass_mono.prepare(plug->sample_rate);
+    plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
     // Seed static band centres for the limiter visualization.
@@ -1058,6 +1063,7 @@ static void plugin_reset(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     plug->mel_limiter.reset();
     plug->bass_mono.reset();
+    plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
     for (auto& ch : plug->chains) {
@@ -1092,12 +1098,14 @@ struct AmountSnapshot {
     float ml_wet, ml_ceiling_lin, ml_drive_lin, ml_adaptive_gain, ml_adaptive_speed;
     bool  ml_adaptive_brickwall;
     float bm_wet, bm_freq;
+    bool  auto_gain_on;
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
     float sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
+    float agn=0.f;
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
     float ssc=0.f;
@@ -1119,6 +1127,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
         else if(c.id=="MLA") mla=v;
         else if(c.id=="BMI") bmi=v; else if(c.id=="BMF") bmf=v;
+        else if(c.id=="AGN") agn=v;
     }
     AmountSnapshot s{};
     s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf; s.sat_lpf_hz=slf;
@@ -1139,6 +1148,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.ml_adaptive_brickwall = (mla >= 0.5f);
     s.bm_wet  = bmi;
     s.bm_freq = bmf;
+    s.auto_gain_on = (agn >= 0.5f);
     return s;
 }
 
@@ -1468,10 +1478,20 @@ void flush_chain_block_(Plugin& plug,
     if (plug.spectrum.advance_and_transfer())
         plug.host->request_callback(plug.host);
 
+    // Auto gain (level-matched bypass): drive output LUFS toward input LUFS.
+    // Folded into the pre-ceiling trim so the usual attenuating case can't push
+    // peaks back over the true-peak ceiling. The output meter (post-ceiling)
+    // closes the feedback loop.
+    const float ag_lin = plug.auto_gain.process(
+        amt.auto_gain_on,
+        plug.meter_in.readout().lufs_s,
+        plug.meter_out.readout().lufs_s);
+
     // Trim + TruePeakCeiling — always last, not user-reorderable.
-    if (amt.trim_lin != 1.f) {
-        for (int i=0;i<kBlockSize;++i) work_l[i]*=amt.trim_lin;
-        if (n_ch>=2) for (int i=0;i<kBlockSize;++i) work_r[i]*=amt.trim_lin;
+    const float pre_ceil = amt.trim_lin * ag_lin;
+    if (pre_ceil != 1.f) {
+        for (int i=0;i<kBlockSize;++i) work_l[i]*=pre_ceil;
+        if (n_ch>=2) for (int i=0;i<kBlockSize;++i) work_r[i]*=pre_ceil;
     }
     for (uint32_t ch=0;ch<n_ch;++ch) {
         float* blk=(ch==0)?work_l:work_r;

@@ -379,6 +379,23 @@
   .meter-ro .lbl { font-size: 8px; color: var(--dim); letter-spacing: 0.1em; }
   .meter-ro .val { font-size: 14px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
   .meter-ro .val.in-zone { color: var(--accent); }
+  #auto-gain-btn {
+    text-align: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 6px 0;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 3px;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  #auto-gain-btn.on {
+    color: #0d0d0d;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
 </style>
 </head>
 <body>
@@ -417,6 +434,9 @@
      <div id="meter-readouts">
        <div class="meter-ro"><div class="lbl">IN</div><div class="val" id="meter-in-val">–</div></div>
        <div class="meter-ro"><div class="lbl">OUT</div><div class="val" id="meter-out-val">–</div></div>
+     </div>
+     <div id="auto-gain-btn" title="Match output loudness to input for fair A/B">
+       AUTO GAIN
      </div>
    </div><!-- /meter-panel -->
   </div><!-- /body-row -->
@@ -1107,6 +1127,7 @@ window.axonInit = function(state) {
 
   renderChain();
   renderSurface();
+  refreshAutoGain();
 };
 
 // ============================================================
@@ -1698,6 +1719,24 @@ window.axonLimiter = function(d) {
   if (selectedProc === 5) drawLimViz();
 };
 
+// ============================================================
+// AUTO GAIN toggle (level-matched bypass) — lives in the meter panel
+// ============================================================
+function refreshAutoGain() {
+  const btn = document.getElementById('auto-gain-btn');
+  if (btn) btn.classList.toggle('on', (paramValues['AGN'] ?? 0) >= 0.5);
+}
+(function() {
+  const btn = document.getElementById('auto-gain-btn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const next = ((paramValues['AGN'] ?? 0) >= 0.5) ? 0 : 1;
+    paramValues['AGN'] = next;
+    sendParam('AGN', next);
+    refreshAutoGain();
+  });
+})();
+
 window.axonSetParam = function(id, value) {
   paramValues[id] = value;
 
@@ -1713,6 +1752,7 @@ window.axonSetParam = function(id, value) {
   if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
   // Dynamic toggle (e.g. host automation) relabels Attack/Release knobs.
   if (id === 'MLA' && selectedProc === 5) renderSurface();
+  if (id === 'AGN') refreshAutoGain();
 
   refreshChain();
 };

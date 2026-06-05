@@ -426,7 +426,7 @@ void test_adaptive_brickwall_release() {
         nablafx::MelLimiter ml; ml.init(kSR);
         auto p = default_params(ceiling);
         p.drive_lin         = 1.f;
-        p.adaptive_gain     = 1.f;
+        p.adaptive_gain     = 0.f;          // tight attack — isolate release
         p.adaptive_speed    = 1.f;          // → 400 ms brickwall release when on
         p.adaptive_brickwall = adaptive_bw;
         std::vector<float> b(src);
@@ -461,6 +461,65 @@ void test_adaptive_brickwall_release() {
     std::fprintf(stderr, "[adapt-bw]   PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 12: in Dynamic mode, adaptive_gain shapes the brickwall ATTACK
+//
+// Loose attack (gain=1) pre-ducks less in the lookahead window before a peak,
+// so more of the pre-transient signal survives than with tight attack (gain=0).
+// The ceiling must still hold in both (the safety clip catches the overshoot).
+// ---------------------------------------------------------------------------
+void test_adaptive_brickwall_attack() {
+    const float ceiling = 0.5f;
+    const int   sec     = kSR;
+    const int   N       = 2 * sec;
+    const int   bstart  = sec / 2;
+    const int   blen    = 32;
+
+    std::vector<float> src = make_sine(1000.0, 0.35, N);
+    {
+        auto burst = make_sine(1000.0, 1.0, blen);
+        std::copy(burst.begin(), burst.end(), src.begin() + bstart);
+    }
+
+    auto run = [&](float gain) {
+        nablafx::MelLimiter ml; ml.init(kSR);
+        auto p = default_params(ceiling);
+        p.drive_lin          = 1.f;
+        p.adaptive_speed     = 0.f;         // fast release — isolate attack
+        p.adaptive_gain      = gain;        // attack character
+        p.adaptive_brickwall = true;
+        std::vector<float> b(src);
+        ml.process(b.data(), nullptr, 1, N, p);
+        return b;
+    };
+
+    auto tight = run(0.f);   // clamped attack
+    auto loose = run(1.f);   // punchy attack
+
+    assert(all_finite(tight.data(), N));
+    assert(all_finite(loose.data(), N));
+
+    // Pre-duck window: the lookahead-length region right before the burst peak
+    // reaches the output. Tight attack ducks this harder than loose.
+    const int L  = nablafx::MelLimiter::kLatency;
+    const int LA = nablafx::MelLimiter::kBrickLA;
+    const int w0 = bstart + L - LA;
+    const int w1 = bstart + L;
+    double rms_tight = rms(tight.data() + w0, w1 - w0);
+    double rms_loose = rms(loose.data() + w0, w1 - w0);
+    double pk_tight  = peak_abs(tight.data(), N);
+    double pk_loose  = peak_abs(loose.data(), N);
+
+    std::fprintf(stderr,
+        "[adapt-atk]  pre-duck rms: tight=%.4f loose=%.4f (ratio %.2f)   peak: tight=%.4f loose=%.4f\n",
+        rms_tight, rms_loose, rms_loose / rms_tight, pk_tight, pk_loose);
+
+    assert(pk_tight <= ceiling + 1e-4);     // ceiling held, clamped attack
+    assert(pk_loose <= ceiling + 1e-4);     // ceiling held, punchy attack
+    assert(rms_loose > rms_tight * 1.1);    // loose attack lets more through
+    std::fprintf(stderr, "[adapt-atk]  PASS\n");
+}
+
 } // namespace
 
 int main() {
@@ -475,6 +534,7 @@ int main() {
     test_drive_increases_loudness();
     test_ceiling_control_is_audible();
     test_adaptive_brickwall_release();
+    test_adaptive_brickwall_attack();
     std::fprintf(stderr, "ALL TESTS PASSED\n");
     return 0;
 }

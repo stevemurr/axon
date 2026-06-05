@@ -253,18 +253,22 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
     const float atk_c   = std::exp(-hop_ms / atk_ms);
     const float rel_c   = std::exp(-hop_ms / rel_ms);
 
-    // Brickwall release: fixed/fast ("even") unless the adaptive toggle routes
-    // the adaptive controls into it. adaptive_gain gates how far the release
-    // departs from the tight 50 ms baseline; adaptive_speed sets how slow
-    // (50→400 ms). Slower, program-dependent release ⇒ a more dynamic, breathing
-    // limiter. Attack stays fast and the safety clip still guarantees the ceiling.
+    // Brickwall ballistics. "Even" (toggle off): fixed tight attack + fast
+    // 50 ms release. "Dynamic" (toggle on): the adaptive controls reshape it —
+    //   adaptive_gain  → ATTACK CHARACTER: tight/clamped (fast, pre-ducks fully
+    //                    within the lookahead → transparent) ↔ loose/punchy
+    //                    (slow, lets transients leak to the safety clip → grittier).
+    //   adaptive_speed → RELEASE: 50 → 400 ms (slow = breathing/pumping).
+    // Attack is always bounded by the lookahead and the hard clip still
+    // guarantees |out| ≤ ceiling, so "loose" trades transient clipping for punch.
     {
-        float bw_rel_ms = 50.f;
-        if (p.adaptive_brickwall) {
-            const float dyn_ms = 50.f + p.adaptive_speed * 350.f;   // up to 400 ms
-            bw_rel_ms = 50.f + p.adaptive_gain * (dyn_ms - 50.f);
-        }
-        brick_rel_ = std::exp(-1.f / (bw_rel_ms * 0.001f * static_cast<float>(sr_)));
+        const float rel_ms = p.adaptive_brickwall ? (50.f + p.adaptive_speed * 350.f) : 50.f;
+        brick_rel_ = std::exp(-1.f / (rel_ms * 0.001f * static_cast<float>(sr_)));
+
+        const float atk_samps = p.adaptive_brickwall
+            ? kBrickLA * (0.15f + p.adaptive_gain * 1.05f)   // tight → loose
+            : kBrickLA * 0.25f;                              // fixed tight
+        brick_atk_ = std::exp(-1.f / atk_samps);
     }
 
     // Per-bin gain scratch — updated each hop.

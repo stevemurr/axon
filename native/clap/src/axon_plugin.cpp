@@ -1,8 +1,8 @@
 // Composite Axon CLAP plugin: 1 dylib that wires
 //
-//   audio → LufsLeveler → ort(autoeq controller) → SpectralMaskEq
-//                       → RationalA (saturator)  → ort(ssl_comp)
-//                       → TruePeakCeiling → output trim
+//   audio → ort(autoeq controller) → SpectralMaskEq
+//         → RationalA (saturator)  → ort(ssl_comp) → BassMono
+//         → MelLimiter             → TruePeakCeiling → output trim
 //
 // The composite has two host-exposed knobs (AMT, TRM) defined in the
 // composite_meta. AMT remaps to per-stage params (saturator pre/post + wet/dry,
@@ -47,7 +47,6 @@
 
 #include "composite_meta.hpp"
 #include "dimension_d.hpp"
-#include "lufs_leveler.hpp"
 #include "bass_mono.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
@@ -63,7 +62,6 @@ namespace fs = std::filesystem;
 using nablafx::CompositeMeta;
 using nablafx::ControlSpec;
 using nablafx::DspBlockSpec;
-using nablafx::LufsLeveler;
 using nablafx::PluginMeta;
 using nablafx::RationalA;
 using nablafx::RationalAParams;
@@ -79,7 +77,7 @@ using nablafx::param_id_for;
 // processor's TVFiLM cond_block_size. Changing this requires re-exporting both
 // ONNX bundles at the new block size.
 constexpr int kBlockSize  = 128;
-constexpr int kNumStages  = 7;
+constexpr int kNumStages  = 5;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
 // 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
@@ -93,11 +91,12 @@ constexpr int kNumStages  = 7;
 // delay ring (see ssl_comp_dry_delay) so the wet/dry mix is sample-aligned.
 constexpr int kSslHop     = 1024;
 
+// IDs are stable (kept across the leveler removal) so existing automation and
+// stage colours don't shuffle; 0 (was InputLeveler) and 3 (was OutputLeveler)
+// are intentionally unused. All remaining stages are freely reorderable.
 enum class StageID : int {
-    InputLeveler  = 0,
     AutoEQ        = 1,
     Saturator     = 2,
-    OutputLeveler = 3,
     SslComp       = 4,
     MelLimiter    = 5,
     BassMono      = 6,
@@ -350,7 +349,7 @@ static void populate_descriptor_(ModuleState& st) {
     st.descriptor.manual_url   = "";
     st.descriptor.support_url  = "";
     st.descriptor.version      = "1.0.0";
-    st.descriptor.description  = "Axon — adaptive mastering chain (auto-EQ + saturator + LA-2A + leveler + ceiling)";
+    st.descriptor.description  = "Axon — adaptive mastering chain (auto-EQ + saturator + bus comp + bass mono + limiter + ceiling)";
     st.descriptor.features     = st.feature_ptrs.data();
 }
 
@@ -560,8 +559,7 @@ private:
 };
 
 struct ChannelChain {
-    // Per-channel stage instances. TruePeakCeiling runs per-channel; the
-    // LufsLeveler is shared on Plugin so it can apply linked stereo gain.
+    // Per-channel stage instances. TruePeakCeiling runs per-channel.
     // One ORT session per auto-EQ class (bass/drums/vocals/other/full_mix);
     // CLS picks which one is active. Inactive sessions hold zeroed state
     // so a class switch starts the LSTM from a neutral init and avoids
@@ -649,9 +647,9 @@ struct Plugin {
     // Bass mono-maker (stereo; collapses width below a cutoff).
     nablafx::BassMono    bass_mono;
 
-    // Processor ordering — driven by GUI drag-and-drop.
-    // Default: InputLeveler → AutoEQ → Saturator → SslComp → BassMono → MelLimiter → OutputLeveler
-    std::array<int, kNumStages> processor_order{0, 1, 2, 4, 6, 5, 3};
+    // Processor ordering — driven by GUI drag-and-drop. All stages reorderable.
+    // Default: AutoEQ → Saturator → SslComp → BassMono → MelLimiter
+    std::array<int, kNumStages> processor_order{1, 2, 4, 6, 5};
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -666,7 +664,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{0,1,2,4,6,5,3};
+    std::array<int,kNumStages> pending_order{1,2,4,6,5};
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -697,9 +695,6 @@ struct Plugin {
     float lim_brick{1.f};      // brickwall gain (1 = no peak limiting)
     bool  lim_active{false};
 
-    // Shared levelers — input and output, both apply linked L/R gain.
-    LufsLeveler              leveler;
-    LufsLeveler              out_leveler;
     std::vector<ChannelChain> chains;
 };
 
@@ -946,15 +941,6 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
                                      / static_cast<float>(kBlockSize);
         plug->autoeq_env_decay = std::exp(-1.0f / std::max(blocks_per_tau, 1.0f));
     }
-    plug->leveler = LufsLeveler(LufsLeveler::Config{
-        /*target_lufs=*/g_state->axon_meta.leveler.target_lufs,
-    });
-    plug->leveler.reset(sample_rate, g_state->axon_meta.leveler.target_lufs);
-    plug->out_leveler = LufsLeveler(LufsLeveler::Config{
-        /*target_lufs=*/g_state->axon_meta.leveler.target_lufs,
-    });
-    plug->out_leveler.reset(sample_rate, g_state->axon_meta.leveler.target_lufs);
-
     plug->mel_limiter.init(static_cast<int>(sample_rate));
 
     // Seed active class from CLS control; clamp to a valid class index.
@@ -1070,8 +1056,6 @@ static void plugin_stop_processing(const clap_plugin_t*) {}
 
 static void plugin_reset(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
-    plug->leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
-    plug->out_leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
     plug->mel_limiter.reset();
     plug->bass_mono.reset();
     plug->meter_in.reset(plug->sample_rate);
@@ -1097,8 +1081,6 @@ static void plugin_reset(const clap_plugin_t* p) {
 namespace {
 
 struct AmountSnapshot {
-    float lvl_wet, lvl_target_lufs;
-    float out_lvl_wet, out_lvl_target_lufs;
     float autoeq_wet_mix;
     int   autoeq_cls_idx;
     float sat_pre_db, sat_post_db, sat_wet_mix, sat_hpf_hz, sat_lpf_hz, sat_thresh_lin, sat_bias;
@@ -1113,27 +1095,23 @@ struct AmountSnapshot {
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
-    float lvl=1.f,lvt=-14.f,sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
+    float sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
     float eq=0.5f,trm_db=0.f;
-    float olv=1.f,olt=-14.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
     float ssc=0.f;
     int   cls_idx=plug.active_autoeq_cls;
     for (size_t i=0;i<plug.meta->controls.size();++i) {
         const auto& c=plug.meta->controls[i];
         float v=std::clamp(plug.control_values[i],c.min,c.max);
-        if(c.id=="LVL") lvl=v; else if(c.id=="LVT") lvt=v;
-        else if(c.id=="SDR") sdr=v; else if(c.id=="SVO") svo=v;
+        if(c.id=="SDR") sdr=v; else if(c.id=="SVO") svo=v;
         else if(c.id=="SMX") smx=v; else if(c.id=="SHF") shf=v; else if(c.id=="SLF") slf=v;
         else if(c.id=="STH") sth=v; else if(c.id=="SBS") sbs=v;
         else if(c.id=="EQ")  eq=v;
         else if(c.id=="CLS") cls_idx=static_cast<int>(std::lround(v));
         else if(c.id=="EQR") eqr=v; else if(c.id=="EQS") eqs=v;
         else if(c.id=="EQB") eqb=v;
-        else if(c.id=="OLV") olv=v;
-        else if(c.id=="OLT") olt=v;
         else if(c.id=="TRM") trm_db=v;
         else if(c.id=="SSC") ssc=v;
         else if(c.id=="MLI") mli=v; else if(c.id=="MLC") mlc=v;
@@ -1143,8 +1121,6 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="BMI") bmi=v; else if(c.id=="BMF") bmf=v;
     }
     AmountSnapshot s{};
-    s.lvl_wet=lvl; s.lvl_target_lufs=lvt;
-    s.out_lvl_wet=olv; s.out_lvl_target_lufs=olt;
     s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf; s.sat_lpf_hz=slf;
     s.sat_thresh_lin=std::pow(10.f, sth/20.f); s.sat_bias=sbs;
     s.autoeq_wet_mix=eq*g_state->axon_meta.amt_autoeq.wet_mix_max;
@@ -1192,22 +1168,6 @@ void flush_chain_block_(Plugin& plug,
     for (int pos = 0; pos < kNumStages; ++pos) {
         const int stage_idx = plug.processor_order[pos];
         switch (static_cast<StageID>(stage_idx)) {
-
-        case StageID::InputLeveler: {
-            if (amt.lvl_wet <= 0.f) break;
-            plug.leveler.set_target(static_cast<double>(amt.lvl_target_lufs));
-            std::array<float,kBlockSize> lev_l{}, lev_r{};
-            if (n_ch >= 2) {
-                plug.leveler.process_linked(work_l, work_r,
-                                            lev_l.data(), lev_r.data(), kBlockSize);
-                blend_inplace_(work_l, lev_l.data(), amt.lvl_wet, kBlockSize);
-                blend_inplace_(work_r, lev_r.data(), amt.lvl_wet, kBlockSize);
-            } else {
-                plug.leveler.process(work_l, lev_l.data(), kBlockSize);
-                blend_inplace_(work_l, lev_l.data(), amt.lvl_wet, kBlockSize);
-            }
-            break;
-        }
 
         case StageID::AutoEQ: {
             // If CLS changed since the previous block, swap the active class
@@ -1495,22 +1455,6 @@ void flush_chain_block_(Plugin& plug,
             plug.bass_mono.process(bl.data(), br.data(), kBlockSize);
             blend_inplace_(work_l, bl.data(), amt.bm_wet, kBlockSize);
             blend_inplace_(work_r, br.data(), amt.bm_wet, kBlockSize);
-            break;
-        }
-
-        case StageID::OutputLeveler: {
-            if (amt.out_lvl_wet <= 0.f) break;
-            plug.out_leveler.set_target(static_cast<double>(amt.out_lvl_target_lufs));
-            std::array<float,kBlockSize> ol_l{},ol_r{};
-            if (n_ch >= 2) {
-                plug.out_leveler.process_linked(work_l,work_r,
-                                                ol_l.data(),ol_r.data(),kBlockSize);
-                blend_inplace_(work_l,ol_l.data(),amt.out_lvl_wet,kBlockSize);
-                blend_inplace_(work_r,ol_r.data(),amt.out_lvl_wet,kBlockSize);
-            } else {
-                plug.out_leveler.process(work_l,ol_l.data(),kBlockSize);
-                blend_inplace_(work_l,ol_l.data(),amt.out_lvl_wet,kBlockSize);
-            }
             break;
         }
 

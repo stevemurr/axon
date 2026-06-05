@@ -487,10 +487,8 @@ function sendParam(id, value) {
 
 function sendOrderToHost(visibleOrder) {
   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.axon) {
-    // C++ expects all kNumStages=5 IDs. InputLeveler(0) always first,
-    // OutputLeveler(3) always last; visible stages reorder in between.
-    const fullOrder = [0, ...visibleOrder, 3];
-    window.webkit.messageHandlers.axon.postMessage({ type: 'reorder', order: fullOrder });
+    // All 5 stages are freely reorderable; send the order as-is.
+    window.webkit.messageHandlers.axon.postMessage({ type: 'reorder', order: [...visibleOrder] });
   }
 }
 
@@ -1146,17 +1144,17 @@ window.axonInit = function(state) {
     binsLabel.classList.toggle('active',  eqViewMode === 'bins');
   });
 
-  // One color per StageID.
+  // One color per StageID (indices 0 and 3 are unused — were the levelers).
   const STAGE_COLORS = [
-    '#4cc9a8',  // 0 InputLeveler
+    '#4cc9a8',  // 0 (unused)
     '#e9c46a',  // 1 AutoEQ
     '#f4a261',  // 2 Saturator
-    '#5fa8d3',  // 3 OutputLeveler
+    '#5fa8d3',  // 3 (unused)
     '#bb86fc',  // 4 SslComp (BUS COMP)
     '#e76f51',  // 5 MelLimiter
     '#90be6d',  // 6 BassMono
   ];
-  const STAGE_NAMES = ['LEVELER', 'AUTO EQ', 'SAT', 'OUT LEV', 'BUS COMP', 'LIMITER', 'BASS MONO'];
+  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO'];
 
   const DB_MIN = -90, DB_MAX = 0;
 

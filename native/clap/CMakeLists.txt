@@ -48,7 +48,6 @@ add_library(axon_clap MODULE
     src/axon_gui.mm
     src/composite_meta.cpp
     src/meta.cpp
-    src/lufs_leveler.cpp
     src/true_peak_ceiling.cpp
     src/mel_limiter.cpp
     src/meter.cpp

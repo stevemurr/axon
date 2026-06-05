@@ -135,6 +135,11 @@ add_executable(test_meter
 target_include_directories(test_meter PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_meter PRIVATE -UNDEBUG)
 
+# test_bass_mono — unit tests for the BassMono mono-maker (header-only DSP).
+add_executable(test_bass_mono tests/test_bass_mono.cpp)
+target_include_directories(test_bass_mono PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_bass_mono PRIVATE -UNDEBUG)
+
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
     target_include_directories(axon_bench PRIVATE

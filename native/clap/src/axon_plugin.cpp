@@ -48,6 +48,7 @@
 #include "composite_meta.hpp"
 #include "dimension_d.hpp"
 #include "lufs_leveler.hpp"
+#include "bass_mono.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
 #include "param_id.hpp"
@@ -78,7 +79,7 @@ using nablafx::param_id_for;
 // processor's TVFiLM cond_block_size. Changing this requires re-exporting both
 // ONNX bundles at the new block size.
 constexpr int kBlockSize  = 128;
-constexpr int kNumStages  = 6;
+constexpr int kNumStages  = 7;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
 // 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
@@ -99,6 +100,7 @@ enum class StageID : int {
     OutputLeveler = 3,
     SslComp       = 4,
     MelLimiter    = 5,
+    BassMono      = 6,
 };
 
 // ---------------------------------------------------------------------------
@@ -644,9 +646,12 @@ struct Plugin {
     // Multiband adaptive limiter (stereo, initialized at activate).
     nablafx::MelLimiter  mel_limiter;
 
+    // Bass mono-maker (stereo; collapses width below a cutoff).
+    nablafx::BassMono    bass_mono;
+
     // Processor ordering — driven by GUI drag-and-drop.
-    // Default: InputLeveler → AutoEQ → Saturator → SslComp → MelLimiter → OutputLeveler
-    std::array<int, kNumStages> processor_order{0, 1, 2, 4, 5, 3};
+    // Default: InputLeveler → AutoEQ → Saturator → SslComp → BassMono → MelLimiter → OutputLeveler
+    std::array<int, kNumStages> processor_order{0, 1, 2, 4, 6, 5, 3};
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -661,7 +666,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{0,1,2,4,5,3};
+    std::array<int,kNumStages> pending_order{0,1,2,4,6,5,3};
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -1040,6 +1045,7 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     }
 
     plug->spectrum.init();
+    plug->bass_mono.prepare(plug->sample_rate);
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
     // Seed static band centres for the limiter visualization.
@@ -1066,6 +1072,7 @@ static void plugin_reset(const clap_plugin_t* p) {
     plug->leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
     plug->out_leveler.reset(plug->sample_rate, g_state->axon_meta.leveler.target_lufs);
     plug->mel_limiter.reset();
+    plug->bass_mono.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
     for (auto& ch : plug->chains) {
@@ -1101,11 +1108,13 @@ struct AmountSnapshot {
     float ssl_comp_wet;
     float ml_wet, ml_ceiling_lin, ml_drive_lin, ml_adaptive_gain, ml_adaptive_speed;
     bool  ml_adaptive_brickwall;
+    float bm_wet, bm_freq;
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
     float lvl=1.f,lvt=-14.f,sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
+    float bmi=0.f,bmf=250.f;
     float eq=0.5f,trm_db=0.f;
     float olv=1.f,olt=-14.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
@@ -1130,6 +1139,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="MLD") mld=v;
         else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
         else if(c.id=="MLA") mla=v;
+        else if(c.id=="BMI") bmi=v; else if(c.id=="BMF") bmf=v;
     }
     AmountSnapshot s{};
     s.lvl_wet=lvl; s.lvl_target_lufs=lvt;
@@ -1150,6 +1160,8 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.ml_adaptive_gain  = mlg;
     s.ml_adaptive_speed = mls;
     s.ml_adaptive_brickwall = (mla >= 0.5f);
+    s.bm_wet  = bmi;
+    s.bm_freq = bmf;
     return s;
 }
 
@@ -1469,6 +1481,19 @@ void flush_chain_block_(Plugin& plug,
             mlp.adaptive_brickwall = amt.ml_adaptive_brickwall;
             plug.mel_limiter.process(work_l, work_r, static_cast<int>(n_ch),
                                      kBlockSize, mlp);
+            break;
+        }
+
+        case StageID::BassMono: {
+            if (amt.bm_wet <= 0.f || n_ch < 2) break;
+            plug.bass_mono.set_cutoff(amt.bm_freq);
+            // Process a copy so bm_wet can dial the effect in/out.
+            std::array<float,kBlockSize> bl{}, br{};
+            std::copy_n(work_l, kBlockSize, bl.data());
+            std::copy_n(work_r, kBlockSize, br.data());
+            plug.bass_mono.process(bl.data(), br.data(), kBlockSize);
+            blend_inplace_(work_l, bl.data(), amt.bm_wet, kBlockSize);
+            blend_inplace_(work_r, br.data(), amt.bm_wet, kBlockSize);
             break;
         }
 

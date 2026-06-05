@@ -431,13 +431,14 @@ const PROCESSORS = [
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   { id: 2, name: 'SATURATOR', params: ['SDR', 'SVO', 'SMX', 'STH', 'SBS'], wetParams: ['SMX'] },
   { id: 4, name: 'BUS COMP',  params: ['SSC'],                     wetParams: ['SSC'] },
+  { id: 6, name: 'BASS MONO', params: ['BMF'],                          wetParams: ['BMI'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
 ];
 
 // Runtime state
 let paramMeta   = {};   // id → { name, min, max, def, unit }
 let paramValues = {};   // id → float
-let procOrder   = [1,2,4,5];
+let procOrder   = [1,2,4,6,5];
 let selectedProc = 1;
 
 // ============================================================
@@ -1102,7 +1103,7 @@ window.axonInit = function(state) {
   paramMeta   = state.paramMeta   || {};
   paramValues = state.paramValues || {};
   const VISIBLE = new Set(PROCESSORS.map(p => p.id));
-  procOrder   = (state.processorOrder || [1,2,4,5]).filter(id => VISIBLE.has(id));
+  procOrder   = (state.processorOrder || [1,2,4,6,5]).filter(id => VISIBLE.has(id));
   selectedProc = procOrder[0] ?? 1;
 
   renderChain();
@@ -1151,8 +1152,10 @@ window.axonInit = function(state) {
     '#f4a261',  // 2 Saturator
     '#5fa8d3',  // 3 OutputLeveler
     '#bb86fc',  // 4 SslComp (BUS COMP)
+    '#e76f51',  // 5 MelLimiter
+    '#90be6d',  // 6 BassMono
   ];
-  const STAGE_NAMES = ['LEVELER', 'AUTO EQ', 'SAT', 'OUT LEV', 'BUS COMP'];
+  const STAGE_NAMES = ['LEVELER', 'AUTO EQ', 'SAT', 'OUT LEV', 'BUS COMP', 'LIMITER', 'BASS MONO'];
 
   const DB_MIN = -90, DB_MAX = 0;
 

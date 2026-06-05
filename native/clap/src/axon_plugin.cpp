@@ -1514,9 +1514,15 @@ void flush_chain_block_(Plugin& plug,
     // feed-forward from the real (metered) output, applied after metering — so
     // the OUT meter keeps showing the true master level. It's monitoring-only:
     // render with Auto Gain off to print the loud master.
+    // Feed-forward the limiter Drive (a known gain, scaled by limiter wet) so a
+    // Drive change is cancelled instantly instead of bumping for ~3 s while the
+    // LUFS loop catches up.
+    const float drive_db = 20.f * std::log10(std::max(1e-6f, amt.ml_drive_lin));
+    const float ff_db    = drive_db * amt.ml_wet;
     const float ag = plug.auto_gain.process(amt.auto_gain_on,
                                             plug.meter_in.readout().lufs_s,
-                                            plug.meter_out.readout().lufs_s);
+                                            plug.meter_out.readout().lufs_s,
+                                            ff_db);
     if (ag != 1.f) {
         for (uint32_t ch=0;ch<n_ch;++ch) {
             float* ob = plug.chains[ch].out_buf.data();

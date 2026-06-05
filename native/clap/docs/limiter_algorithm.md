@@ -14,7 +14,7 @@ with drive, and cap the final peak.
 ```
 
 Constants (`mel_limiter.hpp`): `kFFTSize=1024`, `kHopSize=256` (75 % overlap),
-`kNumBands=26`, `kBrickLA=64`, `kLatency = 1024+64 = 1088` samples (≈ 24.7 ms
+`kNumBands=26`, `kBrickLA=256`, `kLatency = 1024+256 = 1280` samples (≈ 29 ms
 @ 44.1 kHz). FFT via Apple Accelerate vDSP (`zrip`). Hann window throughout.
 
 ---
@@ -170,22 +170,31 @@ natural `kFFTSize−1` group delay up to exactly `kFFTSize`.
 The spectral stage controls *energy*, not instantaneous *peaks*, so a final
 linked lookahead limiter pins the actual sample peak to the ceiling:
 
-- A `kBrickLA = 64`-sample lookahead line delays the audio; the gain reacts to
-  the **incoming** sample (64 samples *ahead* of what's being output), so it can
-  pre-duck **before** a peak arrives.
-- `g_req = C / peak` when the upcoming peak exceeds `C`, else 1; smoothed with
+- A `kBrickLA = 256`-sample (≈ 5.8 ms) lookahead line delays the audio.
+- The gain targets the **loudest sample anywhere in the lookahead window**, found
+  with a **sliding-window maximum** (a monotonic deque, O(1) amortised). This is
+  the key over a naive single-sample tap: the gain sees the worst upcoming peak
+  as soon as it *enters* the window and has the full window to ramp down for it.
+- `g_req = C / windowed_max` when that max exceeds `C`, else 1; smoothed with
   attack/release into `brick_gain`.
 - The delayed sample is multiplied by `brick_gain`, then **hard-clipped to ±C**.
   That clamp is the absolute guarantee: regardless of ballistics, `|out| ≤ C`.
+
+The longer window plus the windowed detector means the gain is fully down before
+a peak in the clean modes (Even / Dynamic-tight) → the clip barely fires →
+low distortion, especially on **bass transients** whose long wavelengths a short
+window would clip rather than duck. (Measured: 0.1 % THD on a 60 Hz tone vs
+22.7 % for a pure clipper.) The attack times are *fractions of the window*, so
+they scale with it automatically.
 
 ### Even vs Dynamic (the MLA toggle)
 - **Even** (off): fixed tight attack (`16`-sample time constant) + fast 50 ms
   release. Consistent, clean, transparent.
 - **Dynamic** (on): the adaptive knobs reshape the brickwall —
   - **Adaptive Gain → attack character**: `atk = kBrickLA·(0.15 + gain·1.05)`
-    samples. Tight (≈10 smp, fully pre-ducks inside the lookahead → clean) →
-    loose (≈77 smp, *slower than the lookahead* so transients partially leak and
-    the hard clip catches them → punch + a little clipper grit).
+    samples. Tight (≈38 smp, fully pre-ducks well inside the 256-smp lookahead →
+    clean) → loose (≈307 smp, *slower than the lookahead* so transients partially
+    leak and the hard clip catches them → punch + a little clipper grit).
   - **Adaptive Speed → release**: 50 → 400 ms (slow = breathing/pumping).
 
   Attack is always bounded by the lookahead and the clip always fires last, so
@@ -203,7 +212,7 @@ linked lookahead limiter pins the actual sample peak to the ceiling:
 
 ## 10. Latency
 
-`kLatency = kFFTSize + kBrickLA = 1088` samples. The dry ring is delayed by this,
+`kLatency = kFFTSize + kBrickLA = 1280` samples. The dry ring is delayed by this,
 the wet path's STFT contributes `kFFTSize` (after the 1-sample trim) and the
 brickwall adds `kBrickLA`, so wet and dry stay sample-aligned. The plugin reports
 this to the host for delay compensation.
@@ -234,8 +243,10 @@ this to the host for delay compensation.
 
 ## Where it's verified
 
-`tests/test_mel_limiter.cpp` (12 units, asserts forced on via `-UNDEBUG`):
+`tests/test_mel_limiter.cpp` (13 units, asserts forced on via `-UNDEBUG`):
 silence, exact dry-bypass delay, ceiling reduction, NaN/extremes, reset, stereo
 link, **0 % WOLA reconstruction**, brickwall peak cap, drive loudness, ceiling
-audibility, adaptive-brickwall release, adaptive-brickwall attack. The LUFS in/out
-meter is cross-checked against the reference `LufsLeveler` in `tests/test_meter.cpp`.
+audibility, adaptive-brickwall release, adaptive-brickwall attack, **lookahead
+low-distortion** (0.1 % THD vs 22.7 % for a clipper on a bass tone). The LUFS
+in/out meter is cross-checked against the reference `LufsLeveler` in
+`tests/test_meter.cpp`.

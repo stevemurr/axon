@@ -21,7 +21,7 @@ public:
     static constexpr int kFFTSize  = 1024;
     static constexpr int kHopSize  = 256;
     static constexpr int kNumBands = 26;
-    static constexpr int kBrickLA  = 64;                  // brickwall lookahead
+    static constexpr int kBrickLA  = 256;                 // brickwall lookahead (~5.8 ms)
     static constexpr int kLatency  = kFFTSize + kBrickLA; // samples; report to host
 
     struct Params {
@@ -115,6 +115,14 @@ private:
     float brick_gain_{1.f};
     float brick_atk_{0.f};   // attack smoothing coeff (reaches target < kBrickLA)
     float brick_rel_{0.f};   // release smoothing coeff
+
+    // Sliding-window peak detector (monotonic deque) over the lookahead window,
+    // so the gain targets the loudest upcoming sample rather than just one.
+    static constexpr int kDqCap = kBrickLA + 1;
+    std::array<float, kDqCap>   dq_val_{};   // window maxima, decreasing front→back
+    std::array<long long, kDqCap> dq_idx_{}; // sample index of each entry
+    int       dq_head_{0}, dq_tail_{0};      // ring; empty when head == tail
+    long long brick_n_{0};                   // running input-sample counter
 
     void build_mel_();
     // True-peak brickwall on the wet output (linked). Reads the just-produced

@@ -86,6 +86,8 @@ void MelLimiter::reset() {
     band_gain_.fill(1.f);
     la_pos_     = 0;
     brick_gain_ = 1.f;
+    dq_head_ = dq_tail_ = 0;
+    brick_n_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,21 +212,37 @@ void MelLimiter::copy_display(float* levels_lin, float* gains_lin,
 // True-peak brickwall limiter (linked stereo, kBrickLA lookahead)
 // ---------------------------------------------------------------------------
 //
-// Reads the just-produced wet samples (which are kBrickLA "ahead" of the
-// output) to pre-duck the gain before a peak reaches the output, then applies
-// a hard safety clip so |out| ≤ ceiling is guaranteed regardless of ballistics.
+// The gain reacts to the loudest sample anywhere in the kBrickLA-sample
+// lookahead window (a sliding-window maximum via a monotonic deque), so it has
+// the full window to pre-duck before that peak reaches the output. A hard
+// safety clip still guarantees |out| ≤ ceiling whenever the attack is
+// deliberately slower than the window (Dynamic "loose" mode).
 void MelLimiter::brickwall_(const float* in, float* out, int n_ch,
                             float ceiling) {
-    // Peak of the incoming (look-ahead) samples, linked across channels.
-    float peak_in = 0.f;
-    for (int c = 0; c < n_ch; ++c)
-        peak_in = std::max(peak_in, std::fabs(in[c]));
+    // Magnitude of the newest (look-ahead) sample, linked across channels.
+    float m = 0.f;
+    for (int c = 0; c < n_ch; ++c) m = std::max(m, std::fabs(in[c]));
 
-    const float g_req = (peak_in > ceiling && peak_in > 1e-12f)
-                      ? ceiling / peak_in : 1.f;
+    // ── Sliding-window maximum over the last kBrickLA magnitudes ──
+    const long long idx = brick_n_++;
+    // Drop smaller values from the back (they can never be the max again).
+    while (dq_head_ != dq_tail_) {
+        const int back = (dq_tail_ - 1 + kDqCap) % kDqCap;
+        if (dq_val_[back] <= m) dq_tail_ = back;
+        else break;
+    }
+    dq_val_[dq_tail_] = m;
+    dq_idx_[dq_tail_] = idx;
+    dq_tail_ = (dq_tail_ + 1) % kDqCap;
+    // Drop the front once it falls outside the window.
+    while (dq_idx_[dq_head_] <= idx - kBrickLA)
+        dq_head_ = (dq_head_ + 1) % kDqCap;
 
-    // Fast attack toward a lower gain (completes within the lookahead),
-    // slow release back toward unity.
+    const float wmax  = dq_val_[dq_head_];                 // loudest in window
+    const float g_req = (wmax > ceiling && wmax > 1e-12f)
+                      ? ceiling / wmax : 1.f;
+
+    // Attack when ducking down, release when recovering.
     const float coef = (g_req < brick_gain_) ? brick_atk_ : brick_rel_;
     brick_gain_      = coef * brick_gain_ + (1.f - coef) * g_req;
 

@@ -75,6 +75,22 @@ double peak_abs(const float* x, int n, int skip = 0) {
     return p;
 }
 
+// Residual fraction after projecting out the fundamental at `freq` — a simple
+// THD-ish measure. ~0 for a pure sine, large for a clipped one.
+double thd_frac(const float* x, int start, int len, double freq, int sr = kSR) {
+    double w = 2.0 * kPi * freq / sr, ss = 0, sc = 0;
+    for (int i = 0; i < len; ++i) { double ph = w * (start + i); ss += x[start+i]*std::sin(ph); sc += x[start+i]*std::cos(ph); }
+    double as = 2.0 * ss / len, ac = 2.0 * sc / len;
+    double resid = 0, tot = 0;
+    for (int i = 0; i < len; ++i) {
+        double ph = w * (start + i);
+        double fund = as*std::sin(ph) + ac*std::cos(ph);
+        double r = x[start+i] - fund;
+        resid += r*r; tot += x[start+i]*x[start+i];
+    }
+    return tot > 0 ? std::sqrt(resid / tot) : 0.0;
+}
+
 nablafx::MelLimiter::Params default_params(float ceiling = 0.891f) {
     nablafx::MelLimiter::Params p;
     p.ceiling_lin    = ceiling;
@@ -520,6 +536,41 @@ void test_adaptive_brickwall_attack() {
     std::fprintf(stderr, "[adapt-atk]  PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 13: the lookahead limiter holds the ceiling on a bass tone with far
+// less distortion than a pure clipper (the no-lookahead degenerate case).
+// ---------------------------------------------------------------------------
+void test_lookahead_low_distortion() {
+    const float ceiling = 0.5f;
+    const int   N       = 2 * kSR;
+    const double f      = 60.0;
+    auto src = make_sine(f, 1.0, N);        // bass tone, well above ceiling
+
+    // Limiter (Even mode — clean attack within the lookahead).
+    nablafx::MelLimiter ml; ml.init(kSR);
+    auto p = default_params(ceiling);
+    p.drive_lin = 1.f;
+    std::vector<float> lim(src);
+    ml.process(lim.data(), nullptr, 1, N, p);
+
+    // Pure clipper baseline: hard-clip to ±ceiling, no lookahead/gain ride.
+    std::vector<float> clip(src);
+    for (auto& v : clip) v = std::clamp(v, -ceiling, ceiling);
+
+    const int start = kSR / 2, len = kSR;   // settled region, ~60 cycles
+    double thd_lim  = thd_frac(lim.data(),  start, len, f);
+    double thd_clip = thd_frac(clip.data(), start, len, f);
+    double pk = peak_abs(lim.data(), N, 3 * nablafx::MelLimiter::kFFTSize);
+
+    std::fprintf(stderr,
+        "[lookahead]  THD limiter=%.1f%%  clipper=%.1f%%   limiter peak=%.4f (ceil %.2f)\n",
+        thd_lim * 100, thd_clip * 100, pk, (double)ceiling);
+
+    assert(pk <= ceiling + 1e-4);            // ceiling held
+    assert(thd_lim < thd_clip * 0.4);        // lookahead ⇒ much cleaner
+    std::fprintf(stderr, "[lookahead]  PASS\n");
+}
+
 } // namespace
 
 int main() {
@@ -535,6 +586,7 @@ int main() {
     test_ceiling_control_is_audible();
     test_adaptive_brickwall_release();
     test_adaptive_brickwall_attack();
+    test_lookahead_low_distortion();
     std::fprintf(stderr, "ALL TESTS PASSED\n");
     return 0;
 }

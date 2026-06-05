@@ -620,6 +620,8 @@ function onToggleClick(id) {
   paramValues[id] = next;
   sendParam(id, next);
   refreshToggle(id);
+  // Dynamic toggle relabels the Attack/Release knobs — rebuild the surface.
+  if (id === 'MLA') renderSurface();
 }
 
 // Off/on labels for a toggle control.
@@ -627,6 +629,16 @@ function toggleLabels(id) {
   if (id === 'C_L') return ['COMP', 'LIMIT'];
   if (id === 'MLA') return ['EVEN', 'DYNAMIC'];
   return ['OFF', 'ON'];
+}
+
+// Mode-aware knob label: in the limiter's Dynamic mode the adaptive controls
+// drive the brickwall attack/release, so relabel them to match.
+function knobLabel(id) {
+  const m = paramMeta[id];
+  const dyn = (paramValues['MLA'] ?? (paramMeta['MLA'] ? paramMeta['MLA'].def : 0)) >= 0.5;
+  if (dyn && id === 'MLG') return 'Attack';
+  if (dyn && id === 'MLS') return 'Release';
+  return m ? m.name : id;
 }
 
 function refreshToggle(id) {
@@ -734,7 +746,7 @@ function buildControl(id) {
   const val = paramValues[id] ?? m.def;
   wrap.innerHTML = `
     <div class="knob-svg-slot">${buildKnobSVG(id)}</div>
-    <div class="knob-label">${m.name}</div>
+    <div class="knob-label">${knobLabel(id)}</div>
     <div class="knob-value">${formatValue(id, val)}</div>
   `;
 
@@ -1656,6 +1668,8 @@ window.axonSetParam = function(id, value) {
   }
 
   if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
+  // Dynamic toggle (e.g. host automation) relabels Attack/Release knobs.
+  if (id === 'MLA' && selectedProc === 5) renderSurface();
 
   refreshChain();
 };

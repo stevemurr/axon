@@ -23,8 +23,8 @@ adapt EQ, saturation, glue, width and loudness — in real time, inside your DAW
 Axon packs a complete, reorderable mastering signal path behind a single,
 adaptive interface. Some stages are **neural** (per-mix adaptive EQ, saturation,
 SSL-style bus compression) running on ONNX Runtime; others are **hand-written
-DSP** (LUFS levelers, a Mel-band loudness maximizer, bass mono-maker, true-peak
-ceiling) accelerated with Apple vDSP. Drag to reorder, dial in, and read it all
+DSP** (a Mel-band loudness maximizer, bass mono-maker, true-peak ceiling)
+accelerated with Apple vDSP. Drag to reorder, dial in, and read it all
 on a live in/out LUFS / RMS / peak meter.
 
 Built on [nablafx](https://github.com/stevemurr/nablafx) (our fork of
@@ -50,18 +50,15 @@ Built on [nablafx](https://github.com/stevemurr/nablafx) (our fork of
 
 ## 🎛️ The chain
 
-Default order (drag to reorder; Input/Output levelers are pinned first/last,
-True-Peak Ceiling is always final):
+Default order (drag to reorder; True-Peak Ceiling is always final):
 
 | # | Stage | What it does | Key controls |
 |---|-------|--------------|--------------|
-| 1 | **Input Leveler** | LUFS-matched input gain toward a target | `Leveler`, `Lev Target` |
-| 2 | **Auto EQ** 🧠 | Per-class adaptive EQ (5-band parametric **or** 64-band spectral mask) driven by an LSTM | `EQ`, `Class`, `Range`, `Boost`, `Speed` |
-| 3 | **Saturator** 🧠 | Rational soft-clipper with HPF/LPF, threshold & bias | `Drive`, `Output`, `Mix`, `Thresh`, `Bias` |
-| 4 | **Bus Comp** 🧠 | TCN-emulated SSL-style bus compressor (on/off) | `Bus Comp` |
-| 5 | **Bass Mono** | Mono below a cutoff; mono sum preserved exactly | `Bass Mono` (on/off), `Frequency` |
-| 6 | **Limiter** | Mel-band maximizer + true-peak lookahead brickwall | `Drive`, `Ceiling`, `Attack/Adaptive Gain`, `Release/Adaptive Speed`, `Dynamic` |
-| 7 | **Output Leveler** | LUFS leveling at the output | `Out Lev`, `Out Target` |
+| 1 | **Auto EQ** 🧠 | Per-class adaptive EQ (5-band parametric **or** 64-band spectral mask) driven by an LSTM | `EQ`, `Class`, `Range`, `Boost`, `Speed` |
+| 2 | **Saturator** 🧠 | Rational soft-clipper with HPF/LPF, threshold & bias | `Drive`, `Output`, `Mix`, `Thresh`, `Bias` |
+| 3 | **Bus Comp** 🧠 | TCN-emulated SSL-style bus compressor (on/off) | `Bus Comp` |
+| 4 | **Bass Mono** | Mono below a cutoff; mono sum preserved exactly | `Bass Mono` (on/off), `Frequency` |
+| 5 | **Limiter** | Mel-band maximizer + true-peak lookahead brickwall | `Drive`, `Ceiling`, `Attack/Adaptive Gain`, `Release/Adaptive Speed`, `Dynamic` |
 | — | **True-Peak Ceiling** | Always-last 4× oversampled brickwall, guarantees the dBTP ceiling | (fixed) |
 
 🧠 = neural (ONNX); the rest is native DSP.
@@ -111,7 +108,7 @@ The native DSP has standalone unit tests (no external deps):
 cd native/clap
 cmake --build build --target test_mel_limiter test_meter test_bass_mono
 build/test_mel_limiter   # 13 units: WOLA reconstruction, ceiling, drive, lookahead THD…
-build/test_meter         # LUFS cross-checked against the reference leveler
+build/test_meter         # LUFS cross-checked against a reference BS.1770 meter
 build/test_bass_mono     # mono-below-cutoff, exact mono-sum preservation
 ```
 
@@ -160,8 +157,8 @@ axon/                       (repo root)
 
 - **Inference:** ONNX Runtime via a thin `OrtMiniSession`; everything latency-
   and realtime-aware. FFTs use Apple Accelerate vDSP.
-- **Native DSP:** LUFS levelers, `MelLimiter`, `BassMono`, `LoudnessMeter`,
-  `TruePeakCeiling`, `SpectralMaskEQ` — all dependency-free and unit-tested.
+- **Native DSP:** `MelLimiter`, `BassMono`, `LoudnessMeter`, `TruePeakCeiling`,
+  `SpectralMaskEQ` — all dependency-free and unit-tested.
 - **Bundle format:** `model.onnx` + `plugin_meta.json` (+ source Hydra yaml) per
   stage, composed by `axon_meta.json`.
 - **Why a nablafx fork:** adds `SpectralMaskEQ` / `SpectralDynamicController` and

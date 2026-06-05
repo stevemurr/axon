@@ -431,7 +431,7 @@ const PROCESSORS = [
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   { id: 2, name: 'SATURATOR', params: ['SDR', 'SVO', 'SMX', 'STH', 'SBS'], wetParams: ['SMX'] },
   { id: 4, name: 'BUS COMP',  params: ['SSC'],                     wetParams: ['SSC'] },
-  { id: 6, name: 'BASS MONO', params: ['BMF'],                          wetParams: ['BMI'] },
+  { id: 6, name: 'BASS MONO', params: ['BMI', 'BMF'],                   wetParams: ['BMI'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
 ];
 
@@ -621,6 +621,7 @@ function onToggleClick(id) {
   paramValues[id] = next;
   sendParam(id, next);
   refreshToggle(id);
+  refreshChain();                     // wet/enable toggles drive the active dot
   // Dynamic toggle relabels the Attack/Release knobs — rebuild the surface.
   if (id === 'MLA') renderSurface();
 }

@@ -110,6 +110,8 @@ void MelLimiter::build_mel_() {
         const float lo  = bin_pts[b];
         const float ctr = bin_pts[b + 1];
         const float hi  = bin_pts[b + 2];
+        // Band centre in Hz (for the UI x-axis).
+        band_center_hz_[b] = ctr * static_cast<float>(sr_) / kFFTSize;
         const float ls  = std::max(ctr - lo, 1e-6f);
         const float rs  = std::max(hi  - ctr, 1e-6f);
         for (int k = 0; k < n_freq_; ++k) {
@@ -149,6 +151,7 @@ void MelLimiter::solve_gains_(float* const* ch_sp_re,
             if (e > max_e) max_e = e;
         }
         band_level[b] = std::sqrt(max_e) * level_scale_;
+        disp_level_[b] = band_level[b];   // display tap
     }
 
     // Total energy across bands.
@@ -191,6 +194,15 @@ void MelLimiter::solve_gains_(float* const* ch_sp_re,
                          ? std::min(1.f, lambda / band_level[n])
                          : 1.f;
         out_gains[n] = std::clamp((1.f - alpha) * g_uni + alpha * g_wf, 0.f, 1.f);
+    }
+}
+
+void MelLimiter::copy_display(float* levels_lin, float* gains_lin,
+                              float* centers_hz) const {
+    for (int b = 0; b < kNumBands; ++b) {
+        levels_lin[b] = disp_level_[b];
+        gains_lin[b]  = band_gain_[b];
+        centers_hz[b] = band_center_hz_[b];
     }
 }
 
@@ -240,6 +252,20 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
     const float rel_ms  = 30.f + p.adaptive_speed * 370.f;
     const float atk_c   = std::exp(-hop_ms / atk_ms);
     const float rel_c   = std::exp(-hop_ms / rel_ms);
+
+    // Brickwall release: fixed/fast ("even") unless the adaptive toggle routes
+    // the adaptive controls into it. adaptive_gain gates how far the release
+    // departs from the tight 50 ms baseline; adaptive_speed sets how slow
+    // (50→400 ms). Slower, program-dependent release ⇒ a more dynamic, breathing
+    // limiter. Attack stays fast and the safety clip still guarantees the ceiling.
+    {
+        float bw_rel_ms = 50.f;
+        if (p.adaptive_brickwall) {
+            const float dyn_ms = 50.f + p.adaptive_speed * 350.f;   // up to 400 ms
+            bw_rel_ms = 50.f + p.adaptive_gain * (dyn_ms - 50.f);
+        }
+        brick_rel_ = std::exp(-1.f / (bw_rel_ms * 0.001f * static_cast<float>(sr_)));
+    }
 
     // Per-bin gain scratch — updated each hop.
     std::vector<float> bin_gain_arr(n_freq_, 0.f);

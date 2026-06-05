@@ -117,11 +117,13 @@ if(NOT _have_sndfile)
 endif()
 
 # test_mel_limiter — unit tests for the MelLimiter DSP (no external deps).
+# -UNDEBUG keeps assert() live even in Release builds (these are assert-based).
 add_executable(test_mel_limiter
     tests/test_mel_limiter.cpp
     src/mel_limiter.cpp
 )
 target_include_directories(test_mel_limiter PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_mel_limiter PRIVATE -UNDEBUG)
 target_link_libraries(test_mel_limiter PRIVATE "-framework Accelerate")
 
 # test_meter — unit tests for the LoudnessMeter (cross-checked vs LufsLeveler).
@@ -131,6 +133,7 @@ add_executable(test_meter
     src/lufs_leveler.cpp
 )
 target_include_directories(test_meter PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_meter PRIVATE -UNDEBUG)
 
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)

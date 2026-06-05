@@ -291,6 +291,16 @@
     background: #0d0d0d;
   }
   #sat-filter-canvas { display: block; }
+  #lim-viz-wrap {
+    display: none;
+    margin-top: 14px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: #0d0d0d;
+  }
+  #lim-viz-canvas { display: block; }
 
   /* ── Layout shell ────────────────────────────────────────── */
   #app {
@@ -391,6 +401,9 @@
     <div id="sat-filter-wrap">
       <canvas id="sat-filter-canvas" width="660" height="108"></canvas>
     </div>
+    <div id="lim-viz-wrap">
+      <canvas id="lim-viz-canvas" width="660" height="108"></canvas>
+    </div>
     </div>
    </div><!-- /main-col -->
    <div id="meter-panel">
@@ -418,7 +431,7 @@ const PROCESSORS = [
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   { id: 2, name: 'SATURATOR', params: ['SDR', 'SVO', 'SMX', 'STH', 'SBS'], wetParams: ['SMX'] },
   { id: 4, name: 'BUS COMP',  params: ['SSC'],                     wetParams: ['SSC'] },
-  { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS'], wetParams: ['MLI'] },
+  { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
 ];
 
 // Runtime state
@@ -609,16 +622,24 @@ function onToggleClick(id) {
   refreshToggle(id);
 }
 
+// Off/on labels for a toggle control.
+function toggleLabels(id) {
+  if (id === 'C_L') return ['COMP', 'LIMIT'];
+  if (id === 'MLA') return ['EVEN', 'DYNAMIC'];
+  return ['OFF', 'ON'];
+}
+
 function refreshToggle(id) {
   const el = document.querySelector(`.toggle-wrap[data-id="${id}"]`);
   if (!el) return;
   const val = paramValues[id] ?? 0;
   const btn  = el.querySelector('.toggle-btn');
   const valEl = el.querySelector('.toggle-value');
-  const isLimit = val >= 0.5;
-  btn.textContent = isLimit ? 'LIMIT' : 'COMP';
-  btn.classList.toggle('on', isLimit);
-  if (valEl) valEl.textContent = isLimit ? 'LIMIT' : 'COMP';
+  const offL = el.dataset.off || 'OFF', onL = el.dataset.on || 'ON';
+  const isOn = val >= 0.5;
+  btn.textContent = isOn ? onL : offL;
+  btn.classList.toggle('on', isOn);
+  if (valEl) valEl.textContent = isOn ? onL : offL;
 }
 
 // ============================================================
@@ -684,19 +705,22 @@ function buildControl(id) {
     return buildEnumPicker(id);
   }
 
-  if (id === 'C_L') {
-    // Toggle button
+  if (id === 'C_L' || m.unit === 'switch') {
+    // Toggle button (on/off, with id-specific labels).
+    const [offL, onL] = toggleLabels(id);
     const wrap = document.createElement('div');
     wrap.className = 'toggle-wrap';
     wrap.dataset.id = id;
+    wrap.dataset.off = offL;
+    wrap.dataset.on  = onL;
 
     const val = paramValues[id] ?? m.def;
-    const isLimit = val >= 0.5;
+    const isOn = val >= 0.5;
 
     wrap.innerHTML = `
-      <div class="toggle-btn${isLimit ? ' on' : ''}">${isLimit ? 'LIMIT' : 'COMP'}</div>
+      <div class="toggle-btn${isOn ? ' on' : ''}">${isOn ? onL : offL}</div>
       <div class="toggle-label">${m.name}</div>
-      <div class="toggle-value">${formatValue(id, val)}</div>
+      <div class="toggle-value">${isOn ? onL : offL}</div>
     `;
     wrap.querySelector('.toggle-btn').addEventListener('click', () => onToggleClick(id));
     return wrap;
@@ -747,6 +771,11 @@ function renderSurface() {
   const showFilter = selectedProc === 2;
   satWrap.style.display = showFilter ? 'block' : 'none';
   if (showFilter) drawSatFilter();
+
+  const limWrap = document.getElementById('lim-viz-wrap');
+  const showLim = selectedProc === 5;
+  limWrap.style.display = showLim ? 'block' : 'none';
+  if (showLim) drawLimViz();
 }
 
 // ============================================================
@@ -1517,6 +1546,102 @@ window.axonInit = function(state) {
     draw();
   };
 })();
+
+// ============================================================
+// LIMITER BAND VISUALIZATION  (Mel band levels + gain reduction)
+// ============================================================
+let limData = null;
+
+function drawLimViz() {
+  const canvas = document.getElementById('lim-viz-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const LV_TOP = 6, LV_BOT = -60;
+  const padL = 22, padB = 12, padT = 6;
+  const plotL = padL, plotR = W - 6, plotW = plotR - plotL;
+  const plotT = padT, plotB = H - padB, plotH = plotB - plotT;
+  const yFor = db => plotT + (LV_TOP - Math.max(LV_BOT, Math.min(LV_TOP, db))) / (LV_TOP - LV_BOT) * plotH;
+
+  // dB grid + labels.
+  ctx.font = '8px -apple-system, sans-serif';
+  ctx.textBaseline = 'middle';
+  for (let db = LV_TOP; db >= LV_BOT; db -= 12) {
+    const y = yFor(db);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(plotL, y); ctx.lineTo(plotR, y); ctx.stroke();
+    ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+    ctx.fillText(String(db), plotL - 3, y);
+  }
+
+  const NB = limData && limData.lvl ? limData.lvl.length : 26;
+  const slot = plotW / NB;
+  const barW = slot * 0.72;
+
+  // Ceiling reference line.
+  if (limData && typeof limData.ceiling === 'number') {
+    const yc = yFor(limData.ceiling);
+    ctx.strokeStyle = 'rgba(76,201,168,0.6)';
+    ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(plotL, yc); ctx.lineTo(plotR, yc); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(76,201,168,0.8)'; ctx.textAlign = 'left';
+    ctx.fillText('CEIL', plotL + 2, yc - 5 < plotT + 4 ? yc + 6 : yc - 5);
+  }
+
+  if (limData && limData.lvl) {
+    const active = limData.active !== false;
+    ctx.globalAlpha = active ? 1 : 0.3;
+    for (let b = 0; b < NB; b++) {
+      const lvl = limData.lvl[b];
+      const gr  = limData.gr ? limData.gr[b] : 0;   // ≤ 0 dB
+      const out = lvl + gr;                          // post-limit band level
+      const x   = plotL + b * slot + (slot - barW) / 2;
+      const yOut = yFor(out), yLvl = yFor(lvl);
+      // Surviving (output) level — teal.
+      if (plotB - yOut > 0) {
+        ctx.fillStyle = '#2a9d8f';
+        ctx.fillRect(x, yOut, barW, plotB - yOut);
+      }
+      // Gain-reduction cap — red (this is where limiting is acting).
+      if (gr < -0.3 && yOut - yLvl > 0) {
+        ctx.fillStyle = '#e76f51';
+        ctx.fillRect(x, yLvl, barW, yOut - yLvl);
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Frequency labels at a few decades.
+    if (limData.f) {
+      ctx.fillStyle = '#666'; ctx.font = '8px -apple-system, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+      [100, 1000, 10000].forEach(tf => {
+        let bi = 0, bd = 1e9;
+        for (let b = 0; b < NB; b++) { const d = Math.abs(limData.f[b] - tf); if (d < bd) { bd = d; bi = b; } }
+        const x = plotL + bi * slot + slot / 2;
+        ctx.fillText(tf >= 1000 ? (tf / 1000) + 'k' : String(tf), x, H - 3);
+      });
+    }
+
+    if (!active) {
+      ctx.fillStyle = '#888'; ctx.font = '700 11px -apple-system, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('LIMITER OFF', W / 2, H / 2);
+    }
+  }
+
+  // Legend.
+  ctx.font = '8px -apple-system, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#2a9d8f'; ctx.fillText('■ LEVEL', plotR, 2);
+  ctx.fillStyle = '#e76f51'; ctx.fillText('■ REDUCTION', plotR - 48, 2);
+}
+
+window.axonLimiter = function(d) {
+  limData = d;
+  if (selectedProc === 5) drawLimViz();
+};
 
 window.axonSetParam = function(id, value) {
   paramValues[id] = value;

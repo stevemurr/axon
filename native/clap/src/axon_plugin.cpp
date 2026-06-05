@@ -685,6 +685,12 @@ struct Plugin {
     std::atomic<float> m_out_lufs_s{-120.f}, m_out_lufs_m{-120.f},
                        m_out_rms{-120.f},    m_out_peak{-120.f};
 
+    // Limiter band visualization (audio thread snapshots under try_lock).
+    std::mutex lim_mtx;
+    std::array<float, nablafx::MelLimiter::num_bands()> lim_levels{}, lim_gains{}, lim_centers{};
+    float lim_ceiling{1.f};
+    bool  lim_active{false};
+
     // Shared levelers — input and output, both apply linked L/R gain.
     LufsLeveler              leveler;
     LufsLeveler              out_leveler;
@@ -1036,6 +1042,10 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     plug->spectrum.init();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
+    // Seed static band centres for the limiter visualization.
+    plug->mel_limiter.copy_display(plug->lim_levels.data(),
+                                   plug->lim_gains.data(),
+                                   plug->lim_centers.data());
 
     plug->current_latency.store(compute_latency_(*plug), std::memory_order_relaxed);
     plug->activated = true;
@@ -1090,11 +1100,12 @@ struct AmountSnapshot {
     float eq_speed_ms;
     float ssl_comp_wet;
     float ml_wet, ml_ceiling_lin, ml_drive_lin, ml_adaptive_gain, ml_adaptive_speed;
+    bool  ml_adaptive_brickwall;
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
     float lvl=1.f,lvt=-14.f,sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
-    float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f;
+    float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float eq=0.5f,trm_db=0.f;
     float olv=1.f,olt=-14.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
@@ -1118,6 +1129,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="MLI") mli=v; else if(c.id=="MLC") mlc=v;
         else if(c.id=="MLD") mld=v;
         else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
+        else if(c.id=="MLA") mla=v;
     }
     AmountSnapshot s{};
     s.lvl_wet=lvl; s.lvl_target_lufs=lvt;
@@ -1137,6 +1149,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.ml_drive_lin      = std::pow(10.f, mld / 20.f);  // dB → linear gain
     s.ml_adaptive_gain  = mlg;
     s.ml_adaptive_speed = mls;
+    s.ml_adaptive_brickwall = (mla >= 0.5f);
     return s;
 }
 
@@ -1453,6 +1466,7 @@ void flush_chain_block_(Plugin& plug,
             mlp.adaptive_gain  = amt.ml_adaptive_gain;
             mlp.adaptive_speed = amt.ml_adaptive_speed;
             mlp.wet_mix        = amt.ml_wet;
+            mlp.adaptive_brickwall = amt.ml_adaptive_brickwall;
             plug.mel_limiter.process(work_l, work_r, static_cast<int>(n_ch),
                                      kBlockSize, mlp);
             break;
@@ -1655,6 +1669,16 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
         for (uint32_t ch = 0; ch < n_ch; ++ch)
             plug->chains[ch].in_fill = 0;
     }
+
+    // Snapshot limiter band state for the UI (try_lock — never blocks audio).
+    if (plug->lim_mtx.try_lock()) {
+        plug->mel_limiter.copy_display(plug->lim_levels.data(),
+                                       plug->lim_gains.data(),
+                                       plug->lim_centers.data());
+        plug->lim_ceiling = amt.ml_ceiling_lin;
+        plug->lim_active  = (amt.ml_wet > 0.f);
+        plug->lim_mtx.unlock();
+    }
     return CLAP_PROCESS_CONTINUE;
 }
 
@@ -1815,6 +1839,43 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
             plug->m_out_rms.load(std::memory_order_relaxed),
             plug->m_out_peak.load(std::memory_order_relaxed));
         axon_gui_eval_js(plug->gui_state, mjs);
+    }
+
+    // Push limiter band visualization (levels + gain reduction per Mel band).
+    {
+        constexpr int NB = nablafx::MelLimiter::num_bands();
+        std::array<float, NB> f{}, lvl{}, gr{};
+        float ceil_lin; bool active;
+        {
+            std::lock_guard<std::mutex> lk(plug->lim_mtx);
+            f = plug->lim_centers; ceil_lin = plug->lim_ceiling; active = plug->lim_active;
+            for (int b = 0; b < NB; ++b) {
+                const float L = plug->lim_levels[b];
+                const float G = plug->lim_gains[b];
+                lvl[b] = (L > 1e-6f) ? 20.f * std::log10(L) : -90.f;   // band level dB
+                gr[b]  = (G > 1e-6f) ? 20.f * std::log10(G) : -60.f;   // gain reduction dB (≤0)
+            }
+        }
+        const float ceil_db = (ceil_lin > 1e-6f) ? 20.f * std::log10(ceil_lin) : -90.f;
+        std::string js;
+        js.reserve(1024);
+        js = "axonLimiter({\"active\":";
+        js += (active ? "true" : "false");
+        js += ",\"ceiling\":";
+        char nb[24];
+        std::snprintf(nb, sizeof(nb), "%.1f", ceil_db); js += nb;
+        auto arr = [&](const char* key, const std::array<float,NB>& a, int dec) {
+            js += ",\""; js += key; js += "\":[";
+            for (int b = 0; b < NB; ++b) {
+                if (b) js += ',';
+                std::snprintf(nb, sizeof(nb), dec == 0 ? "%.0f" : "%.1f", a[b]);
+                js += nb;
+            }
+            js += ']';
+        };
+        arr("f", f, 0); arr("lvl", lvl, 1); arr("gr", gr, 1);
+        js += "})";
+        axon_gui_eval_js(plug->gui_state, js.c_str());
     }
 }
 

@@ -30,6 +30,10 @@ public:
         float adaptive_gain{0.5f};   // 0 = uniform limiting, 1 = max water-fill
         float adaptive_speed{0.5f};  // release time [0..1] → [30..400 ms]
         float wet_mix{1.f};          // wet/dry bypass
+        // When true, the adaptive_gain/adaptive_speed controls also shape the
+        // brickwall release (program-dependent, "dynamic" — Elevate-like).
+        // When false, the brickwall uses a fixed fast release ("even").
+        bool  adaptive_brickwall{false};
     };
 
     MelLimiter();
@@ -43,6 +47,14 @@ public:
     // Process n_samples in-place for up to 2 channels.
     // Gains are linked across channels (use max per-band energy for decisions).
     void process(float* l, float* r, int n_ch, int n_samples, const Params& p);
+
+    // ── Display taps (main thread snapshots these; audio thread writes them) ──
+    static constexpr int num_bands() { return kNumBands; }
+    // Copy the latest per-band display state. Pointers must hold kNumBands each:
+    //   levels_lin  — measured (driven) band level, linear amplitude
+    //   gains_lin   — smoothed per-band gain applied (1 = no limiting)
+    //   centers_hz  — band centre frequencies (static after init)
+    void copy_display(float* levels_lin, float* gains_lin, float* centers_hz) const;
 
 private:
     int sr_{44100};
@@ -86,6 +98,10 @@ private:
 
     // Shared per-band gain state (linked stereo).
     std::array<float, kNumBands> band_gain_{};
+
+    // Display taps: latest measured band levels + static band centres (Hz).
+    mutable std::array<float, kNumBands> disp_level_{};
+    std::array<float, kNumBands>         band_center_hz_{};
 
     float ola_scale_{1.f};
     // Converts raw vDSP FFT-domain energy to linear-amplitude units so band

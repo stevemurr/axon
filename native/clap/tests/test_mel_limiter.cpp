@@ -396,6 +396,71 @@ void test_ceiling_control_is_audible() {
     std::fprintf(stderr, "[audible]    PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 11: adaptive-brickwall toggle slows the brickwall release
+//
+// Same params except adaptive_brickwall on/off. A loud section that drops to a
+// quiet level lets the brickwall gain recover. The toggle changes ONLY the
+// brickwall, so any difference isolates it. Slow release ⇒ the region right
+// after the drop stays more attenuated (lower RMS). The ceiling must hold in
+// both modes.
+// ---------------------------------------------------------------------------
+void test_adaptive_brickwall_release() {
+    const float ceiling = 0.5f;            // -6 dBFS
+    const int   sec     = kSR;
+    const int   N       = 2 * sec;
+
+    // Quiet tone (amp 0.35 < ceiling) so the broadband spectral solver stays
+    // inert (total < C, early-out), with one brief loud burst whose energy is
+    // small enough to keep the 1024-window total below the ceiling but whose
+    // PEAK exceeds it. Only the brickwall reacts → its release is isolated.
+    const int bstart = sec / 2;
+    const int blen   = 32;                  // ~0.7 ms
+    std::vector<float> src = make_sine(1000.0, 0.35, N);
+    {
+        auto burst = make_sine(1000.0, 1.0, blen);
+        std::copy(burst.begin(), burst.end(), src.begin() + bstart);
+    }
+
+    auto run = [&](bool adaptive_bw) {
+        nablafx::MelLimiter ml; ml.init(kSR);
+        auto p = default_params(ceiling);
+        p.drive_lin         = 1.f;
+        p.adaptive_gain     = 1.f;
+        p.adaptive_speed    = 1.f;          // → 400 ms brickwall release when on
+        p.adaptive_brickwall = adaptive_bw;
+        std::vector<float> b(src);
+        ml.process(b.data(), nullptr, 1, N, p);
+        return b;
+    };
+
+    auto b_off = run(false);
+    auto b_on  = run(true);
+
+    assert(all_finite(b_off.data(), N));
+    assert(all_finite(b_on.data(),  N));
+
+    // After the burst, the brickwall gain releases back to unity. Measure a
+    // window 5–60 ms after the burst: slow (dynamic) release keeps the tone
+    // more ducked than the fast (even) release.
+    const int L  = nablafx::MelLimiter::kLatency;
+    const int w0 = bstart + L + blen + kSR / 200;     // +5 ms after burst
+    const int w1 = bstart + L + blen + (3 * kSR) / 50; // +60 ms after burst
+    double rms_off = rms(b_off.data() + w0, w1 - w0);
+    double rms_on  = rms(b_on.data()  + w0, w1 - w0);
+    double pk_off  = peak_abs(b_off.data(), N);
+    double pk_on   = peak_abs(b_on.data(),  N);
+
+    std::fprintf(stderr,
+        "[adapt-bw]   post-burst rms: off=%.4f on=%.4f (ratio %.2f)   peak: off=%.4f on=%.4f (ceil %.2f)\n",
+        rms_off, rms_on, rms_on / rms_off, pk_off, pk_on, (double)ceiling);
+
+    assert(pk_off <= ceiling + 1e-4);       // ceiling held, fixed release
+    assert(pk_on  <= ceiling + 1e-4);       // ceiling held, dynamic release
+    assert(rms_on < rms_off * 0.9);         // dynamic release recovers slower
+    std::fprintf(stderr, "[adapt-bw]   PASS\n");
+}
+
 } // namespace
 
 int main() {
@@ -409,6 +474,7 @@ int main() {
     test_brickwall_caps_peak();
     test_drive_increases_loudness();
     test_ceiling_control_is_audible();
+    test_adaptive_brickwall_release();
     std::fprintf(stderr, "ALL TESTS PASSED\n");
     return 0;
 }

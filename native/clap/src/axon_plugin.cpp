@@ -694,6 +694,7 @@ struct Plugin {
     std::mutex lim_mtx;
     std::array<float, nablafx::MelLimiter::num_bands()> lim_levels{}, lim_gains{}, lim_centers{};
     float lim_ceiling{1.f};
+    float lim_brick{1.f};      // brickwall gain (1 = no peak limiting)
     bool  lim_active{false};
 
     // Shared levelers — input and output, both apply linked L/R gain.
@@ -1701,6 +1702,7 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
                                        plug->lim_gains.data(),
                                        plug->lim_centers.data());
         plug->lim_ceiling = amt.ml_ceiling_lin;
+        plug->lim_brick   = plug->mel_limiter.brickwall_gain();
         plug->lim_active  = (amt.ml_wet > 0.f);
         plug->lim_mtx.unlock();
     }
@@ -1870,10 +1872,11 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
     {
         constexpr int NB = nablafx::MelLimiter::num_bands();
         std::array<float, NB> f{}, lvl{}, gr{};
-        float ceil_lin; bool active;
+        float ceil_lin, brick_lin; bool active;
         {
             std::lock_guard<std::mutex> lk(plug->lim_mtx);
-            f = plug->lim_centers; ceil_lin = plug->lim_ceiling; active = plug->lim_active;
+            f = plug->lim_centers; ceil_lin = plug->lim_ceiling;
+            brick_lin = plug->lim_brick; active = plug->lim_active;
             for (int b = 0; b < NB; ++b) {
                 const float L = plug->lim_levels[b];
                 const float G = plug->lim_gains[b];
@@ -1881,13 +1884,16 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
                 gr[b]  = (G > 1e-6f) ? 20.f * std::log10(G) : -60.f;   // gain reduction dB (≤0)
             }
         }
-        const float ceil_db = (ceil_lin > 1e-6f) ? 20.f * std::log10(ceil_lin) : -90.f;
+        const float ceil_db  = (ceil_lin  > 1e-6f) ? 20.f * std::log10(ceil_lin)  : -90.f;
+        const float brick_db = (brick_lin > 1e-6f) ? 20.f * std::log10(brick_lin) : -24.f; // peak GR ≤0
         std::string js;
         js.reserve(1024);
         js = "axonLimiter({\"active\":";
         js += (active ? "true" : "false");
-        js += ",\"ceiling\":";
         char nb[24];
+        js += ",\"brick\":";
+        std::snprintf(nb, sizeof(nb), "%.1f", brick_db); js += nb;
+        js += ",\"ceiling\":";
         std::snprintf(nb, sizeof(nb), "%.1f", ceil_db); js += nb;
         auto arr = [&](const char* key, const std::array<float,NB>& a, int dec) {
             js += ",\""; js += key; js += "\":[";

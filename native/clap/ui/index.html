@@ -1567,6 +1567,16 @@ window.axonInit = function(state) {
 // LIMITER BAND VISUALIZATION  (Mel band levels + gain reduction)
 // ============================================================
 let limData = null;
+// Smoothed display state — rises quickly to show activity, falls slowly so the
+// readout is calm/legible instead of ballistic.
+const _lim = { lvl: null, gr: null, brick: 0, init: false };
+
+// Activation → colour: teal (idle) → amber → red (heavy gain reduction).
+function grColor(grDb, alpha) {
+  const a = Math.max(0, Math.min(1, -grDb / 9));   // 0 dB..-9 dB → 0..1
+  const hue = 168 - a * 158;                        // 168 teal → 10 red
+  return `hsla(${hue}, ${Math.round(55 + a * 25)}%, ${Math.round(52 + a * 6)}%, ${alpha})`;
+}
 
 function drawLimViz() {
   const canvas = document.getElementById('lim-viz-canvas');
@@ -1576,7 +1586,7 @@ function drawLimViz() {
   ctx.clearRect(0, 0, W, H);
 
   const LV_TOP = 6, LV_BOT = -60;
-  const padL = 22, padB = 12, padT = 6;
+  const padL = 22, padB = 12, padT = 14;
   const plotL = padL, plotR = W - 6, plotW = plotR - plotL;
   const plotT = padT, plotB = H - padB, plotH = plotB - plotT;
   const yFor = db => plotT + (LV_TOP - Math.max(LV_BOT, Math.min(LV_TOP, db))) / (LV_TOP - LV_BOT) * plotH;
@@ -1592,45 +1602,45 @@ function drawLimViz() {
     ctx.fillText(String(db), plotL - 3, y);
   }
 
-  const NB = limData && limData.lvl ? limData.lvl.length : 26;
+  const lvlArr = _lim.lvl, grArr = _lim.gr;
+  const NB = lvlArr ? lvlArr.length : 26;
   const slot = plotW / NB;
-  const barW = slot * 0.72;
+  const barW = slot * 0.74;
 
   // Ceiling reference line.
   if (limData && typeof limData.ceiling === 'number') {
     const yc = yFor(limData.ceiling);
-    ctx.strokeStyle = 'rgba(76,201,168,0.6)';
+    ctx.strokeStyle = 'rgba(76,201,168,0.55)';
     ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(plotL, yc); ctx.lineTo(plotR, yc); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = 'rgba(76,201,168,0.8)'; ctx.textAlign = 'left';
-    ctx.fillText('CEIL', plotL + 2, yc - 5 < plotT + 4 ? yc + 6 : yc - 5);
+    ctx.fillStyle = 'rgba(76,201,168,0.8)'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('CEIL', plotL + 2, yc - 6 < plotT ? yc + 6 : yc - 6);
   }
 
-  if (limData && limData.lvl) {
-    const active = limData.active !== false;
+  if (lvlArr) {
+    const active = !limData || limData.active !== false;
     ctx.globalAlpha = active ? 1 : 0.3;
     for (let b = 0; b < NB; b++) {
-      const lvl = limData.lvl[b];
-      const gr  = limData.gr ? limData.gr[b] : 0;   // ≤ 0 dB
-      const out = lvl + gr;                          // post-limit band level
-      const x   = plotL + b * slot + (slot - barW) / 2;
-      const yOut = yFor(out), yLvl = yFor(lvl);
-      // Surviving (output) level — teal.
-      if (plotB - yOut > 0) {
-        ctx.fillStyle = '#2a9d8f';
-        ctx.fillRect(x, yOut, barW, plotB - yOut);
+      const lvl = lvlArr[b];
+      const gr  = grArr ? grArr[b] : 0;             // ≤ 0 dB (activation)
+      const x    = plotL + b * slot + (slot - barW) / 2;
+      const yLvl = yFor(lvl), yOut = yFor(lvl + gr);
+      // Bar to the band's level, coloured by how hard it's being limited.
+      if (plotB - yLvl > 0) {
+        ctx.fillStyle = grColor(gr, 0.92);
+        ctx.fillRect(x, yLvl, barW, plotB - yLvl);
       }
-      // Gain-reduction cap — red (this is where limiting is acting).
-      if (gr < -0.3 && yOut - yLvl > 0) {
-        ctx.fillStyle = '#e76f51';
-        ctx.fillRect(x, yLvl, barW, yOut - yLvl);
+      // Brighter notch marks how much was shaved off (output → input level).
+      if (gr < -0.3 && yOut - yLvl > 0.5) {
+        ctx.fillStyle = grColor(gr, 1);
+        ctx.fillRect(x, yLvl, barW, Math.min(yOut - yLvl, 3));
       }
     }
     ctx.globalAlpha = 1;
 
     // Frequency labels at a few decades.
-    if (limData.f) {
+    if (limData && limData.f) {
       ctx.fillStyle = '#666'; ctx.font = '8px -apple-system, sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
       [100, 1000, 10000].forEach(tf => {
@@ -1648,14 +1658,45 @@ function drawLimViz() {
     }
   }
 
+  // Peak (brickwall) gain-reduction readout — the true peak limiting, which the
+  // spectral bands don't show. A short bar that grows downward + a number.
+  {
+    const pk = _lim.brick || 0;                     // ≤ 0 dB
+    const ax = plotL + 2, ay = 2, aw = 70, ah = 7;
+    ctx.fillStyle = '#333'; ctx.fillRect(ax, ay, aw, ah);
+    const frac = Math.max(0, Math.min(1, -pk / 12)); // full at -12 dB
+    ctx.fillStyle = grColor(pk, 1);
+    ctx.fillRect(ax, ay, aw * frac, ah);
+    ctx.fillStyle = '#999'; ctx.font = '8px -apple-system, sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(`PEAK GR ${pk <= -0.05 ? pk.toFixed(1) : '0.0'} dB`, ax + aw + 6, ay + ah / 2);
+  }
+
   // Legend.
   ctx.font = '8px -apple-system, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
-  ctx.fillStyle = '#2a9d8f'; ctx.fillText('■ LEVEL', plotR, 2);
-  ctx.fillStyle = '#e76f51'; ctx.fillText('■ REDUCTION', plotR - 48, 2);
+  ctx.fillStyle = grColor(0, 1);  ctx.fillText('■', plotR - 60, 2);
+  ctx.fillStyle = grColor(-9, 1); ctx.fillText('■', plotR - 52, 2);
+  ctx.fillStyle = '#888';         ctx.fillText('idle → limiting', plotR, 2);
 }
 
 window.axonLimiter = function(d) {
   limData = d;
+  if (d && d.lvl) {
+    const N = d.lvl.length;
+    if (!_lim.init || !_lim.lvl || _lim.lvl.length !== N) {
+      _lim.lvl = d.lvl.slice(); _lim.gr = (d.gr || []).slice(); _lim.brick = d.brick || 0;
+      _lim.init = true;
+    } else {
+      for (let i = 0; i < N; i++) {
+        const tl = d.lvl[i];                       // level: rise fast, fall slow
+        _lim.lvl[i] += (tl - _lim.lvl[i]) * (tl > _lim.lvl[i] ? 0.5 : 0.12);
+        const tg = d.gr ? d.gr[i] : 0;             // GR (≤0): grab fast, release slow
+        _lim.gr[i] += (tg - _lim.gr[i]) * (tg < _lim.gr[i] ? 0.55 : 0.10);
+      }
+      const tb = d.brick || 0;
+      _lim.brick += (tb - _lim.brick) * (tb < _lim.brick ? 0.55 : 0.10);
+    }
+  }
   if (selectedProc === 5) drawLimViz();
 };
 

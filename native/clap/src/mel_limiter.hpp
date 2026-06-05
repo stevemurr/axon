@@ -56,6 +56,9 @@ public:
     //   centers_hz  — band centre frequencies (static after init)
     void copy_display(float* levels_lin, float* gains_lin, float* centers_hz) const;
 
+    // Current brickwall gain (1 = no peak limiting, <1 = reducing). Linked stereo.
+    float brickwall_gain() const { return brick_gain_; }
+
 private:
     int sr_{44100};
 

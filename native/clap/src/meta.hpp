@@ -36,7 +36,8 @@ struct RationalAParams {
 // STFT-domain magnitude-mask EQ. Controller emits ``n_bands`` sigmoid values
 // per block; the C++ runtime computes the mel filterbank from the geometry
 // parameters (sample_rate, n_fft, n_bands, f_min, f_max) and applies the mask
-// via overlap-add. Latency is ``n_fft - hop`` samples.
+// via overlap-add. Latency is ``n_fft`` samples (the minimum-phase filter is
+// causal, so the first meaningful OLA output is delayed by the full window).
 struct SpectralMaskEqParams {
     int   sample_rate;
     int   block_size;          // controller call cadence

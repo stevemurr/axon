@@ -46,7 +46,6 @@
 #include <onnxruntime_cxx_api.h>
 
 #include "composite_meta.hpp"
-#include "dimension_d.hpp"
 #include "auto_gain.hpp"
 #include "bass_mono.hpp"
 #include "meta.hpp"

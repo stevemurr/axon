@@ -1,7 +1,7 @@
 // Composite Axon CLAP plugin: 1 dylib that wires
 //
 //   audio → ort(autoeq controller) → SpectralMaskEq
-//         → RationalA (saturator)  → ort(ssl_comp) → BassMono
+//         → RationalA (saturator)  → Exciter → ort(ssl_comp) → BassMono
 //         → MelLimiter             → TruePeakCeiling → output trim
 //
 // The composite has two host-exposed knobs (AMT, TRM) defined in the
@@ -48,6 +48,7 @@
 #include "composite_meta.hpp"
 #include "auto_gain.hpp"
 #include "bass_mono.hpp"
+#include "exciter.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
 #include "param_id.hpp"
@@ -77,7 +78,7 @@ using nablafx::param_id_for;
 // processor's TVFiLM cond_block_size. Changing this requires re-exporting both
 // ONNX bundles at the new block size.
 constexpr int kBlockSize  = 128;
-constexpr int kNumStages  = 5;
+constexpr int kNumStages  = 6;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
 // 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
@@ -100,6 +101,7 @@ enum class StageID : int {
     SslComp       = 4,
     MelLimiter    = 5,
     BassMono      = 6,
+    Exciter       = 7,   // Aphex-style aural exciter (band-limited parallel)
 };
 
 // ---------------------------------------------------------------------------
@@ -653,6 +655,9 @@ struct Plugin {
     // Bass mono-maker (stereo; collapses width below a cutoff).
     nablafx::BassMono    bass_mono;
 
+    // Aphex-style aural exciter (stereo; band-limited parallel harmonic sheen).
+    nablafx::Exciter     exciter;
+
     // Auto gain (level-matched bypass) — drives output LUFS toward input LUFS.
     nablafx::AutoGain    auto_gain;
 
@@ -662,8 +667,12 @@ struct Plugin {
     int bypass_w{0}, bypass_r{0};
 
     // Processor ordering — driven by GUI drag-and-drop. All stages reorderable.
-    // Default: AutoEQ → Saturator → SslComp → BassMono → MelLimiter
-    std::array<int, kNumStages> processor_order{1, 2, 4, 6, 5};
+    // Default: AutoEQ → Saturator → Exciter → SslComp → BassMono → MelLimiter.
+    // The exciter sits right after the Saturator (both are harmonic/tone shaping)
+    // and BEFORE the dynamics (SslComp) and the limiter, so the added sheen is
+    // levelled/controlled by the downstream dynamics rather than feeding raw
+    // manufactured HF into the bus comp's detector unmanaged.
+    std::array<int, kNumStages> processor_order{1, 2, 7, 4, 6, 5};
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -678,7 +687,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{1,2,4,6,5};
+    std::array<int,kNumStages> pending_order{1,2,7,4,6,5};
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -823,6 +832,7 @@ static const clap_plugin_params_t s_ext_params = {
 //   kBlockSize          — input accumulator always present
 //   SpectralMaskEq      — n_fft - hop, only when EQ wet > 0 and class is spectral
 //   SSL bus comp        — kSslHop - kBlockSize, only when SSC > 0 and loaded
+//   Exciter             — oversampler FIR group delay, only when EXC_AMT > 0
 //   TruePeakCeiling     — lookahead, always present once activated
 static uint32_t compute_latency_(const Plugin& plug) {
     if (plug.chains.empty() || !g_state) return 0;
@@ -830,7 +840,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
     uint32_t lat = kBlockSize;
     lat += static_cast<uint32_t>(plug.chains[0].ceiling.latency_samples());
 
-    float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f;
+    float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f, exc_amt = 0.f;
     int   cls_idx = 0;
     for (size_t i = 0; i < plug.meta->controls.size(); ++i) {
         const auto& c = plug.meta->controls[i];
@@ -839,6 +849,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
         else if (c.id == "SSC") ssc_wet = v;
         else if (c.id == "CLS") cls_idx = static_cast<int>(std::lround(v));
         else if (c.id == "MLI") ml_wet  = v;
+        else if (c.id == "EXC_AMT") exc_amt = v;
     }
 
     if (eq_wet > 0.f && !g_state->autoeq_dsp_per_class.empty()) {
@@ -856,6 +867,9 @@ static uint32_t compute_latency_(const Plugin& plug) {
 
     if (ml_wet > 0.f)
         lat += static_cast<uint32_t>(nablafx::MelLimiter::kLatency);
+
+    if (exc_amt > 0.f)
+        lat += static_cast<uint32_t>(plug.exciter.latency_samples());
 
     return lat;
 }
@@ -1049,6 +1063,7 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
 
     plug->spectrum.init();
     plug->bass_mono.prepare(plug->sample_rate);
+    plug->exciter.prepare(plug->sample_rate);
     plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
@@ -1075,6 +1090,7 @@ static void plugin_reset(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     plug->mel_limiter.reset();
     plug->bass_mono.reset();
+    plug->exciter.reset();
     plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
@@ -1110,9 +1126,13 @@ struct AmountSnapshot {
     float eq_boost_scale;
     float eq_speed_ms;
     float ssl_comp_wet;
+    float ssl_comp_in_lin;   // SSC_IN: linear input trim feeding the bus-comp model
     float ml_wet, ml_ceiling_lin, ml_drive_lin, ml_adaptive_gain, ml_adaptive_speed;
     bool  ml_adaptive_brickwall;
     float bm_wet, bm_freq;
+    // Exciter: EXC_AMT (parallel blend), EXC_FREQ (band HPF), EXC_DRIVE (dB into
+    // the shaper), EXC_CHAR (even↔odd), EXC_LPF ("Tame" band LPF).
+    float exc_amt, exc_freq, exc_drive_db, exc_char, exc_lpf;
     bool  auto_gain_on;
     bool  bypass_on;
 };
@@ -1121,10 +1141,12 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
+    float ea=0.f,ef=3000.f,ed=6.f,ec=0.25f,el=18000.f;   // exciter params
     float agn=0.f,byp=0.f;
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
     float ssc=0.f;
+    float ssc_in_db=0.f;
     int   cls_idx=plug.active_autoeq_cls;
     for (size_t i=0;i<plug.meta->controls.size();++i) {
         const auto& c=plug.meta->controls[i];
@@ -1138,11 +1160,15 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="EQB") eqb=v;
         else if(c.id=="TRM") trm_db=v;
         else if(c.id=="SSC") ssc=v;
+        else if(c.id=="SSC_IN") ssc_in_db=v;
         else if(c.id=="MLI") mli=v; else if(c.id=="MLC") mlc=v;
         else if(c.id=="MLD") mld=v;
         else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
         else if(c.id=="MLA") mla=v;
         else if(c.id=="BMI") bmi=v; else if(c.id=="BMF") bmf=v;
+        else if(c.id=="EXC_AMT") ea=v; else if(c.id=="EXC_FREQ") ef=v;
+        else if(c.id=="EXC_DRIVE") ed=v; else if(c.id=="EXC_CHAR") ec=v;
+        else if(c.id=="EXC_LPF") el=v;
         else if(c.id=="AGN") agn=v; else if(c.id=="BYP") byp=v;
     }
     AmountSnapshot s{};
@@ -1156,6 +1182,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.eq_boost_scale=eqb;
     s.eq_speed_ms=eqs;
     s.ssl_comp_wet = ssc * g_state->axon_meta.amt_ssl_comp.wet_mix_max;
+    s.ssl_comp_in_lin = std::pow(10.f, ssc_in_db / 20.f);  // dB → linear input trim
     s.ml_wet            = mli;
     s.ml_ceiling_lin    = std::pow(10.f, mlc / 20.f);  // dBFS → linear
     s.ml_drive_lin      = std::pow(10.f, mld / 20.f);  // dB → linear gain
@@ -1164,6 +1191,11 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.ml_adaptive_brickwall = (mla >= 0.5f);
     s.bm_wet  = bmi;
     s.bm_freq = bmf;
+    s.exc_amt      = ea;     // 0..1 parallel blend (0 = bypass)
+    s.exc_freq     = ef;     // band HPF cutoff (Hz)
+    s.exc_drive_db = ed;     // dB into the shaper
+    s.exc_char     = ec;     // even↔odd
+    s.exc_lpf      = el;     // band LPF "Tame" (Hz)
     s.auto_gain_on = (agn >= 0.5f);
     s.bypass_on    = (byp >= 0.5f);
     return s;
@@ -1369,6 +1401,20 @@ void flush_chain_block_(Plugin& plug,
             const int rf          = g_state->ssl_comp_meta.receptive_field;
             const int actual_olen = N - (rf - 1);  // ORT output length
             const int dry_delay_len = kSslHop - kBlockSize;
+            // Input trim → model operating point. The bus comp is a fixed-curve
+            // model whose behaviour depends only on how hard it's driven; we
+            // attenuate/boost the signal feeding the model by `in_gain` and
+            // undo it with the exact reciprocal `mk_gain` on the wet output, so
+            // a static trim is level-neutral while changing how hard the comp
+            // works. The dry/bypass path gets NEITHER gain (it stays the clean
+            // reference). At 0 dB both gains are 1.0 → bit-for-bit unchanged.
+            // NOTE: the model output trails the input by hop/lookahead, so the
+            // input gain and the reciprocal make-up are applied at slightly
+            // different points in time. For a static trim this is exactly
+            // correct; fast automation of the trim can cause a brief level
+            // bump — acceptable for an operating-point control.
+            const float in_gain = amt.ssl_comp_in_lin;
+            const float mk_gain = (in_gain != 0.f) ? (1.f / in_gain) : 1.f;
             float* ch_buf[2]={work_l,work_r};
             for (uint32_t ch=0;ch<n_ch;++ch) {
                 float* blk=ch_buf[ch];
@@ -1384,8 +1430,16 @@ void flush_chain_block_(Plugin& plug,
                 int&  rd     = plug.chains[ch].ssl_comp_out_read;
                 int&  dwr    = plug.chains[ch].ssl_comp_dry_write;
 
-                // Push input into the hop-sized accumulator.
-                std::copy_n(blk, kBlockSize, accum.data() + fill);
+                // Push input into the hop-sized accumulator, applying the input
+                // trim so the MODEL sees the attenuated/boosted signal. `dry`
+                // was captured above and is untouched, so the dry/bypass and
+                // warm-up pass-through paths remain the clean reference.
+                if (in_gain != 1.f) {
+                    for (int i = 0; i < kBlockSize; ++i)
+                        accum[fill + i] = blk[i] * in_gain;
+                } else {
+                    std::copy_n(blk, kBlockSize, accum.data() + fill);
+                }
                 fill += kBlockSize;
 
                 // When the accumulator fills, shift the ring by kSslHop, append
@@ -1445,6 +1499,13 @@ void flush_chain_block_(Plugin& plug,
                     std::copy_n(outq.data() + rd, kBlockSize, wet_a.data());
                     rd    += kBlockSize;
                     avail -= kBlockSize;
+                    // Reciprocal make-up: undo the input trim on the wet output
+                    // so the stage stays roughly level-neutral. Dry is left
+                    // alone, so only the comp's *character* changes with trim.
+                    if (mk_gain != 1.f) {
+                        for (int i = 0; i < kBlockSize; ++i)
+                            wet_a[i] *= mk_gain;
+                    }
                     // Blend the (delayed) wet against the time-aligned dry,
                     // NOT the current dry — they're the same audio in
                     // absolute time, so this is the only mix that doesn't
@@ -1482,6 +1543,18 @@ void flush_chain_block_(Plugin& plug,
             plug.bass_mono.process(bl.data(), br.data(), kBlockSize);
             blend_inplace_(work_l, bl.data(), amt.bm_wet, kBlockSize);
             blend_inplace_(work_r, br.data(), amt.bm_wet, kBlockSize);
+            break;
+        }
+
+        case StageID::Exciter: {
+            // Aphex-style band-limited parallel exciter. The module keeps the dry
+            // full-range signal untouched and sums in `amount` of the excited
+            // upper band; at amount == 0 it early-returns (bit-identical bypass).
+            if (amt.exc_amt <= 0.f) break;
+            plug.exciter.set_params(amt.exc_amt, amt.exc_freq, amt.exc_drive_db,
+                                    amt.exc_char, amt.exc_lpf);
+            plug.exciter.process(work_l, (n_ch >= 2 ? work_r : nullptr),
+                                 kBlockSize);
             break;
         }
 
@@ -1965,6 +2038,43 @@ static bool entry_init(const char* /*plugin_path*/) {
         st->resources_dir = st->bundle_dir + "/Resources";
 
         st->axon_meta = load_composite_meta(st->resources_dir + "/axon_meta.json");
+
+        // SSL bus comp input trim ("Input"). The bus comp is a neural model of
+        // a FIXED-curve compressor — its character is set entirely by how hard
+        // the input drives it. This dB control attenuates/boosts the signal
+        // feeding the model so the user can land on the model's sweet spot
+        // without inserting a gain plugin ahead of Axon. Injected at load time
+        // (rather than required from the bundle) so existing bundles that don't
+        // declare it still get the control with a safe default. Skip injection
+        // if a bundle already declares "SSC_IN" so its ranges win.
+        {
+            bool has_ssc_in = false;
+            for (const auto& c : st->axon_meta.controls)
+                if (c.id == "SSC_IN") { has_ssc_in = true; break; }
+            if (!has_ssc_in) {
+                st->axon_meta.controls.push_back(ControlSpec{
+                    "SSC_IN", "Input", -24.0f, 12.0f, 0.0f, 1.0f, "dB"});
+            }
+        }
+
+        // Aphex-style exciter controls. Injected at load time (like SSC_IN) so
+        // existing bundles that don't declare them still get the stage with safe
+        // defaults; a bundle that declares an id keeps its own ranges. Defaults
+        // make the stage a no-op (EXC_AMT = 0 → bit-identical bypass).
+        {
+            auto inject = [&](const ControlSpec& spec) {
+                for (const auto& c : st->axon_meta.controls)
+                    if (c.id == spec.id) return;        // bundle's ranges win
+                st->axon_meta.controls.push_back(spec);
+            };
+            //                  id            name         min      max     def    skew unit
+            inject(ControlSpec{"EXC_AMT",   "Amount",      0.0f,    1.0f,   0.0f,  1.0f, ""});
+            inject(ControlSpec{"EXC_FREQ",  "Frequency",1000.0f,12000.0f,3000.0f,  1.0f, "Hz"});
+            inject(ControlSpec{"EXC_DRIVE", "Intensity",   0.0f,   24.0f,   6.0f,  1.0f, "dB"});
+            inject(ControlSpec{"EXC_CHAR",  "Warm ◐ Bright", 0.0f, 1.0f, 0.25f, 1.0f, ""});
+            inject(ControlSpec{"EXC_LPF",   "Tame",     5000.0f,20000.0f,18000.0f, 1.0f, "Hz"});
+        }
+
         st->sat_meta    = load_meta(st->resources_dir + "/" +
                                     st->axon_meta.sub_bundles.at("saturator")
                                     + "/plugin_meta.json");

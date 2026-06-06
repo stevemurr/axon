@@ -144,6 +144,11 @@ add_executable(test_auto_gain tests/test_auto_gain.cpp)
 target_include_directories(test_auto_gain PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_auto_gain PRIVATE -UNDEBUG)
 
+# test_exciter — unit tests for the Aphex-style Exciter (header-only DSP).
+add_executable(test_exciter tests/test_exciter.cpp)
+target_include_directories(test_exciter PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_exciter PRIVATE -UNDEBUG)
+
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
     target_include_directories(axon_bench PRIVATE

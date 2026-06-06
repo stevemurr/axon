@@ -301,6 +301,16 @@
     background: #0d0d0d;
   }
   #lim-viz-canvas { display: block; }
+  #exc-band-wrap {
+    display: none;
+    margin-top: 14px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: #0d0d0d;
+  }
+  #exc-band-canvas { display: block; }
 
   /* ── Layout shell ────────────────────────────────────────── */
   #app {
@@ -425,6 +435,9 @@
     <div id="lim-viz-wrap">
       <canvas id="lim-viz-canvas" width="660" height="108"></canvas>
     </div>
+    <div id="exc-band-wrap">
+      <canvas id="exc-band-canvas" width="660" height="108"></canvas>
+    </div>
     </div>
    </div><!-- /main-col -->
    <div id="meter-panel">
@@ -455,15 +468,19 @@
 const PROCESSORS = [
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   { id: 2, name: 'SATURATOR', params: ['SDR', 'SVO', 'SMX', 'STH', 'SBS'], wetParams: ['SMX'] },
-  { id: 4, name: 'BUS COMP',  params: ['SSC'],                     wetParams: ['SSC'] },
+  { id: 4, name: 'BUS COMP',  params: ['SSC', 'SSC_IN'],          wetParams: ['SSC'] },
   { id: 6, name: 'BASS MONO', params: ['BMI', 'BMF'],                   wetParams: ['BMI'] },
+  // EXC_FREQ / EXC_LPF are NOT knobs — they're draggable band edges on the
+  // exciter band display (see drawExcBand), so the user sets the excited region
+  // spatially and watches the live "what's being excited" overlay.
+  { id: 7, name: 'EXCITER',   params: ['EXC_AMT','EXC_DRIVE','EXC_CHAR'], wetParams: ['EXC_AMT'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
 ];
 
 // Runtime state
 let paramMeta   = {};   // id → { name, min, max, def, unit }
 let paramValues = {};   // id → float
-let procOrder   = [1,2,4,6,5];
+let procOrder   = [1,2,7,4,6,5];
 let selectedProc = 1;
 
 // ============================================================
@@ -512,7 +529,7 @@ function sendParam(id, value) {
 
 function sendOrderToHost(visibleOrder) {
   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.axon) {
-    // All 5 stages are freely reorderable; send the order as-is.
+    // All stages are freely reorderable; send the order as-is.
     window.webkit.messageHandlers.axon.postMessage({ type: 'reorder', order: [...visibleOrder] });
   }
 }
@@ -813,6 +830,11 @@ function renderSurface() {
   const showLim = selectedProc === 5;
   limWrap.style.display = showLim ? 'block' : 'none';
   if (showLim) drawLimViz();
+
+  const excWrap = document.getElementById('exc-band-wrap');
+  const showExc = selectedProc === 7;
+  excWrap.style.display = showExc ? 'block' : 'none';
+  if (showExc) drawExcBand();
 }
 
 // ============================================================
@@ -1028,6 +1050,174 @@ function drawSatFilter() {
 })();
 
 // ============================================================
+// EXCITER BAND DISPLAY
+// ============================================================
+// Shows the excited band (drag the Frequency / Tame edges) on a log axis, plus
+// a LIVE overlay of what the exciter is actually adding — computed as the
+// per-stage spectrum delta (after-exciter minus before-exciter), so you can see
+// which region is being excited the most and how the band edges shape it.
+
+// Latest spectrum frame, cached by drawSpectrum so the band display can draw
+// the live excitation overlay across frames and on band-edge drags.
+let excLastSpec = null;
+
+let excBandDrag = null; // 'HPF' (Frequency) | 'LPF' (Tame) | null
+
+function drawExcBand() {
+  const canvas = document.getElementById('exc-band-canvas');
+  if (!canvas) return;
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const freqToX = f => satFreqToX(f, W);   // shared 20 Hz–20 kHz log mapping
+
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Frequency grid + labels.
+  ctx.strokeStyle = '#1c1c1c';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  [50, 100, 200, 500, 1000, 2000, 5000, 10000].forEach(f => {
+    const x = Math.round(freqToX(f)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  });
+  ctx.font = '8px -apple-system, sans-serif';
+  ctx.fillStyle = '#2e2e2e';
+  ctx.textAlign = 'center';
+  [[100,'100'],[1000,'1k'],[10000,'10k']].forEach(([f, lbl]) => {
+    ctx.fillText(lbl, freqToX(f), H - 3);
+  });
+
+  const hpfHz = paramValues['EXC_FREQ'] ?? (paramMeta['EXC_FREQ']?.def ?? 3000);
+  const lpfHz = paramValues['EXC_LPF']  ?? (paramMeta['EXC_LPF']?.def  ?? 18000);
+  const amt   = paramValues['EXC_AMT']  ?? (paramMeta['EXC_AMT']?.def  ?? 0);
+  const hpfX  = freqToX(hpfHz);
+  const lpfX  = freqToX(lpfHz);
+
+  // Excited *input* band (HPF..LPF) — the region fed to the shaper.
+  ctx.fillStyle = 'rgba(249,199,79,0.07)';
+  ctx.fillRect(hpfX, 0, Math.max(0, lpfX - hpfX), H);
+
+  // ── LIVE excitation overlay ───────────────────────────────
+  // delta[b] = post-exciter dB − pre-exciter dB at each display bin. Positive
+  // delta = energy the exciter added (the manufactured harmonics). Drawn as a
+  // glowing area so you see exactly where — and how much — is being excited.
+  const KDISP = 128, FLO = 20, FHI = 20000;
+  let drew = false;
+  if (excLastSpec && Array.isArray(excLastSpec.order) && Array.isArray(excLastSpec.db)) {
+    const pos = excLastSpec.order.indexOf(7);
+    const post = pos >= 0 ? excLastSpec.db[pos] : null;
+    const pre  = pos > 0  ? excLastSpec.db[pos - 1] : null;
+    if (post && pre && amt > 0) {
+      const DB_TOP = 12;                 // +12 dB delta fills full height
+      const dToY = d => H - Math.max(0, Math.min(1, d / DB_TOP)) * H;
+      ctx.beginPath();
+      ctx.moveTo(0, H);
+      for (let b = 0; b < KDISP; b++) {
+        const f = FLO * Math.pow(FHI / FLO, b / (KDISP - 1));
+        const d = (post[b] ?? -90) - (pre[b] ?? -90);
+        ctx.lineTo(freqToX(f), dToY(Math.max(0, d)));
+      }
+      ctx.lineTo(W, H);
+      ctx.closePath();
+      ctx.save();
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = '#f9c74f';
+      ctx.fillStyle = 'rgba(249,199,79,0.30)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(249,199,79,0.85)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+      drew = true;
+    }
+  }
+  if (!drew) {
+    ctx.font = '8px -apple-system, sans-serif';
+    ctx.fillStyle = '#3a3a3a';
+    ctx.textAlign = 'center';
+    ctx.fillText(amt > 0 ? 'play audio to see excitation'
+                         : 'raise Amount to excite', W / 2, H / 2);
+  }
+
+  // Band-edge dashed verticals + drag handles + labels.
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = 'rgba(249,199,79,0.55)';
+  ctx.beginPath(); ctx.moveTo(hpfX + 0.5, 0); ctx.lineTo(hpfX + 0.5, H); ctx.stroke();
+  ctx.strokeStyle = 'rgba(231,111,81,0.45)';
+  ctx.beginPath(); ctx.moveTo(lpfX + 0.5, 0); ctx.lineTo(lpfX + 0.5, H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const HR = 5;
+  ctx.lineWidth = 1.5;
+  ctx.fillStyle = 'rgba(249,199,79,0.9)';
+  ctx.strokeStyle = '#f9c74f';
+  ctx.beginPath(); ctx.arc(hpfX, HR + 2, HR, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(231,111,81,0.85)';
+  ctx.strokeStyle = '#e76f51';
+  ctx.beginPath(); ctx.arc(lpfX, HR + 2, HR, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+
+  ctx.font = '8px -apple-system, sans-serif';
+  const fmt = hz => hz < 1000 ? `${Math.round(hz)} Hz` : `${(hz/1000).toFixed(1)} kHz`;
+  ctx.fillStyle = 'rgba(249,199,79,0.9)';
+  ctx.textAlign = hpfX > W * 0.85 ? 'right' : 'left';
+  ctx.fillText(fmt(hpfHz), hpfX + (hpfX > W * 0.85 ? -7 : 7), 22);
+  ctx.fillStyle = 'rgba(231,111,81,0.85)';
+  ctx.textAlign = lpfX < W * 0.15 ? 'left' : 'right';
+  ctx.fillText(fmt(lpfHz), lpfX + (lpfX < W * 0.15 ? 7 : -7), 22);
+
+  // Corner tags.
+  ctx.font = '7px -apple-system, sans-serif';
+  ctx.textAlign = 'left';  ctx.fillStyle = '#444';
+  ctx.fillText('FREQUENCY', 5, 10);
+  ctx.textAlign = 'right';
+  ctx.fillText('TAME', W - 5, 10);
+}
+
+// Drag interactivity for the exciter band canvas.
+(function() {
+  const canvas = document.getElementById('exc-band-canvas');
+  if (!canvas) return;
+
+  function clientToCanvasX(e) {
+    const rect = canvas.getBoundingClientRect();
+    return (e.clientX - rect.left) * canvas.width / rect.width;
+  }
+  function hitTest(cx) {
+    const hpfHz = paramValues['EXC_FREQ'] ?? (paramMeta['EXC_FREQ']?.def ?? 3000);
+    const lpfHz = paramValues['EXC_LPF']  ?? (paramMeta['EXC_LPF']?.def  ?? 18000);
+    if (Math.abs(cx - satFreqToX(hpfHz, canvas.width)) < 14) return 'HPF';
+    if (Math.abs(cx - satFreqToX(lpfHz, canvas.width)) < 14) return 'LPF';
+    return null;
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    excBandDrag = hitTest(clientToCanvasX(e));
+    if (excBandDrag) e.preventDefault();
+  });
+  canvas.addEventListener('mousemove', (e) => {
+    const cx = clientToCanvasX(e);
+    canvas.style.cursor = (hitTest(cx) || excBandDrag) ? 'ew-resize' : 'default';
+    if (!excBandDrag) return;
+    const f = satXToFreq(cx, canvas.width);
+    if (excBandDrag === 'HPF') {
+      const m = paramMeta['EXC_FREQ'];
+      const v = Math.max(m?.min ?? 1000, Math.min(m?.max ?? 12000, f));
+      paramValues['EXC_FREQ'] = v;
+      sendParam('EXC_FREQ', v);
+    } else {
+      const m = paramMeta['EXC_LPF'];
+      const v = Math.max(m?.min ?? 5000, Math.min(m?.max ?? 20000, f));
+      paramValues['EXC_LPF'] = v;
+      sendParam('EXC_LPF', v);
+    }
+    drawExcBand();
+  });
+  window.addEventListener('mouseup', () => { excBandDrag = null; });
+})();
+
+// ============================================================
 // CHAIN STRIP
 // ============================================================
 
@@ -1127,7 +1317,7 @@ window.axonInit = function(state) {
   paramMeta   = state.paramMeta   || {};
   paramValues = state.paramValues || {};
   const VISIBLE = new Set(PROCESSORS.map(p => p.id));
-  procOrder   = (state.processorOrder || [1,2,4,6,5]).filter(id => VISIBLE.has(id));
+  procOrder   = (state.processorOrder || [1,2,7,4,6,5]).filter(id => VISIBLE.has(id));
   selectedProc = procOrder[0] ?? 1;
 
   renderChain();
@@ -1179,8 +1369,9 @@ window.axonInit = function(state) {
     '#bb86fc',  // 4 SslComp (BUS COMP)
     '#e76f51',  // 5 MelLimiter
     '#90be6d',  // 6 BassMono
+    '#f9c74f',  // 7 Exciter
   ];
-  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO'];
+  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER'];
 
   const DB_MIN = -90, DB_MAX = 0;
 
@@ -1192,6 +1383,11 @@ window.axonInit = function(state) {
   }
 
   function drawSpectrum(data) {
+    // Cache the frame so the exciter band display can draw its live
+    // "what's being excited" overlay (post−pre spectrum delta).
+    excLastSpec = data;
+    if (selectedProc === 7) drawExcBand();
+
     const canvas = document.getElementById('spectrum-canvas');
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -1760,6 +1956,7 @@ window.axonSetParam = function(id, value) {
   }
 
   if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
+  if ((id === 'EXC_FREQ' || id === 'EXC_LPF' || id === 'EXC_AMT') && selectedProc === 7) drawExcBand();
   // Dynamic toggle (e.g. host automation) relabels Attack/Release knobs.
   if (id === 'MLA' && selectedProc === 5) renderSurface();
   if (id === 'AGN' || id === 'BYP') refreshPanelToggles();

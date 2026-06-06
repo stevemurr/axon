@@ -120,6 +120,23 @@ def _build_default_meta(
                 "default": 0.0, "skew": 1.0, "unit": ""},
         "SSC": {"id": "SSC", "name": "Bus Comp",       "min": 0.0,   "max": 1.0,
                 "default": 0.0, "skew": 1.0, "unit": ""},
+        # Input trim feeding the fixed-curve bus-comp model (sets its operating
+        # point). The reciprocal make-up is applied to the wet output in the
+        # plugin so a static trim is level-neutral.
+        "SSC_IN": {"id": "SSC_IN", "name": "Input",    "min": -24.0, "max": 12.0,
+                "default": 0.0, "skew": 1.0, "unit": "dB"},
+        # Aphex-style aural exciter (band-limited parallel harmonic sheen).
+        # EXC_AMT is the wet/parallel blend (0 = bypass, bit-identical).
+        "EXC_AMT":   {"id": "EXC_AMT",   "name": "Amount",    "min": 0.0,    "max": 1.0,
+                      "default": 0.0,    "skew": 1.0, "unit": ""},
+        "EXC_FREQ":  {"id": "EXC_FREQ",  "name": "Frequency", "min": 1000.0, "max": 12000.0,
+                      "default": 3000.0, "skew": 1.0, "unit": "Hz"},
+        "EXC_DRIVE": {"id": "EXC_DRIVE", "name": "Intensity", "min": 0.0,    "max": 24.0,
+                      "default": 6.0,    "skew": 1.0, "unit": "dB"},
+        "EXC_CHAR":  {"id": "EXC_CHAR",  "name": "Warm ◐ Bright", "min": 0.0, "max": 1.0,
+                      "default": 0.25,   "skew": 1.0, "unit": ""},
+        "EXC_LPF":   {"id": "EXC_LPF",   "name": "Tame",      "min": 5000.0, "max": 20000.0,
+                      "default": 18000.0,"skew": 1.0, "unit": "Hz"},
         "CLS": {"id": "CLS", "name": "EQ Class",
                 "min": 0.0, "max": float(max(0, n_classes - 1)),
                 "default": float(default_idx), "skew": 1.0, "unit": "enum"},

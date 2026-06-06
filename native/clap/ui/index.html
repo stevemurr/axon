@@ -284,7 +284,7 @@
   /* ── Sat filter display ─────────────────────────────────── */
   #sat-filter-wrap {
     display: none;
-    margin-top: 14px;
+    margin-top: 10px;
     flex-shrink: 0;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -324,7 +324,7 @@
   #bc-crunch-canvas { display: block; }
   #exc-band-wrap {
     display: none;
-    margin-top: 14px;
+    margin-top: 10px;
     flex-shrink: 0;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -451,19 +451,19 @@
     <div id="surface-title">SELECT A PROCESSOR</div>
     <div id="controls"></div>
     <div id="sat-filter-wrap">
-      <canvas id="sat-filter-canvas" width="660" height="108"></canvas>
+      <canvas id="sat-filter-canvas" width="660" height="194"></canvas>
     </div>
     <div id="lim-gr-wrap">
       <canvas id="lim-gr-canvas" width="660" height="74"></canvas>
     </div>
     <div id="bc-crunch-wrap">
-      <canvas id="bc-crunch-canvas" width="660" height="74"></canvas>
+      <canvas id="bc-crunch-canvas" width="660" height="194"></canvas>
     </div>
     <div id="lim-viz-wrap">
       <canvas id="lim-viz-canvas" width="660" height="108"></canvas>
     </div>
     <div id="exc-band-wrap">
-      <canvas id="exc-band-canvas" width="660" height="108"></canvas>
+      <canvas id="exc-band-canvas" width="660" height="194"></canvas>
     </div>
     </div>
    </div><!-- /main-col -->
@@ -1093,8 +1093,13 @@ function drawSatFilter() {
 // which region is being excited the most and how the band edges shape it.
 
 // Latest spectrum frame, cached by drawSpectrum so the band display can draw
-// the live excitation overlay across frames and on band-edge drags.
+// across frames and on band-edge drags.
 let excLastSpec = null;
+
+// Latest DIRECT exciter wet-spectrum frame (window.axonExciter): the magnitude
+// (dBFS) of exactly what the exciter ADDS, at log-spaced 20 Hz–20 kHz points.
+// This is what drawExcBand's amber overlay plots.
+let excWetSpec = null;
 
 let excBandDrag = null; // 'HPF' (Frequency) | 'LPF' (Tame) | null
 
@@ -1133,52 +1138,51 @@ function drawExcBand() {
   ctx.fillStyle = 'rgba(249,199,79,0.07)';
   ctx.fillRect(hpfX, 0, Math.max(0, lpfX - hpfX), H);
 
-  // ── LIVE excitation overlay ───────────────────────────────
-  // delta[b] = post-exciter dB − pre-exciter dB at each display bin. Positive
-  // delta = energy the exciter added (the manufactured harmonics). Drawn as a
-  // glowing area so you see exactly where — and how much — is being excited.
-  const KDISP = 128, FLO = 20, FHI = 20000;
+  // ── LIVE excitation overlay (DIRECT wet-spectrum measurement) ──────────
+  // The DSP taps the exciter's actual WET contribution (the band-limited,
+  // high-passed, shaped signal it sums onto the dry = amount*wet per sample),
+  // FFTs it, EMA-smooths it, and streams a log-spaced dBFS magnitude array
+  // (excWetSpec.db) via window.axonExciter. We draw THAT directly — so the
+  // overlay is exactly what the exciter adds: nothing below the HPF, the
+  // harmonic content in/above the band, tapering naturally at the top. No
+  // subtraction, so the loud-low-end jitter that produced phantom spikes is
+  // gone (the wet is provably ~0 below the HPF → those points sit at the floor).
+  //
+  // The streamed points are at log-spaced frequencies matching the DSP:
+  //   f_i = FLO * (FHI/FLO)^(i/(N-1)),  FLO=20 Hz, FHI=20 kHz.
+  // Display window: FLOOR (−72 dBFS) → 0 height, CEIL (−24 dBFS) → full height.
+  // With a 3–18 kHz band at Amount 50–100% the in-band wet lands ~−55..−40 dBFS
+  // → a clear, visible fraction of the strip; below the HPF it's at the floor.
+  const EXC_FLO = 20, EXC_FHI = 20000;
+  const FLOOR = -72, CEIL = -24;
   let drew = false;
-  if (excLastSpec && Array.isArray(excLastSpec.order) && Array.isArray(excLastSpec.db)) {
-    const pos = excLastSpec.order.indexOf(7);
-    const post = pos >= 0 ? excLastSpec.db[pos] : null;
-    const pre  = pos > 0  ? excLastSpec.db[pos - 1] : null;
-    if (post && pre && amt > 0) {
-      // Show the excitation footprint weighted by ABSOLUTE level, not raw
-      // dB-delta. Pure (post-pre) in dB explodes wherever the program rolls
-      // off (the top octave), so a few inaudible dB at -65 dBFS read as a
-      // full-height spike at the right edge. Multiplying the relative boost by
-      // an audibility weight (how loud the band actually is) keeps the "where
-      // is it exciting" shape while suppressing the misleading quiet-region
-      // spikes — height now tracks how AUDIBLE the added energy is.
-      const DB_TOP = 12;                 // +12 dB relative boost = full height
-      const AUD_LO = -78, AUD_HI = -30;  // dBFS window: below LO contributes ~0
-      const yFor = (d, postDb) => {
-        const boost = Math.max(0, Math.min(1, d / DB_TOP));
-        const aud   = Math.max(0, Math.min(1, (postDb - AUD_LO) / (AUD_HI - AUD_LO)));
-        return H - boost * aud * H;
-      };
-      ctx.beginPath();
-      ctx.moveTo(0, H);
-      for (let b = 0; b < KDISP; b++) {
-        const f = FLO * Math.pow(FHI / FLO, b / (KDISP - 1));
-        const pdb = post[b] ?? -90;
-        const d = pdb - (pre[b] ?? -90);
-        ctx.lineTo(freqToX(f), yFor(Math.max(0, d), pdb));
-      }
-      ctx.lineTo(W, H);
-      ctx.closePath();
-      ctx.save();
-      ctx.shadowBlur = 8;
-      ctx.shadowColor = '#f9c74f';
-      ctx.fillStyle = 'rgba(249,199,79,0.30)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(249,199,79,0.85)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.restore();
-      drew = true;
+  if (excWetSpec && excWetSpec.active && Array.isArray(excWetSpec.db) &&
+      excWetSpec.db.length > 1 && amt > 0) {
+    const dbArr = excWetSpec.db;
+    const N = dbArr.length;
+    const yFor = db => {
+      const h = Math.max(0, Math.min(1, (db - FLOOR) / (CEIL - FLOOR)));
+      return H - h * H;
+    };
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let i = 0; i < N; i++) {
+      const f  = EXC_FLO * Math.pow(EXC_FHI / EXC_FLO, i / (N - 1));
+      const db = dbArr[i] ?? -120;
+      ctx.lineTo(freqToX(f), yFor(db));
     }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.save();
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = '#f9c74f';
+    ctx.fillStyle = 'rgba(249,199,79,0.30)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(249,199,79,0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+    drew = true;
   }
   if (!drew) {
     ctx.font = '8px -apple-system, sans-serif';
@@ -2055,18 +2059,21 @@ window.axonLimiter = function(d) {
 };
 
 // ============================================================
-// BUS COMP "CRUNCH" STRIP (model-activity proxy, StageID 4)
+// BUS COMP DISTORTION STRIP (model-activity proxy, StageID 4)
 // ============================================================
-// The bus comp is a learned TCN with no readable internal gain reduction, so
-// the strip shows two derived proxies of how hard the model is working, pushed
-// once per telemetry frame (~21 fps). We store the RAW values (no UI smoothing)
-// so the crunch movement tracks the Input knob as you ride it. ~180 frames.
+// The bus comp is a learned TCN with no readable internal gain reduction, AND
+// it phase-rotates the signal (so a residual rms(wet-dry) is pinned near 0 dB).
+// The DSP measures phase-invariant magnitude-squared coherence between the
+// model input and output: distortion = 10*log10(1 - γ²). The strip shows that
+// distortion plus a crest-reduction "comp" line, pushed once per telemetry
+// frame (~21 fps). We store RAW values (no UI smoothing) so the distortion
+// tracks the Input knob as you ride it. ~180 frames.
 const BC_HIST_N = 180;
-const bcHist = new Float32Array(BC_HIST_N);      // residual level (rel), dB ≤ 0
+const bcHist = new Float32Array(BC_HIST_N);      // distortion level, dB ≤ 0
 const bcCrestHist = new Float32Array(BC_HIST_N); // crest reduction, dB ≥ 0
 let bcHistHead = 0, bcHistLen = 0;
-function pushBcHistory(residDb, crestDb) {
-  bcHist[bcHistHead] = residDb;
+function pushBcHistory(distDb, crestDb) {
+  bcHist[bcHistHead] = distDb;
   bcCrestHist[bcHistHead] = crestDb;
   bcHistHead = (bcHistHead + 1) % BC_HIST_N;
   if (bcHistLen < BC_HIST_N) bcHistLen++;
@@ -2079,7 +2086,7 @@ function drawBusCompCrunch() {
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
 
-  // Primary axis: residual "crunch" level, 0 dB (top) → -48 dB (bottom).
+  // Primary axis: distortion (1−coherence) level, 0 dB (top) → -48 dB (bottom).
   const R_TOP = 0, R_BOT = -48;
   // Secondary implied scale for crest reduction "comp": 0 (bottom) → +12 (top).
   const C_TOP = 12, C_BOT = 0;
@@ -2089,7 +2096,7 @@ function drawBusCompCrunch() {
   const yResid = db => plotT + (R_TOP - Math.max(R_BOT, Math.min(R_TOP, db))) / (R_TOP - R_BOT) * plotH;
   const yCrest = db => plotB - (Math.max(C_BOT, Math.min(C_TOP, db)) - C_BOT) / (C_TOP - C_BOT) * plotH;
 
-  // Residual dB grid + labels (left axis: 0 at top → -48 at bottom).
+  // Distortion dB grid + labels (left axis: 0 at top → -48 at bottom).
   ctx.font = '8px -apple-system, sans-serif'; ctx.textBaseline = 'middle';
   [0, -12, -24, -36, -48].forEach(db => {
     const y = yResid(db);
@@ -2100,14 +2107,14 @@ function drawBusCompCrunch() {
   });
 
   ctx.fillStyle = '#666'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-  ctx.fillText('CRUNCH (model activity) → time', plotL + 2, 1);
+  ctx.fillText('DISTORTION (1−coherence) → time', plotL + 2, 1);
 
   const n = bcHistLen;
   if (n > 1) {
     const start = (bcHistHead - n + BC_HIST_N) % BC_HIST_N;
     const xFor = k => plotR - ((n - 1 - k) / (BC_HIST_N - 1)) * plotW; // newest → right
 
-    // Residual "crunch" — filled area from the bottom up to the curve (primary).
+    // Distortion — filled area from the bottom up to the curve (primary).
     ctx.beginPath();
     ctx.moveTo(xFor(0), plotB);
     for (let k = 0; k < n; k++) ctx.lineTo(xFor(k), yResid(bcHist[(start + k) % BC_HIST_N]));
@@ -2125,7 +2132,7 @@ function drawBusCompCrunch() {
     ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(120,200,255,0.45)';
     ctx.stroke();
 
-    // Residual "crunch" line on top, brighter (the headline).
+    // Distortion line on top, brighter (the headline).
     ctx.beginPath();
     for (let k = 0; k < n; k++) {
       const x = xFor(k), y = yResid(bcHist[(start + k) % BC_HIST_N]);
@@ -2135,24 +2142,33 @@ function drawBusCompCrunch() {
     ctx.stroke();
   }
 
-  // Current residual readout at the right edge.
-  const cur = bcHistLen ? bcHist[(bcHistHead - 1 + BC_HIST_N) % BC_HIST_N] : -60;
+  // Current distortion readout at the right edge.
+  const cur = bcHistLen ? bcHist[(bcHistHead - 1 + BC_HIST_N) % BC_HIST_N] : -48;
   ctx.fillStyle = '#bbb'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillText(`${cur.toFixed(1)}`, plotR + 3, yResid(Math.max(R_BOT, cur)));
 
   // Line legend.
   ctx.font = '8px -apple-system, sans-serif'; ctx.textBaseline = 'bottom';
   ctx.textAlign = 'right';
-  ctx.fillStyle = 'rgba(187,134,252,0.95)'; ctx.fillText('crunch', plotR - 30, H - 2);
+  ctx.fillStyle = 'rgba(187,134,252,0.95)'; ctx.fillText('distort', plotR - 30, H - 2);
   ctx.fillStyle = 'rgba(120,200,255,0.7)';  ctx.fillText('comp', plotR, H - 2);
 }
 
 window.axonBusComp = function(d) {
-  // Record RAW (unsmoothed) residual + crest-reduction for the scrolling strip.
-  const resid = (d && typeof d.residual === 'number') ? d.residual : -60;
+  // Record RAW (unsmoothed) distortion + crest-reduction for the scrolling strip.
+  const dist = (d && typeof d.distortion === 'number') ? d.distortion : -48;
   const crest = (d && typeof d.crest === 'number') ? d.crest : 0;
-  pushBcHistory(resid, crest);
+  pushBcHistory(dist, crest);
   if (selectedProc === 4) drawBusCompCrunch();
+};
+
+// DIRECT exciter wet-spectrum (the added contribution). Stores the latest frame
+// and redraws the band display when the exciter page (proc 7) is selected. It's
+// a live spectrum (already EMA-smoothed on the DSP side), so just the current
+// frame — no scrolling history needed.
+window.axonExciter = function(d) {
+  excWetSpec = d || null;
+  if (selectedProc === 7) drawExcBand();
 };
 
 // ============================================================

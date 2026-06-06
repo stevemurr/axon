@@ -73,6 +73,16 @@ public:
 
     void reset() {
         for (auto& c : ch_) c = Channel{};
+        // reset() default-constructs each Channel, which leaves the band-split
+        // biquads at passthrough (Biquad default b0=1). Invalidate the cached
+        // cutoffs so the NEXT set_params() re-designs the filters. Without this,
+        // CLAP's reset()-after-activate sequence wipes the coefficients designed
+        // in prepare(), and because the host's first param push matches the
+        // cached defaults, set_params() skips the re-design — leaving the filters
+        // passthrough so the high-drive shaper distorts the FULL-RANGE signal
+        // (broadband fizz) until a knob is moved. -1 = stale (cf. Saturator).
+        hpf_fc_ = -1.f;
+        lpf_fc_ = -1.f;
     }
 
     // amount    : 0..1   parallel wet/dry blend of the excited band (0 = bypass)
@@ -94,10 +104,24 @@ public:
     }
 
     // In place, stereo. When amount == 0 the input is bit-identical to bypass.
-    void process(float* l, float* r, int n) {
-        if (amount_ <= 0.f) return;
-        process_ch_(ch_[0], l, n);
-        if (r) process_ch_(ch_[1], r, n);
+    //
+    // wet_mono_out (optional): when non-null, receives the per-sample WET
+    // CONTRIBUTION that is summed onto the dry — i.e. exactly `amount_ * wet_ac`
+    // (post wet-HPF, post-amount), as a mono value. This is observational only:
+    // the audio output (buf) is identical whether or not it is supplied. We use
+    // the LEFT channel's wet (the stereo image of the exciter is matched, and a
+    // mono tap is all the spectrum display needs). It is filled for ALL n samples
+    // even on the amount==0 early-out (then it's all zeros, which is correct: the
+    // exciter adds nothing). Default nullptr keeps existing callers bit-identical.
+    void process(float* l, float* r, int n, float* wet_mono_out = nullptr) {
+        if (amount_ <= 0.f) {
+            if (wet_mono_out) {
+                for (int i = 0; i < n; ++i) wet_mono_out[i] = 0.f;
+            }
+            return;
+        }
+        process_ch_(ch_[0], l, n, wet_mono_out);
+        if (r) process_ch_(ch_[1], r, n, nullptr);
     }
 
     // Group delay the plugin should add to its reported latency, in base-rate
@@ -172,7 +196,7 @@ private:
         return (1.0 - character_) * even + character_ * odd;
     }
 
-    void process_ch_(Channel& c, float* buf, int n) {
+    void process_ch_(Channel& c, float* buf, int n, float* wet_mono_out = nullptr) {
         for (int i = 0; i < n; ++i) {
             const double x = static_cast<double>(buf[i]);
 
@@ -230,7 +254,11 @@ private:
             const double dry_d = c.dry_ring[c.dry_idx];   // x delayed kDryDelay samples
             c.dry_ring[c.dry_idx] = x;
             c.dry_idx = (c.dry_idx + 1) % kDryDelay;
-            buf[i] = static_cast<float>(dry_d + amount_ * wet_ac);
+            const double added = amount_ * wet_ac;        // the contribution summed on
+            buf[i] = static_cast<float>(dry_d + added);
+            // Observational wet tap: exactly what we add onto the dry. Read-only
+            // — the line above is computed identically with or without the tap.
+            if (wet_mono_out) wet_mono_out[i] = static_cast<float>(added);
         }
     }
 

@@ -48,7 +48,9 @@
 #include "composite_meta.hpp"
 #include "auto_gain.hpp"
 #include "bass_mono.hpp"
+#include "coherence_distortion.hpp"
 #include "exciter.hpp"
+#include "exciter_spectrum.hpp"
 #include "reverb.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
@@ -660,6 +662,16 @@ struct Plugin {
     // Aphex-style aural exciter (stereo; band-limited parallel harmonic sheen).
     nablafx::Exciter     exciter;
 
+    // DIRECT wet-spectrum meter for the exciter overlay. Fed (read-only) the
+    // mono wet CONTRIBUTION the exciter sums onto the dry, so the UI can draw
+    // exactly what the exciter adds (nothing below the HPF, harmonics in/above
+    // the band) instead of a fragile post-minus-pre spectrum difference.
+    // Allocated in activate; updated from the Exciter stage; snapshotted to
+    // exc_spec_db under a benign meter race (same pattern as lim_brick).
+    nablafx::ExciterSpectrum exc_spectrum;
+    std::array<float, nablafx::ExciterSpectrum::kNumBins> exc_spec_db{};
+    bool exc_spec_active{false};
+
     // Transparent mastering room reverb (single stereo 8-line FDN network).
     nablafx::Reverb      reverb;
 
@@ -725,13 +737,20 @@ struct Plugin {
 
     // Bus Comp "crunch" telemetry (plain float members set on the audio thread,
     // read on the main thread — a benign meter race, same as lim_brick). The
-    // bus comp is a learned TCN with no readable internal gain reduction, so we
-    // derive a proxy from the model CONTRIBUTION (wet_a - dry_aligned) per block:
-    //   bc_residual_db = how much the model is altering the signal (-60..~-8 dB)
-    //   bc_crest_red_db = crest(dry) - crest(wet) = dynamics being squashed (≥0)
-    float bc_residual_db{-60.f};
+    // bus comp is a learned TCN with no readable internal gain reduction, AND it
+    // phase-rotates the signal, so a residual rms(wet-dry) is pinned near 0 dB.
+    // Instead we measure phase-invariant magnitude-squared coherence between the
+    // model input (dry) and output (wet) — see CoherenceDistortion:
+    //   bc_distortion_db = 10*log10(1 - γ²), how much the model is altering the
+    //                      signal in a phase-invariant way (-48..0 dB)
+    //   bc_crest_red_db  = crest(dry) - crest(wet) = dynamics being squashed (≥0)
+    float bc_distortion_db{-48.f};
     float bc_crest_red_db{0.f};
     bool  bc_active{false};
+    // Coherence analyzer: averages dry-vs-wet spectra over ~200 ms to extract a
+    // phase-invariant distortion measure. Allocated in activate, fed read-only
+    // from the SslComp tap (mono sum of dry_aligned / wet_a).
+    nablafx::CoherenceDistortion bc_coherence;
 
     std::vector<ChannelChain> chains;
 };
@@ -1081,8 +1100,12 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     plug->spectrum.init();
     plug->bass_mono.prepare(plug->sample_rate);
     plug->exciter.prepare(plug->sample_rate);
+    plug->exc_spectrum.prepare(plug->sample_rate);
+    plug->exc_spec_db.fill(nablafx::ExciterSpectrum::kFloorDb);
+    plug->exc_spec_active = false;
     plug->reverb.prepare(plug->sample_rate);
     plug->auto_gain.reset();
+    plug->bc_coherence.prepare(plug->sample_rate);
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
     // Seed static band centres for the limiter visualization.
@@ -1109,6 +1132,7 @@ static void plugin_reset(const clap_plugin_t* p) {
     plug->mel_limiter.reset();
     plug->bass_mono.reset();
     plug->exciter.reset();
+    plug->exc_spectrum.reset();
     plug->reverb.reset();
     plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
@@ -1433,10 +1457,12 @@ void flush_chain_block_(Plugin& plug,
             // Skipped if the SSL bundle wasn't shipped (ssl_comp_ort null) or
             // the wet mix is at zero.
             if (amt.ssl_comp_wet <= 0.f || !plug.chains[0].ssl_comp_ort) {
-                // Stage idle/bypassed: park the crunch telemetry at its floor.
-                plug.bc_residual_db  = -60.f;
-                plug.bc_crest_red_db = 0.f;
-                plug.bc_active       = false;
+                // Stage idle/bypassed: park the meter at idle and reset the
+                // coherence averages so re-enabling starts clean.
+                plug.bc_distortion_db = nablafx::CoherenceDistortion::floor_db();
+                plug.bc_crest_red_db  = 0.f;
+                plug.bc_active        = false;
+                plug.bc_coherence.reset();
                 break;
             }
             const int N           = g_state->ssl_comp_meta.trace_len;
@@ -1457,12 +1483,18 @@ void flush_chain_block_(Plugin& plug,
             // bump — acceptable for an operating-point control.
             const float in_gain = amt.ssl_comp_in_lin;
             const float mk_gain = (in_gain != 0.f) ? (1.f / in_gain) : 1.f;
-            // "Crunch" telemetry accumulators (summed across channels; cheap —
-            // sums of squares + a running peak over the block). Computed at the
-            // end of the stage from the model contribution (wet_a-dry_aligned).
-            double crunch_resid2 = 0.0, crunch_dry2 = 0.0, crunch_wet2 = 0.0;
+            // "Crunch" telemetry accumulators. The crest-reduction proxy is a
+            // running peak + sum-of-squares over the block (unchanged). The
+            // DISTORTION proxy is phase-invariant coherence, fed the MONO SUM
+            // 0.5*(L+R) of the time-aligned dry and the post-makeup wet — built
+            // here per sample position across the channel loop, then pushed to
+            // bc_coherence once after the loop. Read-only: does NOT touch the
+            // blend, makeup, or alignment.
+            double crunch_dry2 = 0.0, crunch_wet2 = 0.0;
             float  crunch_peak_dry = 0.f, crunch_peak_wet = 0.f;
             int    crunch_n = 0;   // samples accumulated (0 → still warming up)
+            std::array<float, kBlockSize> mono_dry{}, mono_wet{};
+            bool   coh_have_block = false;   // a full wet block was popped
             float* ch_buf[2]={work_l,work_r};
             for (uint32_t ch=0;ch<n_ch;++ch) {
                 float* blk=ch_buf[ch];
@@ -1554,23 +1586,25 @@ void flush_chain_block_(Plugin& plug,
                         for (int i = 0; i < kBlockSize; ++i)
                             wet_a[i] *= mk_gain;
                     }
-                    // "Crunch" tap: model contribution = wet_a (post-makeup,
-                    // pre-blend) minus the time-aligned dry. Read-only; does NOT
-                    // touch the blend, makeup, or alignment. Accumulate sums of
-                    // squares + peaks across channels for a per-block residual /
-                    // crest-reduction proxy of how hard the model is working.
+                    // "Crunch" tap: read the post-makeup, pre-blend wet_a and
+                    // the time-aligned dry. Read-only; does NOT touch the blend,
+                    // makeup, or alignment. Accumulate the mono sum 0.5*(L+R)
+                    // per sample for coherence, plus sum-of-squares + peaks for
+                    // the crest-reduction proxy.
+                    const float mono_w = (n_ch > 1) ? 0.5f : 1.f;
                     for (int i = 0; i < kBlockSize; ++i) {
                         const float d = dry_aligned[i];
                         const float w = wet_a[i];
-                        const float r = w - d;
-                        crunch_resid2 += static_cast<double>(r) * r;
-                        crunch_dry2   += static_cast<double>(d) * d;
-                        crunch_wet2   += static_cast<double>(w) * w;
+                        mono_dry[i] += mono_w * d;
+                        mono_wet[i] += mono_w * w;
+                        crunch_dry2 += static_cast<double>(d) * d;
+                        crunch_wet2 += static_cast<double>(w) * w;
                         const float ad = std::fabs(d), aw = std::fabs(w);
                         if (ad > crunch_peak_dry) crunch_peak_dry = ad;
                         if (aw > crunch_peak_wet) crunch_peak_wet = aw;
                     }
                     crunch_n += kBlockSize;
+                    coh_have_block = true;
                     // Blend the (delayed) wet against the time-aligned dry,
                     // NOT the current dry — they're the same audio in
                     // absolute time, so this is the only mix that doesn't
@@ -1586,27 +1620,27 @@ void flush_chain_block_(Plugin& plug,
             // During the warm-up window (no full output block yet) crunch_n is
             // 0 → hold idle so the strip doesn't flash garbage.
             if (crunch_n > 0) {
+                // Feed the mono dry/wet block to the coherence analyzer; it runs
+                // its own FFT framing/EMA internally and gates on silence/warmup.
+                if (coh_have_block)
+                    plug.bc_coherence.push(mono_dry.data(), mono_wet.data(), kBlockSize);
+                plug.bc_distortion_db = plug.bc_coherence.distortion_db();
+
                 const double inv = 1.0 / static_cast<double>(crunch_n);
-                const float rms_resid = static_cast<float>(std::sqrt(crunch_resid2 * inv));
-                const float rms_dry   = static_cast<float>(std::sqrt(crunch_dry2   * inv));
-                const float rms_wet   = static_cast<float>(std::sqrt(crunch_wet2   * inv));
+                const float rms_dry = static_cast<float>(std::sqrt(crunch_dry2 * inv));
+                const float rms_wet = static_cast<float>(std::sqrt(crunch_wet2 * inv));
                 constexpr float eps = 1e-9f;
-                // Residual level relative to dry (how much the model alters it).
-                float resid_db = 20.f * std::log10((rms_resid) / (rms_dry + eps) + eps);
-                if (resid_db < -60.f) resid_db = -60.f;
-                if (resid_db >   0.f) resid_db =   0.f;
                 // Crest reduction = crest(dry) - crest(wet); positive == squashed.
                 const float crest_dry = 20.f * std::log10((crunch_peak_dry + eps) / (rms_dry + eps));
                 const float crest_wet = 20.f * std::log10((crunch_peak_wet + eps) / (rms_wet + eps));
                 float crest_red = crest_dry - crest_wet;
                 if (crest_red < 0.f)  crest_red = 0.f;
-                plug.bc_residual_db  = resid_db;
                 plug.bc_crest_red_db = crest_red;
                 plug.bc_active       = true;
             } else {
-                plug.bc_residual_db  = -60.f;
-                plug.bc_crest_red_db = 0.f;
-                plug.bc_active       = false;
+                plug.bc_distortion_db = nablafx::CoherenceDistortion::floor_db();
+                plug.bc_crest_red_db  = 0.f;
+                plug.bc_active        = false;
             }
             break;
         }
@@ -1643,11 +1677,26 @@ void flush_chain_block_(Plugin& plug,
             // full-range signal untouched and sums in `amount` of the excited
             // upper band. Gated by the EXC_ON toggle; also a no-op at amount == 0
             // (bit-identical bypass).
-            if (!amt.exc_on || amt.exc_amt <= 0.f) break;
+            if (!amt.exc_on || amt.exc_amt <= 0.f) {
+                // Stage idle/bypassed: park the wet-spectrum meter and reset its
+                // averages so re-enabling starts clean (overlay shows nothing).
+                plug.exc_spec_active = false;
+                plug.exc_spectrum.reset();
+                break;
+            }
             plug.exciter.set_params(amt.exc_amt, amt.exc_freq, amt.exc_drive_db,
                                     amt.exc_char, amt.exc_lpf);
+            // Tap the mono wet CONTRIBUTION (amount*wet that's summed onto the
+            // dry) into wet_b — observational only; the audio output in work_l/r
+            // is unchanged whether or not the tap buffer is passed. Feed it to
+            // the direct wet-spectrum meter for the band-display overlay.
             plug.exciter.process(work_l, (n_ch >= 2 ? work_r : nullptr),
-                                 kBlockSize);
+                                 kBlockSize, wet_b.data());
+            plug.exc_spectrum.push(wet_b.data(), kBlockSize);
+            // Snapshot the smoothed log-spaced dBFS spectrum for the UI (benign
+            // meter race, same as lim_brick / bc_distortion_db).
+            plug.exc_spectrum.copy_spectrum(plug.exc_spec_db.data());
+            plug.exc_spec_active = true;
             break;
         }
 
@@ -2098,11 +2147,34 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
     {
         char bjs[160];
         std::snprintf(bjs, sizeof(bjs),
-            "axonBusComp({\"active\":%s,\"residual\":%.1f,\"crest\":%.1f})",
+            "axonBusComp({\"active\":%s,\"distortion\":%.1f,\"crest\":%.1f})",
             plug->bc_active ? "true" : "false",
-            plug->bc_residual_db,
+            plug->bc_distortion_db,
             plug->bc_crest_red_db);
         axon_gui_eval_js(plug->gui_state, bjs);
+    }
+
+    // Push the exciter wet-spectrum overlay. `db` is kNumBins (56) log-spaced
+    // dBFS magnitudes of the WET (added) contribution at frequencies
+    //   f_i = 20 * (20000/20)^(i/(kNumBins-1)) Hz  (20 Hz .. 20 kHz inclusive),
+    // which the UI reconstructs with the identical log formula. Below the HPF
+    // and above the harmonics the wet is ~silent → those points sit at the
+    // floor, so the overlay is correctly empty there (no low-end artifact).
+    {
+        constexpr int NEB = nablafx::ExciterSpectrum::kNumBins;
+        std::string ejs;
+        ejs.reserve(64 + NEB * 7);
+        ejs = "axonExciter({\"active\":";
+        ejs += (plug->exc_spec_active ? "true" : "false");
+        ejs += ",\"db\":[";
+        char eb[16];
+        for (int i = 0; i < NEB; ++i) {
+            if (i) ejs += ',';
+            std::snprintf(eb, sizeof(eb), "%.1f", plug->exc_spec_db[i]);
+            ejs += eb;
+        }
+        ejs += "]})";
+        axon_gui_eval_js(plug->gui_state, ejs.c_str());
     }
 }
 
@@ -2186,18 +2258,18 @@ static bool entry_init(const char* /*plugin_path*/) {
                 st->axon_meta.controls.push_back(spec);
             };
             //                  id            name         min      max     def    skew unit
-            inject(ControlSpec{"EXC_ON",    "Exciter",     0.0f,    1.0f,   0.0f,  1.0f, "switch"});
-            inject(ControlSpec{"EXC_AMT",   "Amount",      0.0f,    1.0f,   0.0f,  1.0f, ""});
+            inject(ControlSpec{"EXC_ON",    "Exciter",     0.0f,    1.0f,   1.0f,  1.0f, "switch"});
+            inject(ControlSpec{"EXC_AMT",   "Amount",      0.0f,    1.0f,   1.0f,  1.0f, ""});
             inject(ControlSpec{"EXC_FREQ",  "Frequency",1000.0f,12000.0f,3000.0f,  1.0f, "Hz"});
-            inject(ControlSpec{"EXC_DRIVE", "Intensity",   0.0f,   24.0f,   6.0f,  1.0f, "dB"});
-            inject(ControlSpec{"EXC_CHAR",  "Warm ◐ Bright", 0.0f, 1.0f, 0.25f, 1.0f, ""});
+            inject(ControlSpec{"EXC_DRIVE", "Intensity",   0.0f,   24.0f,   16.1f, 1.0f, "dB"});
+            inject(ControlSpec{"EXC_CHAR",  "Warm ◐ Bright", 0.0f, 1.0f, 0.5f, 1.0f, ""});
             inject(ControlSpec{"EXC_LPF",   "Tame",     5000.0f,20000.0f,18000.0f, 1.0f, "Hz"});
             // Transparent mastering room reverb. Defaults make the stage a no-op
             // (RVB_MIX = 0 → bit-identical bypass) so existing bundles that don't
             // declare these still get the controls with safe defaults.
-            inject(ControlSpec{"RVB_MIX",   "Mix",       0.0f,    1.0f,    0.0f, 1.0f, ""});
+            inject(ControlSpec{"RVB_MIX",   "Mix",       0.0f,    1.0f,    1.0f, 1.0f, ""});
             inject(ControlSpec{"RVB_SIZE",  "Size",      0.0f,    1.0f,    0.30f,1.0f, ""});
-            inject(ControlSpec{"RVB_WIDTH", "Width",     0.0f,    1.0f,    0.80f,1.0f, ""});
+            inject(ControlSpec{"RVB_WIDTH", "Width",     0.0f,    1.0f,    1.0f,1.0f, ""});
             inject(ControlSpec{"RVB_DAMP",  "Damp",   2000.0f,18000.0f, 7000.0f, 1.0f, "Hz"});
             inject(ControlSpec{"RVB_LOWCUT","Low Cut",  20.0f, 1000.0f,  250.0f, 1.0f, "Hz"});
         }

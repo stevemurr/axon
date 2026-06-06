@@ -175,7 +175,7 @@
       "name": "Ceiling",
       "min": -12.0,
       "max": 0.0,
-      "default": -1.0,
+      "default": 0.0,
       "skew": 1.0,
       "unit": "dBFS"
     },
@@ -238,7 +238,7 @@
       "name": "Exciter",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.0,
+      "default": 1.0,
       "skew": 1.0,
       "unit": "switch"
     },
@@ -247,7 +247,7 @@
       "name": "Amount",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.0,
+      "default": 1.0,
       "skew": 1.0,
       "unit": ""
     },
@@ -265,7 +265,7 @@
       "name": "Intensity",
       "min": 0.0,
       "max": 24.0,
-      "default": 6.0,
+      "default": 16.1,
       "skew": 1.0,
       "unit": "dB"
     },
@@ -274,7 +274,7 @@
       "name": "Warm ◐ Bright",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.25,
+      "default": 0.5,
       "skew": 1.0,
       "unit": ""
     },
@@ -292,7 +292,7 @@
       "name": "Mix",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.0,
+      "default": 1.0,
       "skew": 1.0,
       "unit": ""
     },
@@ -310,7 +310,7 @@
       "name": "Width",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.8,
+      "default": 1.0,
       "skew": 1.0,
       "unit": ""
     },
@@ -337,7 +337,7 @@
       "name": "Auto Gain",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.0,
+      "default": 1.0,
       "skew": 1.0,
       "unit": "switch"
     },

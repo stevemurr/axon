@@ -213,7 +213,7 @@ AxonGUIState* axon_gui_create(
     state->msg_handler = handler;
 
     // --- Container NSView ---
-    NSRect frame = NSMakeRect(0, 0, 820, 560);
+    NSRect frame = NSMakeRect(0, 0, 820, 600);
     NSView* container = [[NSView alloc] initWithFrame:frame];
     container.wantsLayer = YES;
     container.layer.backgroundColor = [[NSColor colorWithSRGBRed:0.067
@@ -326,7 +326,7 @@ void axon_gui_hide(AxonGUIState* gui) {
 
 void axon_gui_get_size(uint32_t* w, uint32_t* h) {
     if (w) *w = 820;
-    if (h) *h = 560;
+    if (h) *h = 600;
 }
 
 void axon_gui_send_init(

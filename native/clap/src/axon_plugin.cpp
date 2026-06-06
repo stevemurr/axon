@@ -723,6 +723,16 @@ struct Plugin {
     float lim_brick{1.f};      // brickwall gain (1 = no peak limiting)
     bool  lim_active{false};
 
+    // Bus Comp "crunch" telemetry (plain float members set on the audio thread,
+    // read on the main thread — a benign meter race, same as lim_brick). The
+    // bus comp is a learned TCN with no readable internal gain reduction, so we
+    // derive a proxy from the model CONTRIBUTION (wet_a - dry_aligned) per block:
+    //   bc_residual_db = how much the model is altering the signal (-60..~-8 dB)
+    //   bc_crest_red_db = crest(dry) - crest(wet) = dynamics being squashed (≥0)
+    float bc_residual_db{-60.f};
+    float bc_crest_red_db{0.f};
+    bool  bc_active{false};
+
     std::vector<ChannelChain> chains;
 };
 
@@ -1422,8 +1432,13 @@ void flush_chain_block_(Plugin& plug,
             //
             // Skipped if the SSL bundle wasn't shipped (ssl_comp_ort null) or
             // the wet mix is at zero.
-            if (amt.ssl_comp_wet <= 0.f) break;
-            if (!plug.chains[0].ssl_comp_ort) break;
+            if (amt.ssl_comp_wet <= 0.f || !plug.chains[0].ssl_comp_ort) {
+                // Stage idle/bypassed: park the crunch telemetry at its floor.
+                plug.bc_residual_db  = -60.f;
+                plug.bc_crest_red_db = 0.f;
+                plug.bc_active       = false;
+                break;
+            }
             const int N           = g_state->ssl_comp_meta.trace_len;
             const int rf          = g_state->ssl_comp_meta.receptive_field;
             const int actual_olen = N - (rf - 1);  // ORT output length
@@ -1442,6 +1457,12 @@ void flush_chain_block_(Plugin& plug,
             // bump — acceptable for an operating-point control.
             const float in_gain = amt.ssl_comp_in_lin;
             const float mk_gain = (in_gain != 0.f) ? (1.f / in_gain) : 1.f;
+            // "Crunch" telemetry accumulators (summed across channels; cheap —
+            // sums of squares + a running peak over the block). Computed at the
+            // end of the stage from the model contribution (wet_a-dry_aligned).
+            double crunch_resid2 = 0.0, crunch_dry2 = 0.0, crunch_wet2 = 0.0;
+            float  crunch_peak_dry = 0.f, crunch_peak_wet = 0.f;
+            int    crunch_n = 0;   // samples accumulated (0 → still warming up)
             float* ch_buf[2]={work_l,work_r};
             for (uint32_t ch=0;ch<n_ch;++ch) {
                 float* blk=ch_buf[ch];
@@ -1533,6 +1554,23 @@ void flush_chain_block_(Plugin& plug,
                         for (int i = 0; i < kBlockSize; ++i)
                             wet_a[i] *= mk_gain;
                     }
+                    // "Crunch" tap: model contribution = wet_a (post-makeup,
+                    // pre-blend) minus the time-aligned dry. Read-only; does NOT
+                    // touch the blend, makeup, or alignment. Accumulate sums of
+                    // squares + peaks across channels for a per-block residual /
+                    // crest-reduction proxy of how hard the model is working.
+                    for (int i = 0; i < kBlockSize; ++i) {
+                        const float d = dry_aligned[i];
+                        const float w = wet_a[i];
+                        const float r = w - d;
+                        crunch_resid2 += static_cast<double>(r) * r;
+                        crunch_dry2   += static_cast<double>(d) * d;
+                        crunch_wet2   += static_cast<double>(w) * w;
+                        const float ad = std::fabs(d), aw = std::fabs(w);
+                        if (ad > crunch_peak_dry) crunch_peak_dry = ad;
+                        if (aw > crunch_peak_wet) crunch_peak_wet = aw;
+                    }
+                    crunch_n += kBlockSize;
                     // Blend the (delayed) wet against the time-aligned dry,
                     // NOT the current dry — they're the same audio in
                     // absolute time, so this is the only mix that doesn't
@@ -1542,6 +1580,33 @@ void flush_chain_block_(Plugin& plug,
                     std::copy_n(wet_a.data(), kBlockSize, blk);
                 }
                 // else: leave blk = current dry (warm-up pass-through).
+            }
+
+            // Reduce the accumulated sums into the two "crunch" proxy metrics.
+            // During the warm-up window (no full output block yet) crunch_n is
+            // 0 → hold idle so the strip doesn't flash garbage.
+            if (crunch_n > 0) {
+                const double inv = 1.0 / static_cast<double>(crunch_n);
+                const float rms_resid = static_cast<float>(std::sqrt(crunch_resid2 * inv));
+                const float rms_dry   = static_cast<float>(std::sqrt(crunch_dry2   * inv));
+                const float rms_wet   = static_cast<float>(std::sqrt(crunch_wet2   * inv));
+                constexpr float eps = 1e-9f;
+                // Residual level relative to dry (how much the model alters it).
+                float resid_db = 20.f * std::log10((rms_resid) / (rms_dry + eps) + eps);
+                if (resid_db < -60.f) resid_db = -60.f;
+                if (resid_db >   0.f) resid_db =   0.f;
+                // Crest reduction = crest(dry) - crest(wet); positive == squashed.
+                const float crest_dry = 20.f * std::log10((crunch_peak_dry + eps) / (rms_dry + eps));
+                const float crest_wet = 20.f * std::log10((crunch_peak_wet + eps) / (rms_wet + eps));
+                float crest_red = crest_dry - crest_wet;
+                if (crest_red < 0.f)  crest_red = 0.f;
+                plug.bc_residual_db  = resid_db;
+                plug.bc_crest_red_db = crest_red;
+                plug.bc_active       = true;
+            } else {
+                plug.bc_residual_db  = -60.f;
+                plug.bc_crest_red_db = 0.f;
+                plug.bc_active       = false;
             }
             break;
         }
@@ -2026,6 +2091,18 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
         arr("f", f, 0); arr("lvl", lvl, 1); arr("gr", gr, 1);
         js += "})";
         axon_gui_eval_js(plug->gui_state, js.c_str());
+    }
+
+    // Push Bus Comp "crunch" telemetry (model-activity proxy). Plain member
+    // reads — a benign meter race, same pattern as the limiter brick gain.
+    {
+        char bjs[160];
+        std::snprintf(bjs, sizeof(bjs),
+            "axonBusComp({\"active\":%s,\"residual\":%.1f,\"crest\":%.1f})",
+            plug->bc_active ? "true" : "false",
+            plug->bc_residual_db,
+            plug->bc_crest_red_db);
+        axon_gui_eval_js(plug->gui_state, bjs);
     }
 }
 

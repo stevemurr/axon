@@ -19,7 +19,7 @@
   }
 
   html, body {
-    width: 820px; height: 560px;
+    width: 820px; height: 600px;
     overflow: hidden;
     background: var(--bg);
     color: var(--text);
@@ -116,11 +116,12 @@
     overflow: hidden;
   }
   #surface-title {
+    display: none;        /* redundant with the selected stage tab; reclaim vertical space */
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.2em;
     color: var(--dim);
-    margin-bottom: 14px;
+    margin-bottom: 0;
   }
   #controls {
     display: flex;
@@ -293,7 +294,7 @@
   #sat-filter-canvas { display: block; }
   #lim-viz-wrap {
     display: none;
-    margin-top: 14px;
+    margin-top: 10px;
     flex-shrink: 0;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -301,6 +302,26 @@
     background: #0d0d0d;
   }
   #lim-viz-canvas { display: block; }
+  #lim-gr-wrap {
+    display: none;
+    margin-top: 10px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: #0d0d0d;
+  }
+  #lim-gr-canvas { display: block; }
+  #bc-crunch-wrap {
+    display: none;
+    margin-top: 10px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: #0d0d0d;
+  }
+  #bc-crunch-canvas { display: block; }
   #exc-band-wrap {
     display: none;
     margin-top: 14px;
@@ -317,7 +338,7 @@
     display: flex;
     flex-direction: column;
     width: 820px;
-    height: 560px;
+    height: 600px;
   }
   /* ── Body row: main column + right-side meter panel ───────── */
   #body-row {
@@ -431,6 +452,12 @@
     <div id="controls"></div>
     <div id="sat-filter-wrap">
       <canvas id="sat-filter-canvas" width="660" height="108"></canvas>
+    </div>
+    <div id="lim-gr-wrap">
+      <canvas id="lim-gr-canvas" width="660" height="74"></canvas>
+    </div>
+    <div id="bc-crunch-wrap">
+      <canvas id="bc-crunch-canvas" width="660" height="74"></canvas>
     </div>
     <div id="lim-viz-wrap">
       <canvas id="lim-viz-canvas" width="660" height="108"></canvas>
@@ -830,7 +857,14 @@ function renderSurface() {
   const limWrap = document.getElementById('lim-viz-wrap');
   const showLim = selectedProc === 5;
   limWrap.style.display = showLim ? 'block' : 'none';
-  if (showLim) drawLimViz();
+  const limGrWrap = document.getElementById('lim-gr-wrap');
+  if (limGrWrap) limGrWrap.style.display = showLim ? 'block' : 'none';
+  if (showLim) { drawLimViz(); drawLimGR(); }
+
+  const bcWrap = document.getElementById('bc-crunch-wrap');
+  const showBc = selectedProc === 4;   // Bus Comp = StageID 4
+  if (bcWrap) bcWrap.style.display = showBc ? 'block' : 'none';
+  if (showBc) drawBusCompCrunch();
 
   const excWrap = document.getElementById('exc-band-wrap');
   const showExc = selectedProc === 7;
@@ -1806,6 +1840,22 @@ let limData = null;
 // readout is calm/legible instead of ballistic.
 const _lim = { lvl: null, gr: null, brick: 0, init: false };
 
+// Scrolling gain-reduction history (peak/brickwall GR, dB ≤ 0), sampled once per
+// telemetry frame (~21 fps). We store the RAW incoming GR, NOT the smoothed
+// _lim.brick — the whole point is to show the LIMITER's own attack/release
+// envelope (which the Dynamic-mode Adaptive Gain/Speed knobs reshape), so we
+// must not run it through the UI's display smoothing. ~180 frames ≈ 8.5 s.
+const GR_HIST_N = 180;
+const grHist = new Float32Array(GR_HIST_N);   // brick (peak) GR, dB ≤ 0
+const grBandHist = new Float32Array(GR_HIST_N); // deepest spectral band GR, dB ≤ 0
+let grHistHead = 0, grHistLen = 0;
+function pushGrHistory(brickDb, bandDb) {
+  grHist[grHistHead] = brickDb;
+  grBandHist[grHistHead] = bandDb;
+  grHistHead = (grHistHead + 1) % GR_HIST_N;
+  if (grHistLen < GR_HIST_N) grHistLen++;
+}
+
 // Activation → colour: teal (idle) → amber → red (heavy gain reduction).
 function grColor(grDb, alpha) {
   const a = Math.max(0, Math.min(1, -grDb / 9));   // 0 dB..-9 dB → 0..1
@@ -1893,25 +1943,87 @@ function drawLimViz() {
     }
   }
 
-  // Peak (brickwall) gain-reduction readout — the true peak limiting, which the
-  // spectral bands don't show. A short bar that grows downward + a number.
-  {
-    const pk = _lim.brick || 0;                     // ≤ 0 dB
-    const ax = plotL + 2, ay = 2, aw = 70, ah = 7;
-    ctx.fillStyle = '#333'; ctx.fillRect(ax, ay, aw, ah);
-    const frac = Math.max(0, Math.min(1, -pk / 12)); // full at -12 dB
-    ctx.fillStyle = grColor(pk, 1);
-    ctx.fillRect(ax, ay, aw * frac, ah);
-    ctx.fillStyle = '#999'; ctx.font = '8px -apple-system, sans-serif';
-    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillText(`PEAK GR ${pk <= -0.05 ? pk.toFixed(1) : '0.0'} dB`, ax + aw + 6, ay + ah / 2);
-  }
-
   // Legend.
   ctx.font = '8px -apple-system, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
   ctx.fillStyle = grColor(0, 1);  ctx.fillText('■', plotR - 60, 2);
   ctx.fillStyle = grColor(-9, 1); ctx.fillText('■', plotR - 52, 2);
   ctx.fillStyle = '#888';         ctx.fillText('idle → limiting', plotR, 2);
+}
+
+// Scrolling gain-reduction-over-time strip. The spectral bands above show WHICH
+// frequencies are limited; this shows HOW the gain reduction moves in TIME — so
+// the Dynamic-mode Adaptive Gain (attack) / Adaptive Speed (release) knobs, and
+// the spectral release, become directly visible (fast vs slow recovery, pumping).
+// Newest sample on the right; ~21 fps so ~8.5 s of history fits.
+function drawLimGR() {
+  const canvas = document.getElementById('lim-gr-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const GR_BOT = -12;                      // strip bottom = -12 dB GR
+  const padL = 22, padR = 30, padT = 11, padB = 13;
+  const plotL = padL, plotR = W - padR, plotW = plotR - plotL;
+  const plotT = padT, plotB = H - padB, plotH = plotB - plotT;
+  const yFor = db => plotT + (0 - Math.max(GR_BOT, Math.min(0, db))) / (0 - GR_BOT) * plotH;
+
+  // Horizontal dB grid + labels (0 at top → -12 at bottom).
+  ctx.font = '8px -apple-system, sans-serif'; ctx.textBaseline = 'middle';
+  [0, -3, -6, -12].forEach(db => {
+    const y = yFor(db);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(plotL, y); ctx.lineTo(plotR, y); ctx.stroke();
+    ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+    ctx.fillText(String(db), plotL - 3, y);
+  });
+
+  ctx.fillStyle = '#666'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('GAIN REDUCTION → time', plotL + 2, 1);
+
+  const n = grHistLen;
+  if (n > 1) {
+    const start = (grHistHead - n + GR_HIST_N) % GR_HIST_N;
+    const xFor = k => plotR - ((n - 1 - k) / (GR_HIST_N - 1)) * plotW; // newest → right
+
+    // Peak (brickwall) GR — filled area from the 0 dB line down to the curve.
+    ctx.beginPath();
+    ctx.moveTo(xFor(0), plotT);
+    for (let k = 0; k < n; k++) ctx.lineTo(xFor(k), yFor(grHist[(start + k) % GR_HIST_N]));
+    ctx.lineTo(xFor(n - 1), plotT);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(231,111,81,0.20)';
+    ctx.fill();
+
+    // Deepest spectral-band GR — faint line (shows spectral release).
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const x = xFor(k), y = yFor(grBandHist[(start + k) % GR_HIST_N]);
+      k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(76,201,168,0.45)';
+    ctx.stroke();
+
+    // Peak GR line on top, brighter.
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const x = xFor(k), y = yFor(grHist[(start + k) % GR_HIST_N]);
+      k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(231,111,81,0.95)';
+    ctx.stroke();
+  }
+
+  // Current peak-GR readout at the right edge.
+  const cur = grHistLen ? grHist[(grHistHead - 1 + GR_HIST_N) % GR_HIST_N] : 0;
+  ctx.fillStyle = '#bbb'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(`${cur <= -0.05 ? cur.toFixed(1) : '0.0'}`, plotR + 3, yFor(Math.max(GR_BOT, cur)));
+
+  // Line legend.
+  ctx.font = '8px -apple-system, sans-serif'; ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(231,111,81,0.95)'; ctx.fillText('peak', plotR - 34, H - 2);
+  ctx.fillStyle = 'rgba(76,201,168,0.7)';  ctx.fillText('band', plotR, H - 2);
 }
 
 window.axonLimiter = function(d) {
@@ -1932,7 +2044,115 @@ window.axonLimiter = function(d) {
       _lim.brick += (tb - _lim.brick) * (tb < _lim.brick ? 0.55 : 0.10);
     }
   }
-  if (selectedProc === 5) drawLimViz();
+  // Record RAW (unsmoothed) peak + deepest-band GR for the scrolling strip so it
+  // shows the limiter's own attack/release, not the display EMA above.
+  {
+    let bandMin = 0;
+    if (d && d.gr) for (let i = 0; i < d.gr.length; i++) if (d.gr[i] < bandMin) bandMin = d.gr[i];
+    pushGrHistory((d && typeof d.brick === 'number') ? d.brick : 0, bandMin);
+  }
+  if (selectedProc === 5) { drawLimViz(); drawLimGR(); }
+};
+
+// ============================================================
+// BUS COMP "CRUNCH" STRIP (model-activity proxy, StageID 4)
+// ============================================================
+// The bus comp is a learned TCN with no readable internal gain reduction, so
+// the strip shows two derived proxies of how hard the model is working, pushed
+// once per telemetry frame (~21 fps). We store the RAW values (no UI smoothing)
+// so the crunch movement tracks the Input knob as you ride it. ~180 frames.
+const BC_HIST_N = 180;
+const bcHist = new Float32Array(BC_HIST_N);      // residual level (rel), dB ≤ 0
+const bcCrestHist = new Float32Array(BC_HIST_N); // crest reduction, dB ≥ 0
+let bcHistHead = 0, bcHistLen = 0;
+function pushBcHistory(residDb, crestDb) {
+  bcHist[bcHistHead] = residDb;
+  bcCrestHist[bcHistHead] = crestDb;
+  bcHistHead = (bcHistHead + 1) % BC_HIST_N;
+  if (bcHistLen < BC_HIST_N) bcHistLen++;
+}
+
+function drawBusCompCrunch() {
+  const canvas = document.getElementById('bc-crunch-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Primary axis: residual "crunch" level, 0 dB (top) → -48 dB (bottom).
+  const R_TOP = 0, R_BOT = -48;
+  // Secondary implied scale for crest reduction "comp": 0 (bottom) → +12 (top).
+  const C_TOP = 12, C_BOT = 0;
+  const padL = 22, padR = 30, padT = 11, padB = 13;
+  const plotL = padL, plotR = W - padR, plotW = plotR - plotL;
+  const plotT = padT, plotB = H - padB, plotH = plotB - plotT;
+  const yResid = db => plotT + (R_TOP - Math.max(R_BOT, Math.min(R_TOP, db))) / (R_TOP - R_BOT) * plotH;
+  const yCrest = db => plotB - (Math.max(C_BOT, Math.min(C_TOP, db)) - C_BOT) / (C_TOP - C_BOT) * plotH;
+
+  // Residual dB grid + labels (left axis: 0 at top → -48 at bottom).
+  ctx.font = '8px -apple-system, sans-serif'; ctx.textBaseline = 'middle';
+  [0, -12, -24, -36, -48].forEach(db => {
+    const y = yResid(db);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(plotL, y); ctx.lineTo(plotR, y); ctx.stroke();
+    ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+    ctx.fillText(String(db), plotL - 3, y);
+  });
+
+  ctx.fillStyle = '#666'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('CRUNCH (model activity) → time', plotL + 2, 1);
+
+  const n = bcHistLen;
+  if (n > 1) {
+    const start = (bcHistHead - n + BC_HIST_N) % BC_HIST_N;
+    const xFor = k => plotR - ((n - 1 - k) / (BC_HIST_N - 1)) * plotW; // newest → right
+
+    // Residual "crunch" — filled area from the bottom up to the curve (primary).
+    ctx.beginPath();
+    ctx.moveTo(xFor(0), plotB);
+    for (let k = 0; k < n; k++) ctx.lineTo(xFor(k), yResid(bcHist[(start + k) % BC_HIST_N]));
+    ctx.lineTo(xFor(n - 1), plotB);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(187,134,252,0.22)';   // #bb86fc (Bus Comp colour)
+    ctx.fill();
+
+    // Crest reduction "comp" — faint secondary line on its own implied scale.
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const x = xFor(k), y = yCrest(bcCrestHist[(start + k) % BC_HIST_N]);
+      k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(120,200,255,0.45)';
+    ctx.stroke();
+
+    // Residual "crunch" line on top, brighter (the headline).
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const x = xFor(k), y = yResid(bcHist[(start + k) % BC_HIST_N]);
+      k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(187,134,252,0.95)';
+    ctx.stroke();
+  }
+
+  // Current residual readout at the right edge.
+  const cur = bcHistLen ? bcHist[(bcHistHead - 1 + BC_HIST_N) % BC_HIST_N] : -60;
+  ctx.fillStyle = '#bbb'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(`${cur.toFixed(1)}`, plotR + 3, yResid(Math.max(R_BOT, cur)));
+
+  // Line legend.
+  ctx.font = '8px -apple-system, sans-serif'; ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(187,134,252,0.95)'; ctx.fillText('crunch', plotR - 30, H - 2);
+  ctx.fillStyle = 'rgba(120,200,255,0.7)';  ctx.fillText('comp', plotR, H - 2);
+}
+
+window.axonBusComp = function(d) {
+  // Record RAW (unsmoothed) residual + crest-reduction for the scrolling strip.
+  const resid = (d && typeof d.residual === 'number') ? d.residual : -60;
+  const crest = (d && typeof d.crest === 'number') ? d.crest : 0;
+  pushBcHistory(resid, crest);
+  if (selectedProc === 4) drawBusCompCrunch();
 };
 
 // ============================================================

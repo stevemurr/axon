@@ -494,7 +494,8 @@
 
 const PROCESSORS = [
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
-  { id: 2, name: 'SATURATOR', params: ['SDR', 'SVO', 'SMX', 'STH', 'SBS'], wetParams: ['SMX'] },
+  // SATURATOR (id 2) removed from the chain for now — kept in the DSP/code,
+  // just not exposed here. Re-add this entry + put 2 back in the order to restore.
   { id: 4, name: 'BUS COMP',  params: ['SSC', 'SSC_IN'],          wetParams: ['SSC'] },
   { id: 6, name: 'BASS MONO', params: ['BMI', 'BMF'],                   wetParams: ['BMI'] },
   // EXC_FREQ / EXC_LPF are NOT knobs — they're draggable band edges on the
@@ -502,14 +503,15 @@ const PROCESSORS = [
   // spatially and watches the live "what's being excited" overlay.
   { id: 7, name: 'EXCITER',   params: ['EXC_ON','EXC_AMT','EXC_DRIVE','EXC_CHAR'], wetParams: ['EXC_ON'] },
   { id: 8, name: 'REVERB',    params: ['RVB_MIX','RVB_SIZE','RVB_WIDTH','RVB_DAMP','RVB_LOWCUT'], wetParams: ['RVB_MIX'] },
+  { id: 9, name: 'WIDENER',   params: ['WID_ON','WID_AMT','WID_FREQ','WID_AIR'], wetParams: ['WID_ON'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
 ];
 
 // Runtime state
 let paramMeta   = {};   // id → { name, min, max, def, unit }
 let paramValues = {};   // id → float
-let procOrder   = [6,7,1,2,8,4,5];
-let selectedProc = 1;
+let procOrder   = [6,7,1,8,9,4,5];
+let selectedProc = 6;
 
 // ============================================================
 // VALUE FORMATTING
@@ -1103,6 +1105,29 @@ let excWetSpec = null;
 
 let excBandDrag = null; // 'HPF' (Frequency) | 'LPF' (Tame) | null
 
+// ── Crossover comb-transfer helpers (analytic, see drawExcBand) ──────────
+// 2nd-order Butterworth biquads matching exciter.hpp's design_hpf_/design_lpf_
+// (RBJ, Q=1/√2), and the complex frequency response of a normalized biquad.
+function excBiquadHPF(fc, sr) {
+  const w0 = 2 * Math.PI * fc / sr, cw = Math.cos(w0), sw = Math.sin(w0);
+  const alpha = sw / (2 * 0.70710678), a0 = 1 + alpha;
+  return { b0: (1 + cw) / 2 / a0, b1: -(1 + cw) / a0, b2: (1 + cw) / 2 / a0,
+           a1: -2 * cw / a0, a2: (1 - alpha) / a0 };
+}
+function excBiquadLPF(fc, sr) {
+  const w0 = 2 * Math.PI * fc / sr, cw = Math.cos(w0), sw = Math.sin(w0);
+  const alpha = sw / (2 * 0.70710678), a0 = 1 + alpha;
+  return { b0: (1 - cw) / 2 / a0, b1: (1 - cw) / a0, b2: (1 - cw) / 2 / a0,
+           a1: -2 * cw / a0, a2: (1 - alpha) / a0 };
+}
+function excBiquadResp(c, w) {  // complex H(e^{jw}) of a normalized biquad
+  const c1 = Math.cos(w), s1 = Math.sin(w), c2 = Math.cos(2 * w), s2 = Math.sin(2 * w);
+  const nr = c.b0 + c.b1 * c1 + c.b2 * c2, ni = -(c.b1 * s1 + c.b2 * s2);
+  const dr = 1 + c.a1 * c1 + c.a2 * c2, di = -(c.a1 * s1 + c.a2 * s2);
+  const dd = dr * dr + di * di;
+  return { re: (nr * dr + ni * di) / dd, im: (ni * dr - nr * di) / dd };
+}
+
 function drawExcBand() {
   const canvas = document.getElementById('exc-band-canvas');
   if (!canvas) return;
@@ -1190,6 +1215,58 @@ function drawExcBand() {
     ctx.textAlign = 'center';
     ctx.fillText(amt > 0 ? 'play audio to see excitation'
                          : 'raise Amount to excite', W / 2, H / 2);
+  }
+
+  // ── Crossover comb-transfer curve (analytic, phase-induced) ────────────
+  // The band-split is IIR (min-phase), so the wet's fundamental is phase-shifted
+  // vs the dry; summing them combs in the crossover overlap. Only the ODD/bright
+  // path carries a fundamental (the even/warm path adds no fundamental → no comb),
+  // so the combing gain is G = character · 10^(Intensity/20) · sech²(0.5). We plot
+  // the effective linear transfer |1 + amount·G·H_band(f)| in dB, where
+  // H_band = H_HPF² · H_LPF (band HPF + the post-shaper wet HPF at the same cutoff,
+  // and the Tame LPF). Flat ~0 dB = natural; a dip near the Frequency corner =
+  // combing. Analytic, so it's live from the knobs even with no audio. Small-signal
+  // approximation (tanh compresses the fundamental at high level, so the real comb
+  // is a touch shallower), but the structure — where the notch sits, how it moves
+  // with Frequency/Tame/Character/Intensity/Amount — is exact.
+  if (amt > 0) {
+    const charv   = paramValues['EXC_CHAR']  ?? (paramMeta['EXC_CHAR']?.def  ?? 0.25);
+    const driveDb = paramValues['EXC_DRIVE'] ?? (paramMeta['EXC_DRIVE']?.def ?? 6);
+    const SR = 44100;                                   // display SR (cf. sat display)
+    const G  = charv * Math.pow(10, driveDb / 20) * 0.78645;  // sech²(0.5)
+    const hpf = excBiquadHPF(hpfHz, SR);
+    const lpf = (lpfHz < 19000) ? excBiquadLPF(lpfHz, SR) : null;
+    const k   = amt * G;
+    const NPTS = 256;
+    const cy = Math.round(H * 0.30) + 0.5;              // 0 dB reference line
+    const PX_PER_DB = 6;
+    const yDb = db => Math.max(2, Math.min(H - 2, cy - db * PX_PER_DB));
+
+    // 0 dB reference line.
+    ctx.strokeStyle = 'rgba(150,180,210,0.18)'; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(W, cy); ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    for (let i = 0; i < NPTS; i++) {
+      const f = EXC_FLO * Math.pow(EXC_FHI / EXC_FLO, i / (NPTS - 1));
+      const w = 2 * Math.PI * f / SR;
+      const h = excBiquadResp(hpf, w);
+      let br = h.re * h.re - h.im * h.im, bi = 2 * h.re * h.im;   // H_HPF²
+      if (lpf) { const l = excBiquadResp(lpf, w);
+                 const r = br * l.re - bi * l.im, im = br * l.im + bi * l.re; br = r; bi = im; }
+      const Hr = 1 + k * br, Hi = k * bi;                         // 1 + amount·G·H_band
+      const db = 20 * Math.log10(Math.sqrt(Hr * Hr + Hi * Hi) + 1e-9);
+      const x = freqToX(f), y = yDb(db);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = 'rgba(120,200,255,0.92)'; ctx.lineWidth = 1.3; ctx.stroke();
+
+    ctx.font = '7px -apple-system, sans-serif';
+    ctx.fillStyle = 'rgba(120,200,255,0.7)'; ctx.textAlign = 'left';
+    ctx.fillText('CROSSOVER (transfer)', 5, cy - 4 < 14 ? cy + 11 : cy - 4);
+    ctx.fillStyle = 'rgba(150,180,210,0.45)'; ctx.textAlign = 'right';
+    ctx.fillText('0 dB', W - 5, cy - 3);
   }
 
   // Band-edge dashed verticals + drag handles + labels.
@@ -1369,7 +1446,7 @@ window.axonInit = function(state) {
   paramMeta   = state.paramMeta   || {};
   paramValues = state.paramValues || {};
   const VISIBLE = new Set(PROCESSORS.map(p => p.id));
-  procOrder   = (state.processorOrder || [6,7,1,2,8,4,5]).filter(id => VISIBLE.has(id));
+  procOrder   = (state.processorOrder || [6,7,1,8,9,4,5]).filter(id => VISIBLE.has(id));
   selectedProc = procOrder[0] ?? 1;
 
   renderChain();
@@ -1423,8 +1500,9 @@ window.axonInit = function(state) {
     '#90be6d',  // 6 BassMono
     '#f9c74f',  // 7 Exciter
     '#4ea8de',  // 8 Reverb
+    '#c792ea',  // 9 Widener (lavender)
   ];
-  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB'];
+  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB', 'WIDENER'];
 
   const DB_MIN = -90, DB_MAX = 0;
 
@@ -2207,7 +2285,8 @@ window.axonSetParam = function(id, value) {
   }
 
   if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
-  if ((id === 'EXC_FREQ' || id === 'EXC_LPF' || id === 'EXC_AMT') && selectedProc === 7) drawExcBand();
+  if ((id === 'EXC_FREQ' || id === 'EXC_LPF' || id === 'EXC_AMT' ||
+       id === 'EXC_CHAR' || id === 'EXC_DRIVE') && selectedProc === 7) drawExcBand();
   // Dynamic toggle (e.g. host automation) relabels Attack/Release knobs.
   if (id === 'MLA' && selectedProc === 5) renderSurface();
   if (id === 'AGN' || id === 'BYP') refreshPanelToggles();

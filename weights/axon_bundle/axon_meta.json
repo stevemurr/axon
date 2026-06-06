@@ -332,6 +332,42 @@
       "skew": 1.0,
       "unit": "Hz"
     },
+    "WID_ON": {
+      "id": "WID_ON",
+      "name": "Width",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 1.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
+    "WID_AMT": {
+      "id": "WID_AMT",
+      "name": "Amount",
+      "min": 0.0,
+      "max": 2.0,
+      "default": 1.38,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "WID_FREQ": {
+      "id": "WID_FREQ",
+      "name": "Low",
+      "min": 50.0,
+      "max": 1000.0,
+      "default": 250.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
+    "WID_AIR": {
+      "id": "WID_AIR",
+      "name": "Air",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 1.0,
+      "skew": 1.0,
+      "unit": ""
+    },
     "AGN": {
       "id": "AGN",
       "name": "Auto Gain",

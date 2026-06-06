@@ -151,6 +151,16 @@ def _build_default_meta(
                        "default": 7000.0,  "skew": 1.0, "unit": "Hz"},
         "RVB_LOWCUT": {"id": "RVB_LOWCUT", "name": "Low Cut", "min": 20.0,   "max": 1000.0,
                        "default": 250.0,   "skew": 1.0, "unit": "Hz"},
+        # Transparent M/S stereo widener (frequency-dependent side gain; mono-safe).
+        # WID_ON is the stage on/off toggle; WID_AMT the side width gain (1=neutral).
+        "WID_ON":   {"id": "WID_ON",   "name": "Width",  "min": 0.0,    "max": 1.0,
+                     "default": 1.0,    "skew": 1.0, "unit": "switch"},
+        "WID_AMT":  {"id": "WID_AMT",  "name": "Amount", "min": 0.0,    "max": 2.0,
+                     "default": 1.38,   "skew": 1.0, "unit": ""},
+        "WID_FREQ": {"id": "WID_FREQ", "name": "Low",    "min": 50.0,   "max": 1000.0,
+                     "default": 250.0,  "skew": 1.0, "unit": "Hz"},
+        "WID_AIR":  {"id": "WID_AIR",  "name": "Air",    "min": 0.0,    "max": 1.0,
+                     "default": 1.0,    "skew": 1.0, "unit": ""},
         "CLS": {"id": "CLS", "name": "EQ Class",
                 "min": 0.0, "max": float(max(0, n_classes - 1)),
                 "default": float(default_idx), "skew": 1.0, "unit": "enum"},

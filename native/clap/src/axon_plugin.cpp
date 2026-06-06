@@ -52,6 +52,7 @@
 #include "exciter.hpp"
 #include "exciter_spectrum.hpp"
 #include "reverb.hpp"
+#include "widener.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
 #include "param_id.hpp"
@@ -81,6 +82,10 @@ using nablafx::param_id_for;
 // processor's TVFiLM cond_block_size. Changing this requires re-exporting both
 // ONNX bundles at the new block size.
 constexpr int kBlockSize  = 128;
+// 7 reorderable stages. The Saturator (StageID 2) is intentionally NOT in the
+// chain for now — its enum value, process case, module, and params are all kept
+// (so it can be re-added by putting 2 back into the order and bumping this count),
+// it's just not wired into processor_order, so it never runs and has no UI tab.
 constexpr int kNumStages  = 7;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
@@ -106,6 +111,7 @@ enum class StageID : int {
     BassMono      = 6,
     Exciter       = 7,   // Aphex-style aural exciter (band-limited parallel)
     Reverb        = 8,   // transparent mastering room reverb (8-line FDN)
+    Widener       = 9,   // transparent M/S stereo widener (Blumlein shuffler)
 };
 
 // ---------------------------------------------------------------------------
@@ -675,6 +681,10 @@ struct Plugin {
     // Transparent mastering room reverb (single stereo 8-line FDN network).
     nablafx::Reverb      reverb;
 
+    // Transparent M/S stereo widener (single stereo instance; frequency-dependent
+    // side gain — mono-compatible by construction). Like the reverb, NOT per-chain.
+    nablafx::Widener     widener;
+
     // Auto gain (level-matched bypass) — drives output LUFS toward input LUFS.
     nablafx::AutoGain    auto_gain;
 
@@ -689,7 +699,7 @@ struct Plugin {
     // harmonic/tone shaping) and BEFORE the dynamics (SslComp). The reverb sits
     // AFTER BassMono (so its bass is already tightened) and BEFORE the limiter,
     // so the limiter still catches any reverb peaks.
-    std::array<int, kNumStages> processor_order{6, 7, 1, 2, 8, 4, 5};
+    std::array<int, kNumStages> processor_order{6, 7, 1, 8, 9, 4, 5};
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -704,7 +714,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{6,7,1,2,8,4,5};
+    std::array<int,kNumStages> pending_order{6,7,1,8,9,4,5};
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -1104,6 +1114,7 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     plug->exc_spec_db.fill(nablafx::ExciterSpectrum::kFloorDb);
     plug->exc_spec_active = false;
     plug->reverb.prepare(plug->sample_rate);
+    plug->widener.prepare(plug->sample_rate);
     plug->auto_gain.reset();
     plug->bc_coherence.prepare(plug->sample_rate);
     plug->meter_in.reset(plug->sample_rate);
@@ -1134,6 +1145,7 @@ static void plugin_reset(const clap_plugin_t* p) {
     plug->exciter.reset();
     plug->exc_spectrum.reset();
     plug->reverb.reset();
+    plug->widener.reset();
     plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
@@ -1182,6 +1194,10 @@ struct AmountSnapshot {
     // RT60), RVB_WIDTH (tail stereo width), RVB_DAMP (tail LPF Hz), RVB_LOWCUT
     // (send high-pass Hz — bass is never reverberated).
     float rvb_mix, rvb_size, rvb_width, rvb_damp_hz, rvb_lowcut_hz;
+    // Widener: WID_ON (stage on/off toggle), WID_AMT (side width gain, 1=neutral),
+    // WID_FREQ (low crossover — width applies above), WID_AIR (extra HF width).
+    bool  wid_on;
+    float wid_amt, wid_freq, wid_air;
     bool  auto_gain_on;
     bool  bypass_on;
 };
@@ -1193,6 +1209,8 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float eon=0.f;                                        // exciter on/off (switch)
     float ea=0.f,ef=3000.f,ed=6.f,ec=0.25f,el=18000.f;   // exciter params
     float rm=0.f,rs=0.30f,rw=0.80f,rd=7000.f,rlc=250.f;  // reverb params
+    float won=0.f;                                        // widener on/off (switch)
+    float wa=1.f,wf=250.f,war=0.f;                        // widener params
     float agn=0.f,byp=0.f;
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
@@ -1224,6 +1242,9 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="RVB_MIX") rm=v; else if(c.id=="RVB_SIZE") rs=v;
         else if(c.id=="RVB_WIDTH") rw=v; else if(c.id=="RVB_DAMP") rd=v;
         else if(c.id=="RVB_LOWCUT") rlc=v;
+        else if(c.id=="WID_ON") won=v;
+        else if(c.id=="WID_AMT") wa=v; else if(c.id=="WID_FREQ") wf=v;
+        else if(c.id=="WID_AIR") war=v;
         else if(c.id=="AGN") agn=v; else if(c.id=="BYP") byp=v;
     }
     AmountSnapshot s{};
@@ -1257,6 +1278,10 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.rvb_width    = rw;     // 0..1 tail stereo width
     s.rvb_damp_hz  = rd;     // tail damping LPF cutoff (Hz)
     s.rvb_lowcut_hz= rlc;    // reverb send high-pass (Hz)
+    s.wid_on       = (won >= 0.5f);  // stage on/off toggle
+    s.wid_amt      = wa;     // side width gain (1.0 = neutral/identity)
+    s.wid_freq     = wf;     // width low crossover (Hz; width applies above)
+    s.wid_air      = war;    // extra high-frequency side width (above ~6 kHz)
     s.auto_gain_on = (agn >= 0.5f);
     s.bypass_on    = (byp >= 0.5f);
     return s;
@@ -1710,6 +1735,19 @@ void flush_chain_block_(Plugin& plug,
                                    amt.rvb_damp_hz, amt.rvb_lowcut_hz);
             plug.reverb.process(work_l, (n_ch >= 2 ? work_r : nullptr),
                                 kBlockSize);
+            break;
+        }
+
+        case StageID::Widener: {
+            // Transparent M/S stereo widener. Frequency-dependent side gain — the
+            // mono sum (L+R = 2·M) is preserved exactly, so this is mono-compatible
+            // by construction and adds ZERO latency. Gated by the WID_ON toggle;
+            // also a no-op at width == 1 && air == 0 (bit-identical bypass), and a
+            // no-op on mono (n_ch < 2 → no side to widen).
+            if (!amt.wid_on || n_ch < 2) break;
+            if (amt.wid_amt == 1.f && amt.wid_air == 0.f) break;
+            plug.widener.set_params(amt.wid_amt, amt.wid_freq, amt.wid_air);
+            plug.widener.process(work_l, work_r, kBlockSize);
             break;
         }
 
@@ -2272,6 +2310,13 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"RVB_WIDTH", "Width",     0.0f,    1.0f,    1.0f,1.0f, ""});
             inject(ControlSpec{"RVB_DAMP",  "Damp",   2000.0f,18000.0f, 7000.0f, 1.0f, "Hz"});
             inject(ControlSpec{"RVB_LOWCUT","Low Cut",  20.0f, 1000.0f,  250.0f, 1.0f, "Hz"});
+            // Transparent M/S stereo widener. Defaults make the stage a no-op
+            // (WID_ON = OFF; and width == 1 / air == 0 → bit-identical bypass) so
+            // existing bundles that don't declare these still get safe controls.
+            inject(ControlSpec{"WID_ON",    "Width",    0.0f,    1.0f,    1.0f, 1.0f, "switch"});
+            inject(ControlSpec{"WID_AMT",   "Amount",   0.0f,    2.0f,   1.38f, 1.0f, ""});
+            inject(ControlSpec{"WID_FREQ",  "Low",     50.0f, 1000.0f,  250.0f, 1.0f, "Hz"});
+            inject(ControlSpec{"WID_AIR",   "Air",      0.0f,    1.0f,    1.0f, 1.0f, ""});
         }
 
         st->sat_meta    = load_meta(st->resources_dir + "/" +

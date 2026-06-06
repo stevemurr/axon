@@ -154,6 +154,11 @@ add_executable(test_reverb tests/test_reverb.cpp)
 target_include_directories(test_reverb PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_reverb PRIVATE -UNDEBUG)
 
+# test_widener — unit tests for the transparent M/S stereo Widener (header-only).
+add_executable(test_widener tests/test_widener.cpp)
+target_include_directories(test_widener PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_widener PRIVATE -UNDEBUG)
+
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
     target_include_directories(axon_bench PRIVATE

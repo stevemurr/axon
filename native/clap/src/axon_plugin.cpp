@@ -49,6 +49,7 @@
 #include "auto_gain.hpp"
 #include "bass_mono.hpp"
 #include "exciter.hpp"
+#include "reverb.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
 #include "param_id.hpp"
@@ -78,7 +79,7 @@ using nablafx::param_id_for;
 // processor's TVFiLM cond_block_size. Changing this requires re-exporting both
 // ONNX bundles at the new block size.
 constexpr int kBlockSize  = 128;
-constexpr int kNumStages  = 6;
+constexpr int kNumStages  = 7;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
 // 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
@@ -102,6 +103,7 @@ enum class StageID : int {
     MelLimiter    = 5,
     BassMono      = 6,
     Exciter       = 7,   // Aphex-style aural exciter (band-limited parallel)
+    Reverb        = 8,   // transparent mastering room reverb (8-line FDN)
 };
 
 // ---------------------------------------------------------------------------
@@ -658,6 +660,9 @@ struct Plugin {
     // Aphex-style aural exciter (stereo; band-limited parallel harmonic sheen).
     nablafx::Exciter     exciter;
 
+    // Transparent mastering room reverb (single stereo 8-line FDN network).
+    nablafx::Reverb      reverb;
+
     // Auto gain (level-matched bypass) — drives output LUFS toward input LUFS.
     nablafx::AutoGain    auto_gain;
 
@@ -667,12 +672,12 @@ struct Plugin {
     int bypass_w{0}, bypass_r{0};
 
     // Processor ordering — driven by GUI drag-and-drop. All stages reorderable.
-    // Default: AutoEQ → Saturator → Exciter → SslComp → BassMono → MelLimiter.
-    // The exciter sits right after the Saturator (both are harmonic/tone shaping)
-    // and BEFORE the dynamics (SslComp) and the limiter, so the added sheen is
-    // levelled/controlled by the downstream dynamics rather than feeding raw
-    // manufactured HF into the bus comp's detector unmanaged.
-    std::array<int, kNumStages> processor_order{1, 2, 7, 4, 6, 5};
+    // Default: AutoEQ → Saturator → Exciter → SslComp → BassMono → Reverb →
+    // MelLimiter. The exciter sits right after the Saturator (both are
+    // harmonic/tone shaping) and BEFORE the dynamics (SslComp). The reverb sits
+    // AFTER BassMono (so its bass is already tightened) and BEFORE the limiter,
+    // so the limiter still catches any reverb peaks.
+    std::array<int, kNumStages> processor_order{6, 7, 1, 2, 8, 4, 5};
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -687,7 +692,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{1,2,7,4,6,5};
+    std::array<int,kNumStages> pending_order{6,7,1,2,8,4,5};
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -841,6 +846,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
     lat += static_cast<uint32_t>(plug.chains[0].ceiling.latency_samples());
 
     float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f, exc_amt = 0.f;
+    bool  exc_on = false;
     int   cls_idx = 0;
     for (size_t i = 0; i < plug.meta->controls.size(); ++i) {
         const auto& c = plug.meta->controls[i];
@@ -850,6 +856,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
         else if (c.id == "CLS") cls_idx = static_cast<int>(std::lround(v));
         else if (c.id == "MLI") ml_wet  = v;
         else if (c.id == "EXC_AMT") exc_amt = v;
+        else if (c.id == "EXC_ON")  exc_on  = (v >= 0.5f);
     }
 
     if (eq_wet > 0.f && !g_state->autoeq_dsp_per_class.empty()) {
@@ -868,7 +875,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
     if (ml_wet > 0.f)
         lat += static_cast<uint32_t>(nablafx::MelLimiter::kLatency);
 
-    if (exc_amt > 0.f)
+    if (exc_on && exc_amt > 0.f)
         lat += static_cast<uint32_t>(plug.exciter.latency_samples());
 
     return lat;
@@ -1064,6 +1071,7 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     plug->spectrum.init();
     plug->bass_mono.prepare(plug->sample_rate);
     plug->exciter.prepare(plug->sample_rate);
+    plug->reverb.prepare(plug->sample_rate);
     plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
@@ -1091,6 +1099,7 @@ static void plugin_reset(const clap_plugin_t* p) {
     plug->mel_limiter.reset();
     plug->bass_mono.reset();
     plug->exciter.reset();
+    plug->reverb.reset();
     plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
@@ -1130,9 +1139,15 @@ struct AmountSnapshot {
     float ml_wet, ml_ceiling_lin, ml_drive_lin, ml_adaptive_gain, ml_adaptive_speed;
     bool  ml_adaptive_brickwall;
     float bm_wet, bm_freq;
-    // Exciter: EXC_AMT (parallel blend), EXC_FREQ (band HPF), EXC_DRIVE (dB into
-    // the shaper), EXC_CHAR (even↔odd), EXC_LPF ("Tame" band LPF).
+    // Exciter: EXC_ON (stage on/off toggle), EXC_AMT (parallel blend), EXC_FREQ
+    // (band HPF), EXC_DRIVE (dB into the shaper), EXC_CHAR (even↔odd), EXC_LPF
+    // ("Tame" band LPF).
+    bool  exc_on;
     float exc_amt, exc_freq, exc_drive_db, exc_char, exc_lpf;
+    // Reverb: RVB_MIX (parallel wet blend, 0 = bypass), RVB_SIZE (room size →
+    // RT60), RVB_WIDTH (tail stereo width), RVB_DAMP (tail LPF Hz), RVB_LOWCUT
+    // (send high-pass Hz — bass is never reverberated).
+    float rvb_mix, rvb_size, rvb_width, rvb_damp_hz, rvb_lowcut_hz;
     bool  auto_gain_on;
     bool  bypass_on;
 };
@@ -1141,7 +1156,9 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
+    float eon=0.f;                                        // exciter on/off (switch)
     float ea=0.f,ef=3000.f,ed=6.f,ec=0.25f,el=18000.f;   // exciter params
+    float rm=0.f,rs=0.30f,rw=0.80f,rd=7000.f,rlc=250.f;  // reverb params
     float agn=0.f,byp=0.f;
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
@@ -1166,9 +1183,13 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
         else if(c.id=="MLA") mla=v;
         else if(c.id=="BMI") bmi=v; else if(c.id=="BMF") bmf=v;
+        else if(c.id=="EXC_ON") eon=v;
         else if(c.id=="EXC_AMT") ea=v; else if(c.id=="EXC_FREQ") ef=v;
         else if(c.id=="EXC_DRIVE") ed=v; else if(c.id=="EXC_CHAR") ec=v;
         else if(c.id=="EXC_LPF") el=v;
+        else if(c.id=="RVB_MIX") rm=v; else if(c.id=="RVB_SIZE") rs=v;
+        else if(c.id=="RVB_WIDTH") rw=v; else if(c.id=="RVB_DAMP") rd=v;
+        else if(c.id=="RVB_LOWCUT") rlc=v;
         else if(c.id=="AGN") agn=v; else if(c.id=="BYP") byp=v;
     }
     AmountSnapshot s{};
@@ -1191,11 +1212,17 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.ml_adaptive_brickwall = (mla >= 0.5f);
     s.bm_wet  = bmi;
     s.bm_freq = bmf;
+    s.exc_on       = (eon >= 0.5f);  // stage on/off toggle
     s.exc_amt      = ea;     // 0..1 parallel blend (0 = bypass)
     s.exc_freq     = ef;     // band HPF cutoff (Hz)
     s.exc_drive_db = ed;     // dB into the shaper
     s.exc_char     = ec;     // even↔odd
     s.exc_lpf      = el;     // band LPF "Tame" (Hz)
+    s.rvb_mix      = rm;     // 0..1 parallel wet blend (0 = bypass)
+    s.rvb_size     = rs;     // 0..1 room size → RT60 + delay scaling
+    s.rvb_width    = rw;     // 0..1 tail stereo width
+    s.rvb_damp_hz  = rd;     // tail damping LPF cutoff (Hz)
+    s.rvb_lowcut_hz= rlc;    // reverb send high-pass (Hz)
     s.auto_gain_on = (agn >= 0.5f);
     s.bypass_on    = (byp >= 0.5f);
     return s;
@@ -1549,12 +1576,26 @@ void flush_chain_block_(Plugin& plug,
         case StageID::Exciter: {
             // Aphex-style band-limited parallel exciter. The module keeps the dry
             // full-range signal untouched and sums in `amount` of the excited
-            // upper band; at amount == 0 it early-returns (bit-identical bypass).
-            if (amt.exc_amt <= 0.f) break;
+            // upper band. Gated by the EXC_ON toggle; also a no-op at amount == 0
+            // (bit-identical bypass).
+            if (!amt.exc_on || amt.exc_amt <= 0.f) break;
             plug.exciter.set_params(amt.exc_amt, amt.exc_freq, amt.exc_drive_db,
                                     amt.exc_char, amt.exc_lpf);
             plug.exciter.process(work_l, (n_ch >= 2 ? work_r : nullptr),
                                  kBlockSize);
+            break;
+        }
+
+        case StageID::Reverb: {
+            // Transparent mastering room reverb (8-line FDN). The dry path is
+            // passed at unity and untouched; the module sums in `mix` of the
+            // decorrelated wet tail. At mix == 0 it early-returns (bit-identical
+            // bypass) and adds ZERO reported latency (the dry is never delayed).
+            if (amt.rvb_mix <= 0.f) break;
+            plug.reverb.set_params(amt.rvb_mix, amt.rvb_size, amt.rvb_width,
+                                   amt.rvb_damp_hz, amt.rvb_lowcut_hz);
+            plug.reverb.process(work_l, (n_ch >= 2 ? work_r : nullptr),
+                                kBlockSize);
             break;
         }
 
@@ -2068,11 +2109,20 @@ static bool entry_init(const char* /*plugin_path*/) {
                 st->axon_meta.controls.push_back(spec);
             };
             //                  id            name         min      max     def    skew unit
+            inject(ControlSpec{"EXC_ON",    "Exciter",     0.0f,    1.0f,   0.0f,  1.0f, "switch"});
             inject(ControlSpec{"EXC_AMT",   "Amount",      0.0f,    1.0f,   0.0f,  1.0f, ""});
             inject(ControlSpec{"EXC_FREQ",  "Frequency",1000.0f,12000.0f,3000.0f,  1.0f, "Hz"});
             inject(ControlSpec{"EXC_DRIVE", "Intensity",   0.0f,   24.0f,   6.0f,  1.0f, "dB"});
             inject(ControlSpec{"EXC_CHAR",  "Warm ◐ Bright", 0.0f, 1.0f, 0.25f, 1.0f, ""});
             inject(ControlSpec{"EXC_LPF",   "Tame",     5000.0f,20000.0f,18000.0f, 1.0f, "Hz"});
+            // Transparent mastering room reverb. Defaults make the stage a no-op
+            // (RVB_MIX = 0 → bit-identical bypass) so existing bundles that don't
+            // declare these still get the controls with safe defaults.
+            inject(ControlSpec{"RVB_MIX",   "Mix",       0.0f,    1.0f,    0.0f, 1.0f, ""});
+            inject(ControlSpec{"RVB_SIZE",  "Size",      0.0f,    1.0f,    0.30f,1.0f, ""});
+            inject(ControlSpec{"RVB_WIDTH", "Width",     0.0f,    1.0f,    0.80f,1.0f, ""});
+            inject(ControlSpec{"RVB_DAMP",  "Damp",   2000.0f,18000.0f, 7000.0f, 1.0f, "Hz"});
+            inject(ControlSpec{"RVB_LOWCUT","Low Cut",  20.0f, 1000.0f,  250.0f, 1.0f, "Hz"});
         }
 
         st->sat_meta    = load_meta(st->resources_dir + "/" +

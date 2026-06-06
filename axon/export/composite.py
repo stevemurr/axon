@@ -126,7 +126,9 @@ def _build_default_meta(
         "SSC_IN": {"id": "SSC_IN", "name": "Input",    "min": -24.0, "max": 12.0,
                 "default": 0.0, "skew": 1.0, "unit": "dB"},
         # Aphex-style aural exciter (band-limited parallel harmonic sheen).
-        # EXC_AMT is the wet/parallel blend (0 = bypass, bit-identical).
+        # EXC_ON is the stage on/off toggle; EXC_AMT the wet/parallel blend.
+        "EXC_ON":    {"id": "EXC_ON",    "name": "Exciter",   "min": 0.0,    "max": 1.0,
+                      "default": 0.0,     "skew": 1.0, "unit": "switch"},
         "EXC_AMT":   {"id": "EXC_AMT",   "name": "Amount",    "min": 0.0,    "max": 1.0,
                       "default": 0.0,    "skew": 1.0, "unit": ""},
         "EXC_FREQ":  {"id": "EXC_FREQ",  "name": "Frequency", "min": 1000.0, "max": 12000.0,
@@ -137,6 +139,18 @@ def _build_default_meta(
                       "default": 0.25,   "skew": 1.0, "unit": ""},
         "EXC_LPF":   {"id": "EXC_LPF",   "name": "Tame",      "min": 5000.0, "max": 20000.0,
                       "default": 18000.0,"skew": 1.0, "unit": "Hz"},
+        # Transparent mastering room reverb (8-line FDN).
+        # RVB_MIX is the parallel wet blend (0 = bypass, bit-identical).
+        "RVB_MIX":    {"id": "RVB_MIX",    "name": "Mix",     "min": 0.0,    "max": 1.0,
+                       "default": 0.0,     "skew": 1.0, "unit": ""},
+        "RVB_SIZE":   {"id": "RVB_SIZE",   "name": "Size",    "min": 0.0,    "max": 1.0,
+                       "default": 0.30,    "skew": 1.0, "unit": ""},
+        "RVB_WIDTH":  {"id": "RVB_WIDTH",  "name": "Width",   "min": 0.0,    "max": 1.0,
+                       "default": 0.80,    "skew": 1.0, "unit": ""},
+        "RVB_DAMP":   {"id": "RVB_DAMP",   "name": "Damp",    "min": 2000.0, "max": 18000.0,
+                       "default": 7000.0,  "skew": 1.0, "unit": "Hz"},
+        "RVB_LOWCUT": {"id": "RVB_LOWCUT", "name": "Low Cut", "min": 20.0,   "max": 1000.0,
+                       "default": 250.0,   "skew": 1.0, "unit": "Hz"},
         "CLS": {"id": "CLS", "name": "EQ Class",
                 "min": 0.0, "max": float(max(0, n_classes - 1)),
                 "default": float(default_idx), "skew": 1.0, "unit": "enum"},

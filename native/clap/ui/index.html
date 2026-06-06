@@ -473,14 +473,15 @@ const PROCESSORS = [
   // EXC_FREQ / EXC_LPF are NOT knobs — they're draggable band edges on the
   // exciter band display (see drawExcBand), so the user sets the excited region
   // spatially and watches the live "what's being excited" overlay.
-  { id: 7, name: 'EXCITER',   params: ['EXC_AMT','EXC_DRIVE','EXC_CHAR'], wetParams: ['EXC_AMT'] },
+  { id: 7, name: 'EXCITER',   params: ['EXC_ON','EXC_AMT','EXC_DRIVE','EXC_CHAR'], wetParams: ['EXC_ON'] },
+  { id: 8, name: 'REVERB',    params: ['RVB_MIX','RVB_SIZE','RVB_WIDTH','RVB_DAMP','RVB_LOWCUT'], wetParams: ['RVB_MIX'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
 ];
 
 // Runtime state
 let paramMeta   = {};   // id → { name, min, max, def, unit }
 let paramValues = {};   // id → float
-let procOrder   = [1,2,7,4,6,5];
+let procOrder   = [6,7,1,2,8,4,5];
 let selectedProc = 1;
 
 // ============================================================
@@ -1109,14 +1110,27 @@ function drawExcBand() {
     const post = pos >= 0 ? excLastSpec.db[pos] : null;
     const pre  = pos > 0  ? excLastSpec.db[pos - 1] : null;
     if (post && pre && amt > 0) {
-      const DB_TOP = 12;                 // +12 dB delta fills full height
-      const dToY = d => H - Math.max(0, Math.min(1, d / DB_TOP)) * H;
+      // Show the excitation footprint weighted by ABSOLUTE level, not raw
+      // dB-delta. Pure (post-pre) in dB explodes wherever the program rolls
+      // off (the top octave), so a few inaudible dB at -65 dBFS read as a
+      // full-height spike at the right edge. Multiplying the relative boost by
+      // an audibility weight (how loud the band actually is) keeps the "where
+      // is it exciting" shape while suppressing the misleading quiet-region
+      // spikes — height now tracks how AUDIBLE the added energy is.
+      const DB_TOP = 12;                 // +12 dB relative boost = full height
+      const AUD_LO = -78, AUD_HI = -30;  // dBFS window: below LO contributes ~0
+      const yFor = (d, postDb) => {
+        const boost = Math.max(0, Math.min(1, d / DB_TOP));
+        const aud   = Math.max(0, Math.min(1, (postDb - AUD_LO) / (AUD_HI - AUD_LO)));
+        return H - boost * aud * H;
+      };
       ctx.beginPath();
       ctx.moveTo(0, H);
       for (let b = 0; b < KDISP; b++) {
         const f = FLO * Math.pow(FHI / FLO, b / (KDISP - 1));
-        const d = (post[b] ?? -90) - (pre[b] ?? -90);
-        ctx.lineTo(freqToX(f), dToY(Math.max(0, d)));
+        const pdb = post[b] ?? -90;
+        const d = pdb - (pre[b] ?? -90);
+        ctx.lineTo(freqToX(f), yFor(Math.max(0, d), pdb));
       }
       ctx.lineTo(W, H);
       ctx.closePath();
@@ -1317,7 +1331,7 @@ window.axonInit = function(state) {
   paramMeta   = state.paramMeta   || {};
   paramValues = state.paramValues || {};
   const VISIBLE = new Set(PROCESSORS.map(p => p.id));
-  procOrder   = (state.processorOrder || [1,2,7,4,6,5]).filter(id => VISIBLE.has(id));
+  procOrder   = (state.processorOrder || [6,7,1,2,8,4,5]).filter(id => VISIBLE.has(id));
   selectedProc = procOrder[0] ?? 1;
 
   renderChain();
@@ -1370,8 +1384,9 @@ window.axonInit = function(state) {
     '#e76f51',  // 5 MelLimiter
     '#90be6d',  // 6 BassMono
     '#f9c74f',  // 7 Exciter
+    '#4ea8de',  // 8 Reverb
   ];
-  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER'];
+  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB'];
 
   const DB_MIN = -90, DB_MAX = 0;
 

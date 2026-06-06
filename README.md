@@ -5,7 +5,7 @@
 ### Adaptive **neural mastering** — an entire mastering chain in one CLAP plugin.
 
 Differentiable DSP + learned controllers (LSTM/RNN) that listen to your mix and
-adapt EQ, saturation, glue, width and loudness — in real time, inside your DAW.
+adapt EQ, harmonics, glue, space, width and loudness — in real time, inside your DAW.
 
 ![platform](https://img.shields.io/badge/platform-macOS%20arm64-111111)
 ![format](https://img.shields.io/badge/plugin-CLAP-e76f51)
@@ -21,10 +21,11 @@ adapt EQ, saturation, glue, width and loudness — in real time, inside your DAW
 ---
 
 Axon packs a complete, reorderable mastering signal path behind a single,
-adaptive interface. Some stages are **neural** (per-mix adaptive EQ, saturation,
+adaptive interface. Some stages are **neural** (per-mix adaptive EQ and
 SSL-style bus compression) running on ONNX Runtime; others are **hand-written
-DSP** (a Mel-band loudness maximizer, bass mono-maker, true-peak ceiling)
-accelerated with Apple vDSP. Drag to reorder, dial in, and read it all
+DSP** (a band-limited harmonic exciter, an FDN room reverb, an M/S stereo
+widener, a Mel-band loudness maximizer, a bass mono-maker and a true-peak
+ceiling) accelerated with Apple vDSP. Drag to reorder, dial in, and read it all
 on a live in/out LUFS / RMS / peak meter.
 
 Built on [nablafx](https://github.com/stevemurr/nablafx) (our fork of
@@ -35,8 +36,13 @@ Built on [nablafx](https://github.com/stevemurr/nablafx) (our fork of
 - 🎚️ **Adaptive Auto-EQ** — an LSTM controller drives a 5-band parametric or a
   64-band spectral-mask EQ, with per-genre presets (bass / drums / vocals /
   other / full-mix).
-- 🔥 **Neural saturation & SSL bus glue** — rational-activation soft-clipper and
-  a TCN-emulated SSL-style bus compressor.
+- 🔥 **Neural SSL bus glue** — a TCN-emulated SSL-style bus compressor, with an
+  `Input` drive that sets the model's operating point (level-matched, so it stays
+  loudness-neutral while you push it into its sweet spot).
+- ✨ **Harmonic exciter** — an Aphex-style band-limited parallel exciter
+  (even/odd blend, anti-aliased) for bright sheen without re-weighting the balance.
+- 🌌 **Room reverb & stereo widener** — a transparent 8-line FDN room for subtle
+  depth, and a mono-safe frequency-dependent M/S "shuffler" for width.
 - 📣 **Loudness maximizer** — 26-band Mel STFT limiter with reverse
   water-filling, a Drive control, and a true-peak lookahead brickwall
   (0.1 % THD vs 22.7 % for a clipper on bass — see the
@@ -54,14 +60,18 @@ Default order (drag to reorder; True-Peak Ceiling is always final):
 
 | # | Stage | What it does | Key controls |
 |---|-------|--------------|--------------|
-| 1 | **Auto EQ** 🧠 | Per-class adaptive EQ (5-band parametric **or** 64-band spectral mask) driven by an LSTM | `EQ`, `Class`, `Range`, `Boost`, `Speed` |
-| 2 | **Saturator** 🧠 | Rational soft-clipper with HPF/LPF, threshold & bias | `Drive`, `Output`, `Mix`, `Thresh`, `Bias` |
-| 3 | **Bus Comp** 🧠 | TCN-emulated SSL-style bus compressor (on/off) | `Bus Comp` |
-| 4 | **Bass Mono** | Mono below a cutoff; mono sum preserved exactly | `Bass Mono` (on/off), `Frequency` |
-| 5 | **Limiter** | Mel-band maximizer + true-peak lookahead brickwall | `Drive`, `Ceiling`, `Attack/Adaptive Gain`, `Release/Adaptive Speed`, `Dynamic` |
+| 1 | **Bass Mono** | Mono below a cutoff; mono sum preserved exactly | `Bass Mono` (on/off), `Frequency` |
+| 2 | **Exciter** | Aphex-style band-limited parallel harmonic exciter (even/odd, 4× anti-aliased) | `Exciter` (on/off), `Amount`, `Intensity`, `Warm↔Bright`, band `Frequency`/`Tame` |
+| 3 | **Auto EQ** 🧠 | Per-class adaptive EQ (5-band parametric **or** 64-band spectral mask) driven by an LSTM | `EQ`, `Class`, `Range`, `Boost`, `Speed` |
+| 4 | **Reverb** | Transparent 8-line FDN room (bass-excluded, damped, mono-compatible) | `Mix`, `Size`, `Width`, `Damp`, `Low Cut` |
+| 5 | **Widener** | Frequency-dependent M/S "shuffler" — wider mids/highs, mono sum invariant | `Width` (on/off), `Amount`, `Low`, `Air` |
+| 6 | **Bus Comp** 🧠 | TCN-emulated SSL-style bus compressor with a level-matched input drive | `Bus Comp` (on/off), `Input` |
+| 7 | **Limiter** | Mel-band maximizer + true-peak lookahead brickwall | `Drive`, `Ceiling`, `Attack/Adaptive Gain`, `Release/Adaptive Speed`, `Dynamic` |
 | — | **True-Peak Ceiling** | Always-last 4× oversampled brickwall, guarantees the dBTP ceiling | (fixed) |
 
-🧠 = neural (ONNX); the rest is native DSP.
+🧠 = neural (ONNX); the rest is native DSP. The **Saturator** (a neural
+rational-activation soft-clipper) remains in the codebase but is not in the
+current default chain.
 
 ## 🚀 Quick start (macOS, Apple Silicon)
 

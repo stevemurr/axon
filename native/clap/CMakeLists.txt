@@ -194,6 +194,11 @@ target_include_directories(test_autoeq_param_guard PRIVATE ${CMAKE_SOURCE_DIR}/s
 target_compile_options(test_autoeq_param_guard PRIVATE -UNDEBUG)
 target_link_libraries(test_autoeq_param_guard PRIVATE "-framework Accelerate")
 
+# test_true_peak — TruePeakCeiling: ceiling-never-exceeded invariant + KAT.
+add_executable(test_true_peak tests/test_true_peak.cpp src/true_peak_ceiling.cpp)
+target_include_directories(test_true_peak PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_true_peak PRIVATE -UNDEBUG)
+
 # test_axon_gui_js — WKWebView JS-bridge string builders (no fixed-buffer overflow).
 add_executable(test_axon_gui_js tests/test_axon_gui_js.cpp)
 target_include_directories(test_axon_gui_js PRIVATE ${CMAKE_SOURCE_DIR}/src)

@@ -90,6 +90,9 @@ const float* OrtSession::run(int input_len) {
     if (input_len > max_input_len_) {
         throw std::runtime_error("OrtSession::run: input_len exceeds max configured block length");
     }
+    if (input_len < meta_.receptive_field) {
+        throw std::runtime_error("OrtSession::run: input_len must be at least receptive_field");
+    }
 
     // Compose the input tensor list in ONNX declaration order. We built
     // input_names_ from session inspection, so it already matches.

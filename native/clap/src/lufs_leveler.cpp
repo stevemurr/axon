@@ -84,6 +84,13 @@ void LufsLeveler::set_k_weighting_coeffs_(double sr) {
 }
 
 void LufsLeveler::reset(double sample_rate, double target_lufs) {
+    // Guard against invalid configuration: a non-positive sample rate would
+    // cause division by zero in the coefficient math (warp + pole filters),
+    // and a non-positive short-term window would produce a zero-length ring,
+    // causing an undefined modulo-0 in process()/process_linked().
+    if (sample_rate <= 0.0) sample_rate = 48000.0;
+    cfg_.short_term_s = std::max(cfg_.short_term_s, 0.1);
+
     sample_rate_ = sample_rate;
     target_lufs_ = target_lufs;
     set_k_weighting_coeffs_(sample_rate);

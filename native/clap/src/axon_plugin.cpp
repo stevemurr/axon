@@ -1050,6 +1050,18 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
             // Every auto-EQ class declares spectral_mask_eq as its
             // dsp_blocks[0]; meta.cpp throws if anything else slips through.
             const auto& dsp = g_state->autoeq_dsp_per_class[i];
+            // The audio thread stages control params through a fixed 64-element
+            // stack array (eq_params_storage in flush_chain_block_). Fail fast
+            // here rather than overflowing that buffer during processing.
+            const int n_control =
+                std::get<SpectralMaskEqParams>(dsp.params).num_control_params;
+            if (n_control > 64) {
+                throw std::runtime_error(
+                    "auto_eq class '" + cls + "' declares num_control_params=" +
+                    std::to_string(n_control) +
+                    " which exceeds the 64-element control buffer; "
+                    "re-export the bundle or raise eq_params_storage size.");
+            }
             ch.autoeq_spec_per_class[i] = std::make_unique<SpectralMaskEq>();
             ch.autoeq_spec_per_class[i]->reset(
                 std::get<SpectralMaskEqParams>(dsp.params));

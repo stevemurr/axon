@@ -39,10 +39,12 @@ DspBlockSpec parse_dsp_block(const json& j) {
         SpectralMaskEqParams sm;
         sm.sample_rate        = p.at("sample_rate").get<int>();
         sm.block_size         = p.at("block_size").get<int>();
+        if (sm.block_size <= 0) throw std::runtime_error("block_size must be > 0");
         sm.num_control_params = p.at("num_control_params").get<int>();
         sm.n_fft              = p.at("n_fft").get<int>();
         sm.hop                = p.at("hop").get<int>();
         sm.n_bands            = p.at("n_bands").get<int>();
+        if (sm.num_control_params != sm.n_bands) throw std::runtime_error("num_control_params must equal n_bands");
         sm.min_gain_db        = p.at("min_gain_db").get<float>();
         sm.max_gain_db        = p.at("max_gain_db").get<float>();
         sm.f_min              = p.at("f_min").get<float>();
@@ -77,10 +79,12 @@ PluginMeta load_meta(const std::string& path) {
     m.model_id        = j.at("model_id").get<std::string>();
     m.architecture    = j.at("architecture").get<std::string>();
     m.sample_rate     = j.at("sample_rate").get<int>();
+    if (m.sample_rate <= 0) throw std::runtime_error("sample_rate must be > 0");
     m.channels        = j.at("channels").get<int>();
     m.causal          = j.at("causal").get<bool>();
     m.receptive_field = j.at("receptive_field").get<int>();
     m.latency_samples = j.at("latency_samples").get<int>();
+    if (m.latency_samples < 0) throw std::runtime_error("latency_samples must be >= 0");
     m.num_controls    = j.at("num_controls").get<int>();
     m.trace_len       = j.value("trace_len", 0);   // 0 for legacy bundles
 

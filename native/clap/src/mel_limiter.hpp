@@ -98,6 +98,9 @@ private:
     int                n_freq_{0};
     std::vector<float> band_to_bin_;   // [kNumBands * n_freq]
     std::vector<float> bin_norm_;      // [n_freq]
+    // Per-bin gain scratch — reused each hop (pre-allocated in init to avoid
+    // heap allocation on the audio thread).
+    std::vector<float> bin_gain_arr_;  // [n_freq]
 
     // Shared per-band gain state (linked stereo).
     std::array<float, kNumBands> band_gain_{};

@@ -24,7 +24,7 @@ namespace nablafx {
 class BassMono {
 public:
     void prepare(double sample_rate) {
-        sr_ = sample_rate;
+        sr_ = sample_rate > 0.0 ? sample_rate : 44100.0;
         reset();
         design_();   // build coeffs for the current cutoff
     }

@@ -31,6 +31,8 @@ inline double lufs_from_ms(double ms) {
 }  // namespace
 
 void LoudnessMeter::set_k_weighting_(double sr) {
+    if (sr < 1.0) sr = 1.0;  // guard against div-by-zero / Inf coeffs in the warp path below
+
     const KCoeffs* c = nullptr;
     if (std::abs(sr - 44100.0) < 0.5)      c = &k44;
     else if (std::abs(sr - 48000.0) < 0.5) c = &k48;

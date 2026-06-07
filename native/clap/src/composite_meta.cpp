@@ -96,6 +96,7 @@ CompositeMeta load_composite_meta(const std::string& path) {
     const auto& ceil_j = j.at("ceiling");
     m.ceiling.ceiling_dbtp = ceil_j.at("ceiling_dbtp").get<float>();
     m.ceiling.lookahead_ms = ceil_j.value("lookahead_ms", 1.5f);
+    if (m.ceiling.lookahead_ms < 0) throw std::runtime_error("lookahead_ms must be >= 0");
     m.ceiling.attack_ms    = ceil_j.value("attack_ms",    0.5f);
     m.ceiling.release_ms   = ceil_j.value("release_ms",   50.0f);
 

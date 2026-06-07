@@ -132,7 +132,7 @@ public:
             const int rdx = rd < 0 ? rd + static_cast<int>(predelay_[0].size()) : rd;
             const double inL = predelay_[0][static_cast<size_t>(rdx)];
             const double inR = predelay_[1][static_cast<size_t>(rdx)];
-            pd_idx_ = (pd_idx_ + 1) % static_cast<int>(predelay_[0].size());
+            if (++pd_idx_ == static_cast<int>(predelay_[0].size())) pd_idx_ = 0;
 
             // --- Read the 8 delay-line outputs -------------------------------
             std::array<double, kLines> out;
@@ -159,8 +159,11 @@ public:
                 const double fed = line_[k].damp_z;
                 const double inj = (k & 1) ? inR : inL;
                 line_[k].buf[static_cast<size_t>(line_[k].widx)] = fed + inj * in_gain_;
-                line_[k].widx = (line_[k].widx + 1)
-                                % static_cast<int>(line_[k].buf.size());
+                // Branch-wrap (matches the read path above) instead of a runtime
+                // `% buf.size()` — removes 8 integer divisions per sample. The
+                // index only ever advances by 1, so the compare is exact.
+                if (++line_[k].widx == static_cast<int>(line_[k].buf.size()))
+                    line_[k].widx = 0;
             }
 
             // --- Build the decorrelated stereo wet ---------------------------

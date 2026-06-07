@@ -177,6 +177,46 @@ void test_antialias() {
     std::fprintf(stderr, "[alias]  PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 5: regression baseline (known-answer test). Locks the exact output of a
+//         fixed input through fixed params so a future perf refactor can't
+//         silently drift the sound. The reference was captured from the
+//         oversampled-waveshaper output and is bit-stable across -O0/-O2/-O3.
+//         This is the durable guard for the modulo->mask perf change (which
+//         null-tested bit-identical to the prior implementation).
+// ---------------------------------------------------------------------------
+void test_regression_kat() {
+    const int N = 2048;
+    std::vector<float> x(N);
+    for (int i = 0; i < N; ++i)
+        x[i] = 0.4f * std::sin(2.0 * kPi * 4000.0 * i / kSR)
+             + 0.2f * std::sin(2.0 * kPi * 9000.0 * i / kSR);
+
+    nablafx::Exciter ex; ex.prepare(kSR);
+    ex.set_params(/*amount*/0.6f, /*freq*/3000.f, /*drive*/15.f,
+                  /*char*/0.4f, /*tame*/17000.f);
+    ex.process(x.data(), nullptr, N);
+    assert(finite(x.data(), N));
+
+    const double kRefRms = 2.271556805297e-01;
+    const int    kRefIdx[5] = {64, 256, 512, 1024, 2000};
+    const float  kRefVal[5] = {-2.100853622e-01f, -8.789835125e-02f,
+                               -4.631935433e-02f,  4.954358935e-02f,
+                               -2.841520607e-01f};
+
+    double sum = 0; for (int i = 0; i < N; ++i) sum += (double)x[i] * x[i];
+    const double rms = std::sqrt(sum / N);
+    std::fprintf(stderr, "[kat]    rms=%.12e (ref %.12e)\n", rms, kRefRms);
+    assert(std::fabs(rms - kRefRms) < 1e-9);
+    for (int j = 0; j < 5; ++j) {
+        const double d = std::fabs((double)x[kRefIdx[j]] - kRefVal[j]);
+        std::fprintf(stderr, "[kat]    x[%d]=%.9e ref=%.9e |d|=%.2e\n",
+                     kRefIdx[j], x[kRefIdx[j]], kRefVal[j], d);
+        assert(d < 1e-5);
+    }
+    std::fprintf(stderr, "[kat]    PASS\n");
+}
+
 }  // namespace
 
 int main() {
@@ -184,6 +224,7 @@ int main() {
     test_harmonics();
     test_no_dc();
     test_antialias();
+    test_regression_kat();
     std::fprintf(stderr, "ALL EXCITER TESTS PASSED\n");
     return 0;
 }

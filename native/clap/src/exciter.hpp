@@ -57,12 +57,21 @@ public:
     static constexpr int kFirPh   = kFirTaps / kOvs;   // taps per polyphase phase
     // The up + down FIRs each add (kFirTaps-1)/2 oversampled samples of group
     // delay, so the wet (excited) band trails its input by (kFirTaps-1) /kOvs
-    // base-rate samples (= 7.75 at 32 taps / 4×). The wet still contains the
+    // base-rate samples (= 31.75 at 128 taps / 4×). The wet still contains the
     // band's fundamental, so summing it against the UNDELAYED dry combs the
     // overlap band. We delay the dry by the nearest integer to that group delay
     // before the sum, so dry and wet are time-aligned (residual < 0.5 sample →
     // any leftover notch sits above Nyquist and is inaudible).
-    static constexpr int kDryDelay = (kFirTaps - 1 + kOvs / 2) / kOvs;  // round(7.75)=8
+    static constexpr int kDryDelay = (kFirTaps - 1 + kOvs / 2) / kOvs;  // round(31.75)=32
+
+    // The three ring buffers (up history kFirPh, down history kFirTaps, dry
+    // delay kDryDelay) are all powers of two, so their wrap can use a cheap
+    // bitmask (& (N-1)) instead of a signed integer modulo in the hot inner
+    // loops. Static-assert that invariant so a future taps/ovs change can't
+    // silently make the mask wrong.
+    static_assert((kFirPh   & (kFirPh   - 1)) == 0, "kFirPh must be a power of two");
+    static_assert((kFirTaps & (kFirTaps - 1)) == 0, "kFirTaps must be a power of two");
+    static_assert((kDryDelay & (kDryDelay - 1)) == 0, "kDryDelay must be a power of two");
 
     void prepare(double sample_rate) {
         sr_ = sample_rate > 0.0 ? sample_rate : 44100.0;
@@ -133,7 +142,7 @@ public:
         // The stage's main (dry) path is delayed by kDryDelay to time-align it
         // with the wet, so that — not the truncated FIR delay — is the latency
         // the host must compensate.
-        return kDryDelay;   // 8 samples
+        return kDryDelay;   // 32 samples (= round((kFirTaps-1)/kOvs) at 128/4x)
     }
 
 private:
@@ -210,7 +219,7 @@ private:
             //    FIR. The down FIR's output for this base sample is the value
             //    aligned with the just-pushed input (anti-alias lowpass).
             c.up_hist[c.up_idx] = band;
-            c.up_idx = (c.up_idx + 1) % kFirPh;
+            c.up_idx = (c.up_idx + 1) & (kFirPh - 1);
 
             double wet = 0.0;
             for (int p = 0; p < kOvs; ++p) {
@@ -219,7 +228,7 @@ private:
                 double up = 0.0;
                 for (int k = 0; k < kFirPh; ++k) {
                     const int tap   = p + k * kOvs;
-                    const int h_idx = (c.up_idx + kFirPh - 1 - k) % kFirPh;
+                    const int h_idx = (c.up_idx + kFirPh - 1 - k) & (kFirPh - 1);
                     up += fir_[tap] * c.up_hist[h_idx];
                 }
                 // Nonlinearity at the oversampled rate.
@@ -227,14 +236,14 @@ private:
 
                 // Feed into the decimation FIR history.
                 c.dn_hist[c.dn_idx] = sh;
-                c.dn_idx = (c.dn_idx + 1) % kFirTaps;
+                c.dn_idx = (c.dn_idx + 1) & (kFirTaps - 1);
 
                 // Only the last sub-phase produces an output sample (decimate
                 // by kOvs). Convolve the down FIR over the oversampled history.
                 if (p == kOvs - 1) {
                     double acc = 0.0;
                     for (int k = 0; k < kFirTaps; ++k) {
-                        const int h_idx = (c.dn_idx + kFirTaps - 1 - k) % kFirTaps;
+                        const int h_idx = (c.dn_idx + kFirTaps - 1 - k) & (kFirTaps - 1);
                         acc += fir_[k] * c.dn_hist[h_idx];
                     }
                     // The down FIR also carries the kOvs DC gain (it sums kOvs
@@ -253,7 +262,7 @@ private:
             const double wet_ac = c.wet_hpf.process(wet);
             const double dry_d = c.dry_ring[c.dry_idx];   // x delayed kDryDelay samples
             c.dry_ring[c.dry_idx] = x;
-            c.dry_idx = (c.dry_idx + 1) % kDryDelay;
+            c.dry_idx = (c.dry_idx + 1) & (kDryDelay - 1);
             const double added = amount_ * wet_ac;        // the contribution summed on
             buf[i] = static_cast<float>(dry_d + added);
             // Observational wet tap: exactly what we add onto the dry. Read-only

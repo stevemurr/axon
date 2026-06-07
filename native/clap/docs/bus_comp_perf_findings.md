@@ -12,6 +12,10 @@ accumulates `kSslHop = 1024` samples, shifts a `trace_len`-sized ring, and runs
 ORT **once per hop**, adding `kSslHop - kBlockSize` samples of latency.
 
 ## Baseline (axon_bench, Axon.clap, 20 s fixture, Release)
+All measurements below are at the model's **native 44.1 kHz** (the bundle's
+`sample_rate`). Note the plugin currently runs the model at fixed sample counts
+regardless of host rate — see the sample-rate caveat at the end.
+
 Per-block wall time, bus comp only (`EQ=0,SSC=100`):
 
 | buffer | p50 | p95 | max | deadline | misses |
@@ -63,3 +67,14 @@ so they do not move the needle — but they are heap allocations on the audio
 thread. `ort_session.hpp` already documents (but does not implement) an
 `Ort::IoBinding` design that would remove them; worth doing as a separate
 robustness/hardening task, not for measurable speed.
+
+## Sample-rate caveat (important — tracked separately)
+The numbers and the re-export recommendation above assume the model's **native
+44.1 kHz**. The neural stages run at **fixed sample counts** (`trace_len=2048`,
+`rf=631`, `kSslHop=1024`), the model is 44.1k-trained, and the plugin neither
+resamples into it nor refuses non-native rates — despite the `axon_plugin.cpp`
+header comment claiming activation is refused on SR mismatch (it is **not**;
+`plugin_activate()` always returns true). At 48 k / 96 k the comp's effective
+time constants and frequency response drift. This is **independent** of the
+re-export perf win (a shorter time axis is still a fixed sample count). Tracked
+in issue #11.

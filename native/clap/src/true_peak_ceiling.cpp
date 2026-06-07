@@ -113,7 +113,10 @@ void TruePeakCeiling::process(const float* in, float* out, std::size_t n) {
         // Pull delayed sample, apply smoothed GR, hard-clip as safety.
         float delayed = delay_[delay_idx_];
         delay_[delay_idx_] = static_cast<float>(x);
-        delay_idx_ = (delay_idx_ + 1) % delay_.size();
+        // Branch-wrap (index advances by 1) — avoids a runtime `% delay_.size()`
+        // (non-power-of-two) integer division per sample. The FIR-history wrap
+        // above is already a mask (unsigned, constexpr power-of-two kFirPhase).
+        if (++delay_idx_ == delay_.size()) delay_idx_ = 0;
 
         double y = delayed * gr_lin_;
         if (y > ceiling_lin_)  y = ceiling_lin_;

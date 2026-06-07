@@ -1,0 +1,4 @@
+
+# Compiled micro-benchmark binaries (sources are tracked, binaries are not)
+bench/bench_*
+!bench/bench_*.cpp

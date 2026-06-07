@@ -84,8 +84,31 @@ Target curves used for A/B: (a) gentle tilt (+3 dB @ 80 Hz → −3 dB @ 10 k),
 - [x] analysis.hpp + signals.hpp
 - [x] harness_exciter.cpp + baseline
 - [x] harness_auto_eq.cpp + baseline
-- [ ] Chebyshev exciter candidate + A/B
-- [ ] min-phase IIR filterbank auto-EQ candidate + A/B
+- [x] Chebyshev exciter candidate + A/B
+- [x] min-phase IIR filterbank auto-EQ candidate + A/B
+
+## Candidate results (2026-06-07)
+**Exciter — polynomial (Chebyshev-class) shaper** (`Exciter::Shaper::Polynomial`,
+default unchanged), at matched THD 6 %:
+- Harmonic purity: NO content above the 3rd (h4/h5/h6 at −150…−178 dB vs
+  biased-tanh −62…−110 dB) → quantified "cleaner / less fizzy".
+- CPU ~18 % cheaper (no `tanh`).
+- Aliasing & IMD: a wash (4× OS already handles them).
+- Verdict: QUALITY win on purity + CPU; shipped as a non-destructive mode.
+
+**Auto-EQ — min-phase IIR filterbank** (`IirFilterbankEq`, 24 bells + edge
+shelves, A⁻¹ solve so the summed response hits the band targets):
+- Magnitude-match: tilt 0.43 dB RMS (beats STFT's 0.58); notch 0.21 RMS (under
+  the 0.5 bar; STFT's per-bin mask is tighter on a narrow notch: 0.13 / max 0.64
+  vs 0.21 / max 1.58).
+- CPU ~4.4× cheaper (55 vs 240 ns/sample); latency 0 vs 2048 (46 ms); flat-mask
+  reconstruction exact (−240 vs −138 dBFS).
+- Verdict: clears the match bar AND wins decisively on latency/CPU/reconstruction.
+- OPEN: the "clarity" axes (transient smearing, musical noise under a MOVING
+  mask) are NOT yet substantiated — the current static-tone/click metrics are too
+  benign (both read the measurement floor). Need a moving-mask + drum-loop metric
+  before claiming those; and the narrow-notch match could improve with a Newton
+  iteration on the solve or a higher-Q notch band.
 
 ## Baselines (captured 2026-06-07; Release -O3, Apple Silicon)
 **Exciter** (SR 48k, matched 2nd-harmonic = −24 dB, character 0):

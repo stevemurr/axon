@@ -5,6 +5,7 @@
 //   c++ -O3 -std=c++17 -I src bench/sonic/harness_auto_eq.cpp \
 //       -framework Accelerate -o bench/sonic/harness_auto_eq
 #include "../../src/spectral_mask_eq.hpp"
+#include "../../src/iir_filterbank_eq.hpp"
 #include "analysis.hpp"
 #include "signals.hpp"
 
@@ -71,8 +72,22 @@ static DUT make_autoeq(const std::vector<float>& bands) {
     };
 }
 
+static DUT make_autoeq_iir(const std::vector<float>& bands) {
+    return [bands](const float* in, float* out, int n) {
+        auto eq = std::make_shared<nablafx::IirFilterbankEq>();
+        eq->reset(cfg());
+        const int B = 128;
+        for (int i = 0; i < n; i += B) {
+            const int m = std::min(B, n - i);
+            eq->set_params(bands.data(), NB);
+            eq->process(in + i, out + i, (std::size_t)m);
+        }
+    };
+}
+
+template <class EQ>
 static double cpu_ns_per_sample(const std::vector<float>& bands) {
-    nablafx::SpectralMaskEq eq; eq.reset(cfg());
+    EQ eq; eq.reset(cfg());
     const int n = (int)SR; auto pink = pink_like(n, 0.3, 9);
     std::vector<float> out(n);
     for (int i = 0; i + 128 <= n; i += 128) { eq.set_params(bands.data(), NB); eq.process(&pink[i], &out[i], 128); }
@@ -84,7 +99,8 @@ static double cpu_ns_per_sample(const std::vector<float>& bands) {
 
 static void run_suite(const std::string& name,
                       const std::function<DUT(const std::vector<float>&)>& factory,
-                      int reported_latency) {
+                      int reported_latency,
+                      const std::function<double()>& cpu_fn) {
     std::printf("\n== %s ==\n", name.c_str());
 
     // 1) magnitude-match vs each analytic target
@@ -145,7 +161,7 @@ static void run_suite(const std::string& name,
 
     // 6) CPU
     {
-        const double cpu = cpu_ns_per_sample(bands_for(curve_tilt));
+        const double cpu = cpu_fn();
         std::printf("  CPU                        = %.1f ns/sample\n", cpu);
         std::printf("KV %s cpu=%.1f\n", name.c_str(), cpu);
     }
@@ -153,7 +169,9 @@ static void run_suite(const std::string& name,
 
 int main() {
     std::printf("Auto-EQ sonic harness — SR=%.0f, %d bands, span [%.0f,%.0f] dB\n", SR, NB, MIN_DB, MAX_DB);
-    run_suite("baseline (STFT min-phase mask)", make_autoeq, /*reported latency*/2048);
-    // Candidate (min-phase IIR filterbank) appended here once implemented.
+    run_suite("baseline (STFT min-phase mask)", make_autoeq, /*reported*/2048,
+              [] { return cpu_ns_per_sample<nablafx::SpectralMaskEq>(bands_for(curve_tilt)); });
+    run_suite("candidate (min-phase IIR bank)", make_autoeq_iir, /*reported*/0,
+              [] { return cpu_ns_per_sample<nablafx::IirFilterbankEq>(bands_for(curve_tilt)); });
     return 0;
 }

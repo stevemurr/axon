@@ -1201,6 +1201,7 @@ struct AmountSnapshot {
     // (band HPF), EXC_DRIVE (dB into the shaper), EXC_CHAR (even↔odd), EXC_LPF
     // ("Tame" band LPF).
     bool  exc_on;
+    bool  exc_poly;   // false = biased-tanh (default); true = Chebyshev-class polynomial shaper
     float exc_amt, exc_freq, exc_drive_db, exc_char, exc_lpf;
     // Reverb: RVB_MIX (parallel wet blend, 0 = bypass), RVB_SIZE (room size →
     // RT60), RVB_WIDTH (tail stereo width), RVB_DAMP (tail LPF Hz), RVB_LOWCUT
@@ -1219,6 +1220,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
     float eon=0.f;                                        // exciter on/off (switch)
+    float epoly=0.f;                                      // exciter shaper: 0=tanh, 1=polynomial
     float ea=0.f,ef=3000.f,ed=6.f,ec=0.25f,el=18000.f;   // exciter params
     float rm=0.f,rs=0.30f,rw=0.80f,rd=7000.f,rlc=250.f;  // reverb params
     float won=0.f;                                        // widener on/off (switch)
@@ -1251,6 +1253,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="EXC_AMT") ea=v; else if(c.id=="EXC_FREQ") ef=v;
         else if(c.id=="EXC_DRIVE") ed=v; else if(c.id=="EXC_CHAR") ec=v;
         else if(c.id=="EXC_LPF") el=v;
+        else if(c.id=="EXC_POLY") epoly=v;
         else if(c.id=="RVB_MIX") rm=v; else if(c.id=="RVB_SIZE") rs=v;
         else if(c.id=="RVB_WIDTH") rw=v; else if(c.id=="RVB_DAMP") rd=v;
         else if(c.id=="RVB_LOWCUT") rlc=v;
@@ -1280,6 +1283,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.bm_wet  = bmi;
     s.bm_freq = bmf;
     s.exc_on       = (eon >= 0.5f);  // stage on/off toggle
+    s.exc_poly     = (epoly >= 0.5f);// shaper: polynomial (clean) vs biased-tanh
     s.exc_amt      = ea;     // 0..1 parallel blend (0 = bypass)
     s.exc_freq     = ef;     // band HPF cutoff (Hz)
     s.exc_drive_db = ed;     // dB into the shaper
@@ -1721,6 +1725,11 @@ void flush_chain_block_(Plugin& plug,
                 plug.exc_spectrum.reset();
                 break;
             }
+            // Shaper selection BEFORE set_params (set_params recomputes the
+            // operating-point DC offset, which depends on the active shaper).
+            plug.exciter.set_shaper(amt.exc_poly
+                                        ? nablafx::Exciter::Shaper::Polynomial
+                                        : nablafx::Exciter::Shaper::BiasedTanh);
             plug.exciter.set_params(amt.exc_amt, amt.exc_freq, amt.exc_drive_db,
                                     amt.exc_char, amt.exc_lpf);
             // Tap the mono wet CONTRIBUTION (amount*wet that's summed onto the

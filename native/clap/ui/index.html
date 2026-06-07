@@ -501,7 +501,7 @@ const PROCESSORS = [
   // EXC_FREQ / EXC_LPF are NOT knobs — they're draggable band edges on the
   // exciter band display (see drawExcBand), so the user sets the excited region
   // spatially and watches the live "what's being excited" overlay.
-  { id: 7, name: 'EXCITER',   params: ['EXC_ON','EXC_AMT','EXC_DRIVE','EXC_CHAR'], wetParams: ['EXC_ON'] },
+  { id: 7, name: 'EXCITER',   params: ['EXC_ON','EXC_AMT','EXC_DRIVE','EXC_CHAR','EXC_POLY'], wetParams: ['EXC_ON'] },
   { id: 8, name: 'REVERB',    params: ['RVB_MIX','RVB_SIZE','RVB_WIDTH','RVB_DAMP','RVB_LOWCUT'], wetParams: ['RVB_MIX'] },
   { id: 9, name: 'WIDENER',   params: ['WID_ON','WID_AMT','WID_FREQ','WID_AIR'], wetParams: ['WID_ON'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
@@ -700,6 +700,7 @@ function onToggleClick(id) {
 function toggleLabels(id) {
   if (id === 'C_L') return ['COMP', 'LIMIT'];
   if (id === 'MLA') return ['EVEN', 'DYNAMIC'];
+  if (id === 'EXC_POLY') return ['RICH', 'CLEAN'];
   return ['OFF', 'ON'];
 }
 

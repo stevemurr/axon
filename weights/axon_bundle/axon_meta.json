@@ -287,6 +287,15 @@
       "skew": 1.0,
       "unit": "Hz"
     },
+    "EXC_POLY": {
+      "id": "EXC_POLY",
+      "name": "Clean Harmonics",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
     "RVB_MIX": {
       "id": "RVB_MIX",
       "name": "Mix",

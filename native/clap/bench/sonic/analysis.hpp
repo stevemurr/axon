@@ -151,6 +151,49 @@ inline int measured_latency(const DUT& dut, int probe_n = 8192, int impulse_at =
     return peak - impulse_at;
 }
 
+// ---- impulse-response spread: how much a renderer smears a transient -------
+// Feed a unit impulse through the (active-curve) DUT and characterise its
+// response in time. rms_ms = RMS duration about the energy centroid (the core
+// smearing number); tail40_ms = peak→last-sample-above-(-40 dB) length;
+// preecho_db = energy before the peak relative to it (pre-ring).
+struct Spread { double rms_ms, tail40_ms, preecho_db; };
+inline Spread impulse_spread(const DUT& dut, double sr, int n = 1 << 15, int at = 1 << 13) {
+    std::vector<float> in(n, 0.f), out(n, 0.f);
+    in[at] = 1.0f;
+    dut(in.data(), out.data(), n);
+    int peak = 0; double pv = 0;
+    for (int i = 0; i < n; ++i) { double a = std::fabs(out[i]); if (a > pv) { pv = a; peak = i; } }
+    double e = 0, m1 = 0;
+    for (int i = 0; i < n; ++i) { double p = (double)out[i] * out[i]; e += p; m1 += p * i; }
+    const double centroid = e > 0 ? m1 / e : peak;
+    double var = 0;
+    for (int i = 0; i < n; ++i) { double p = (double)out[i] * out[i]; double d = i - centroid; var += p * d * d; }
+    var = e > 0 ? var / e : 0;
+    const double thr = pv * 0.01;            // -40 dB
+    int last = peak;
+    for (int i = n - 1; i > peak; --i) if (std::fabs(out[i]) > thr) { last = i; break; }
+    const int guard = (int)(0.001 * sr);     // ignore ±1 ms around the peak for pre-echo
+    double pre = 0;
+    for (int i = 0; i < peak - guard; ++i) pre = std::max(pre, (double)std::fabs(out[i]));
+    return {std::sqrt(var) / sr * 1000.0, (last - peak) / sr * 1000.0, lin2db(pre / std::max(1e-12, pv))};
+}
+
+// ---- spurious sidebands around f0 (exclude the intended slow AM) ------------
+// For a steady tone under a MOVING mask, the output should be clean AM at the
+// modulation rate (sidebands within a few Hz of f0). Hop-rate "zipper" shows up
+// as sidebands tens–hundreds of Hz out. Returns max spurious sideband ÷ f0 (dB).
+inline double spurious_sidebands_db(const std::vector<float>& y, double f0, double sr,
+                                    int skip = -1) {
+    if (skip < 0) skip = (int)y.size() / 4;
+    const double fund = goertzel(y, skip, f0, sr);
+    double spur = 0;
+    for (double off : {40.0, 60.0, 86.0, 100.0, 129.0, 172.0, 215.0, 258.0}) {
+        spur = std::max(spur, goertzel(y, skip, f0 + off, sr));
+        spur = std::max(spur, goertzel(y, skip, f0 - off, sr));
+    }
+    return lin2db(spur / std::max(1e-12, fund));
+}
+
 // ---- calibrate a scalar drive so THD(f0) hits target_thd_percent -----------
 // "Matched effect" = same total harmonic energy added, which is well-posed for
 // any Character (unlike matching a single harmonic that may be absent). THD is

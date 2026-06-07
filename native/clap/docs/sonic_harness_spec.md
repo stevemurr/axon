@@ -103,12 +103,25 @@ shelves, A⁻¹ solve so the summed response hits the band targets):
   vs 0.21 / max 1.58).
 - CPU ~4.4× cheaper (55 vs 240 ns/sample); latency 0 vs 2048 (46 ms); flat-mask
   reconstruction exact (−240 vs −138 dBFS).
-- Verdict: clears the match bar AND wins decisively on latency/CPU/reconstruction.
-- OPEN: the "clarity" axes (transient smearing, musical noise under a MOVING
-  mask) are NOT yet substantiated — the current static-tone/click metrics are too
-  benign (both read the measurement floor). Need a moving-mask + drum-loop metric
-  before claiming those; and the narrow-notch match could improve with a Newton
-  iteration on the solve or a higher-Q notch band.
+
+### The clarity/transient edge was REFUTED by the strengthened metrics
+The original rationale for the IIR was "less STFT smearing / less musical noise."
+Both were tested directly and do NOT hold:
+- **Transient (impulse-response spread under an active curve):** STFT is actually
+  MORE compact — tilt RMS-duration 0.065 ms / −40 dB tail 0.48 ms vs the IIR's
+  0.096 ms / 1.07 ms. Both have no pre-echo (−110 / −240 dB). The min-phase STFT
+  concentrates energy compactly (the reason min-phase was chosen); the IIR's 24
+  resonant bells ring slightly more.
+- **Musical noise (steady tone, moving mask at 1/3/8 Hz):** a wash — STFT and IIR
+  give identical spurious sidebands (≈ −45.7 dB, Δ ≤ 0.2 dB at every rate). Both
+  smooth at block rate, and a smooth-mask EQ (unlike a spectral gate) has no
+  musical-noise mechanism to begin with.
+
+**Corrected verdict:** the IIR filterbank is a **latency + CPU** win (and exact
+flat reconstruction), NOT a sonic/clarity improvement. The existing min-phase
+STFT Auto-EQ is already clean on transients and automation. So as a *sonic*
+upgrade it is a no-op; adopt it only if the 46 ms latency or the CPU matter.
+This is exactly the false-"better" the match-the-effect harness exists to catch.
 
 ## Baselines (captured 2026-06-07; Release -O3, Apple Silicon)
 **Exciter** (SR 48k, matched 2nd-harmonic = −24 dB, character 0):

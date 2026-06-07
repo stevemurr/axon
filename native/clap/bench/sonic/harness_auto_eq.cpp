@@ -131,7 +131,17 @@ static void run_suite(const std::string& name,
         std::printf("KV %s crest_in=%.2f crest_out=%.2f crest_delta=%.2f\n", name.c_str(), ci, co, co - ci);
     }
 
-    // 3) musical noise: static mask + steady tone -> output modulation depth
+    // 3) transient smearing: impulse-response spread under an ACTIVE curve.
+    for (auto& cv : curves) {
+        DUT dut = factory(bands_for(cv.fn));
+        const Spread s = impulse_spread(dut, SR);
+        std::printf("  transient[%-5s]  RMS-dur=%.3f ms  -40dB tail=%.2f ms  pre-echo=%.1f dB\n",
+                    cv.nm, s.rms_ms, s.tail40_ms, s.preecho_db);
+        std::printf("KV %s spread_%s_rmsms=%.4f spread_%s_tailms=%.3f spread_%s_pre=%.2f\n",
+                    name.c_str(), cv.nm, s.rms_ms, cv.nm, s.tail40_ms, cv.nm, s.preecho_db);
+    }
+
+    // 4) musical noise: static mask + steady tone -> output modulation depth
     {
         DUT dut = factory(bands_for(curve_tilt));
         const int n = (int)SR; auto in = sine(1000.0, 0.3, n, SR);
@@ -167,11 +177,40 @@ static void run_suite(const std::string& name,
     }
 }
 
+// Musical noise under a MOVING mask: steady 1 kHz tone while the whole curve
+// sweeps flat↔tilt at modf Hz. Clean AM should put sidebands only within a few
+// Hz of f0; frame-rate "zipper" shows up tens–hundreds of Hz out.
+template <class EQ>
+static double moving_mask_spur(double modf) {
+    EQ eq; eq.reset(cfg());
+    const int n = (int)SR * 2; const double f0 = 1000.0;
+    auto in = sine(f0, 0.3, n, SR);
+    std::vector<float> out(n, 0.f);
+    auto flatb = bands_for(curve_flat), tiltb = bands_for(curve_tilt);
+    std::vector<float> bands(NB);
+    const int B = 128;
+    for (int i = 0; i + B <= n; i += B) {
+        const double lfo = 0.5 * (1.0 + std::sin(2.0 * kPi * modf * i / SR));
+        for (int b = 0; b < NB; ++b) bands[b] = (float)(flatb[b] + lfo * (tiltb[b] - flatb[b]));
+        eq.set_params(bands.data(), NB);
+        eq.process(&in[i], &out[i], B);
+    }
+    return spurious_sidebands_db(out, f0, SR, n / 3);
+}
+
 int main() {
     std::printf("Auto-EQ sonic harness — SR=%.0f, %d bands, span [%.0f,%.0f] dB\n", SR, NB, MIN_DB, MAX_DB);
     run_suite("baseline (STFT min-phase mask)", make_autoeq, /*reported*/2048,
               [] { return cpu_ns_per_sample<nablafx::SpectralMaskEq>(bands_for(curve_tilt)); });
     run_suite("candidate (min-phase IIR bank)", make_autoeq_iir, /*reported*/0,
               [] { return cpu_ns_per_sample<nablafx::IirFilterbankEq>(bands_for(curve_tilt)); });
+
+    std::printf("\n== Musical noise under a MOVING mask (1k tone, curve sweep) ==\n");
+    std::printf("  %-10s %12s %12s\n", "sweep", "STFT", "IIR");
+    for (double mf : {1.0, 3.0, 8.0}) {
+        const double a = moving_mask_spur<nablafx::SpectralMaskEq>(mf);
+        const double b = moving_mask_spur<nablafx::IirFilterbankEq>(mf);
+        std::printf("  %6.0f Hz  %10.1f dB %10.1f dB   (Δ=%.1f)\n", mf, a, b, b - a);
+    }
     return 0;
 }

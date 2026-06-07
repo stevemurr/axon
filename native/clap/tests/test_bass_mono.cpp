@@ -118,6 +118,58 @@ void test_mono_input_unchanged() {
     std::fprintf(stderr, "[mono]  PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 5: prepare() with sample_rate == 0 must not divide by zero.
+//   Bug: prepare() assigned sr_ = sample_rate unguarded, so design_() computed
+//   w0 = 2*pi*fc/0 = inf, yielding NaN/inf filter coefficients that poison the
+//   output. The fix clamps a non-positive rate to a safe 44100.0.
+//   With the bug present, process() produces non-finite samples → asserts fire.
+// ---------------------------------------------------------------------------
+void test_prepare_zero_sample_rate() {
+    const int N = kSR;
+    auto l = sine(50.0, 0.5, N);          // hard-panned 50 Hz
+    std::vector<float> r(N, 0.f);
+
+    nablafx::BassMono bm;
+    bm.prepare(0.0);                      // <-- the previously-broken path
+    bm.set_cutoff(250.f);
+    bm.process(l.data(), r.data(), N);
+
+    // Pre-fix this fails: inf/NaN coeffs propagate non-finite samples.
+    assert(finite(l.data(), N) && finite(r.data(), N));
+
+    // And the clamped 44100 fallback must still behave like a real bass-mono:
+    // low-frequency width collapses just as in test_low_freq_collapses().
+    const int skip = kSR / 10;
+    const double side_out = side_rms(l.data(), r.data(), N, skip);
+    std::fprintf(stderr, "[sr0]   side_out=%.4f (finite ok, want <0.05)\n", side_out);
+    assert(side_out < 0.05);              // sane coeffs, not a dead/garbage filter
+    std::fprintf(stderr, "[sr0]   PASS\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: prepare() with a negative sample_rate is likewise clamped.
+//   A negative rate gave a finite-but-wrong w0 (negative), corrupting the
+//   filter; the fix routes any non-positive rate to 44100.0.
+// ---------------------------------------------------------------------------
+void test_prepare_negative_sample_rate() {
+    const int N = kSR;
+    auto l = sine(50.0, 0.5, N);
+    std::vector<float> r(N, 0.f);
+
+    nablafx::BassMono bm;
+    bm.prepare(-48000.0);                 // <-- non-positive, must be clamped
+    bm.set_cutoff(250.f);
+    bm.process(l.data(), r.data(), N);
+
+    assert(finite(l.data(), N) && finite(r.data(), N));
+    const int skip = kSR / 10;
+    const double side_out = side_rms(l.data(), r.data(), N, skip);
+    std::fprintf(stderr, "[srNeg] side_out=%.4f (finite ok, want <0.05)\n", side_out);
+    assert(side_out < 0.05);
+    std::fprintf(stderr, "[srNeg] PASS\n");
+}
+
 }  // namespace
 
 int main() {
@@ -125,6 +177,8 @@ int main() {
     test_high_freq_preserved();
     test_mono_sum_preserved();
     test_mono_input_unchanged();
+    test_prepare_zero_sample_rate();
+    test_prepare_negative_sample_rate();
     std::fprintf(stderr, "ALL BASS-MONO TESTS PASSED\n");
     return 0;
 }

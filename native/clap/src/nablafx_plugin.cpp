@@ -247,14 +247,18 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
 
     plug->ring_buffers.assign(plug->channels, std::vector<float>(plug->ring_len, 0.0f));
     plug->control_values.assign(plug->meta->num_controls, 0.0f);
-    for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
+    for (size_t i = 0; i < plug->meta->controls.size() && i < plug->control_values.size(); ++i) {
         plug->control_values[i] = plug->meta->controls[i].def;
     }
 
     const std::string model_path = g_state->model_onnx_path;
     for (int ch = 0; ch < plug->channels; ++ch) {
-        plug->sessions[ch] = std::make_unique<OrtSession>(
-            *g_state->ort_env, model_path, *plug->meta, static_cast<int>(max_frames));
+        try {
+            plug->sessions[ch] = std::make_unique<OrtSession>(
+                *g_state->ort_env, model_path, *plug->meta, static_cast<int>(max_frames));
+        } catch (const std::exception&) {
+            return false;
+        }
     }
 
     plug->activated = true;
@@ -291,7 +295,7 @@ static void apply_events_(Plugin* plug, const clap_input_events_t* in_events) {
         if (hdr->space_id != CLAP_CORE_EVENT_SPACE_ID) continue;
         if (hdr->type != CLAP_EVENT_PARAM_VALUE) continue;
         const auto* pv = reinterpret_cast<const clap_event_param_value_t*>(hdr);
-        for (size_t k = 0; k < plug->meta->controls.size(); ++k) {
+        for (size_t k = 0; k < plug->meta->controls.size() && k < plug->control_values.size(); ++k) {
             if (param_id_for(plug->meta->effect_name, plug->meta->controls[k].id) == pv->param_id) {
                 plug->control_values[k] = static_cast<float>(pv->value);
                 break;
@@ -305,6 +309,7 @@ static void apply_events_(Plugin* plug, const clap_input_events_t* in_events) {
 static float normalize_ctl_(const ControlSpec& c, float v) {
     const float denom = (c.max - c.min);
     if (denom == 0.0f) return 0.0f;
+    v = std::clamp(v, c.min, c.max);
     return (v - c.min) / denom;
 }
 
@@ -337,7 +342,7 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
 
         // fill controls snapshot
         float* ctl_buf = session.controls_buffer();
-        for (int k = 0; k < plug->meta->num_controls; ++k) {
+        for (int k = 0; k < plug->meta->num_controls && k < (int)plug->meta->controls.size(); ++k) {
             ctl_buf[k] = normalize_ctl_(plug->meta->controls[k], plug->control_values[k]);
         }
 

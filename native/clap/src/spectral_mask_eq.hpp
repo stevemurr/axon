@@ -336,7 +336,17 @@ private:
                       norm_ring_.data(), 1, static_cast<vDSP_Length>(seg2));
         }
         out_write_ = (out_write_ + hop_) % ring_sz;
-        out_avail_ += hop_;
+        // Guard against ring overflow: if process() falls behind frame
+        // generation, out_avail_ must never exceed the ring capacity, or
+        // out_read_ would chase out_write_ into samples currently being
+        // written by the vDSP_vadd OLA above. Clamp instead of letting the
+        // counter grow unbounded; the oldest unread samples are effectively
+        // dropped (graceful degradation under stall).
+        if (out_avail_ + hop_ <= ring_sz) {
+            out_avail_ += hop_;
+        } else {
+            out_avail_ = ring_sz;
+        }
     }
 
     // Build a minimum-phase per-bin filter from a magnitude vector

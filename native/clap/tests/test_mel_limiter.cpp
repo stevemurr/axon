@@ -571,6 +571,118 @@ void test_lookahead_low_distortion() {
     std::fprintf(stderr, "[lookahead]  PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 14: per-hop bin-gain scratch buffer is reused correctly across calls
+//
+// Regression for promoting the per-hop per-bin gain scratch from a heap-
+// allocated `std::vector<float> bin_gain_arr(n_freq_, 0.f)` inside process()
+// to a pre-allocated member `bin_gain_arr_`. The contract: the member is
+// pre-sized in init() and cleared (std::fill) before use each hop, so reusing
+// it across process() calls must produce byte-identical output to processing
+// the same signal in one shot. If the buffer were not properly cleared/reused
+// (e.g. carried stale gains from a previous call's last hop, or were left
+// mis-sized), call-boundary outputs would diverge from the single-call run.
+//
+// This drives the hop loop many times across many process() invocations of
+// varied block sizes, exactly exercising the reused-member path that replaced
+// the per-call allocation.
+// ---------------------------------------------------------------------------
+void test_bin_gain_scratch_reuse_block_invariance() {
+    const float ceiling = 0.5f;
+    const int   N       = 4 * kSR;
+    // Hot, spectrally rich signal so the water-filling solver runs and the
+    // per-bin gain scratch is actively written every hop (not an early-out).
+    auto src = make_pink(N, 3.0 * ceiling);
+
+    auto p = default_params(ceiling);
+    p.drive_lin = std::pow(10.f, 6.f / 20.f);
+
+    // Reference: one big process() call.
+    nablafx::MelLimiter ref; ref.init(kSR);
+    std::vector<float> out_ref(src);
+    ref.process(out_ref.data(), nullptr, 1, N, p);
+    assert(all_finite(out_ref.data(), N));
+
+    // Chunked: many process() calls of awkward, varying sizes. Each call
+    // re-enters process() and reuses the SAME member scratch buffer; the only
+    // way the per-hop fill+reuse is correct is if this matches the reference
+    // sample-for-sample. Sizes are deliberately not multiples of kHopSize so
+    // hop boundaries straddle call boundaries.
+    nablafx::MelLimiter chk; chk.init(kSR);
+    std::vector<float> out_chk(src);
+    const int sizes[] = {1, 7, 13, 64, 100, 255, 256, 257, 333, 1000};
+    int pos = 0, si = 0;
+    while (pos < N) {
+        int blk = sizes[si % (int)(sizeof(sizes) / sizeof(sizes[0]))];
+        if (pos + blk > N) blk = N - pos;
+        chk.process(out_chk.data() + pos, nullptr, 1, blk, p);
+        pos += blk; ++si;
+    }
+    assert(all_finite(out_chk.data(), N));
+
+    double max_err = 0.0;
+    for (int i = 0; i < N; ++i)
+        max_err = std::max(max_err,
+            std::abs(static_cast<double>(out_chk[i]) -
+                     static_cast<double>(out_ref[i])));
+
+    std::fprintf(stderr,
+        "[scratch]    max |chunked - single| = %.3e (want exactly 0)\n", max_err);
+    // Reused, per-hop-cleared scratch ⇒ identical math ⇒ bit-exact result.
+    assert(max_err == 0.0);
+    std::fprintf(stderr, "[scratch]    PASS\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: the bin-gain scratch is sized/cleared by init(), not by the first
+// process() call, and carries no stale state between instances.
+//
+// The old code sized AND zero-filled the scratch on every process() call via
+// the vector ctor. The fix sizes it once in init() and relies on the per-hop
+// std::fill for zeroing. This verifies init() leaves the limiter in a clean,
+// fully-allocated state by:
+//   (a) running a loud signal immediately after init() (no warm-up call) and
+//       requiring finite output + the hard ceiling to hold — a mis-sized or
+//       unallocated member scratch would read/write out of bounds or skip the
+//       gain apply, breaking the ceiling on the very first hops; and
+//   (b) confirming two independently-init()'d instances yield identical output
+//       for the same input — no construction-time state leaks through.
+// ---------------------------------------------------------------------------
+void test_bin_gain_scratch_init_state() {
+    const float ceiling = 0.5f;
+    const int   N       = 2 * kSR;
+    auto src = make_pink(N, 4.0 * ceiling, 7);
+
+    auto p = default_params(ceiling);
+    p.drive_lin = std::pow(10.f, 6.f / 20.f);
+
+    // (a) First-call correctness straight after init() (no prior process()).
+    nablafx::MelLimiter a; a.init(kSR);
+    std::vector<float> ba(src);
+    a.process(ba.data(), nullptr, 1, N, p);
+    assert(all_finite(ba.data(), N));
+    double pk = peak_abs(ba.data(), N);
+    std::fprintf(stderr,
+        "[scratch2]   first-call peak=%.4f ceiling=%.4f (want <= ceiling)\n",
+        pk, static_cast<double>(ceiling));
+    assert(pk <= ceiling + 1e-4);
+
+    // (b) Two fresh instances must agree bit-for-bit (no leaked member state).
+    nablafx::MelLimiter b; b.init(kSR);
+    std::vector<float> bb(src);
+    b.process(bb.data(), nullptr, 1, N, p);
+    assert(all_finite(bb.data(), N));
+
+    double max_err = 0.0;
+    for (int i = 0; i < N; ++i)
+        max_err = std::max(max_err,
+            std::abs(static_cast<double>(ba[i]) - static_cast<double>(bb[i])));
+    std::fprintf(stderr,
+        "[scratch2]   max |instA - instB| = %.3e (want exactly 0)\n", max_err);
+    assert(max_err == 0.0);
+    std::fprintf(stderr, "[scratch2]   PASS\n");
+}
+
 } // namespace
 
 int main() {
@@ -587,6 +699,8 @@ int main() {
     test_adaptive_brickwall_release();
     test_adaptive_brickwall_attack();
     test_lookahead_low_distortion();
+    test_bin_gain_scratch_reuse_block_invariance();
+    test_bin_gain_scratch_init_state();
     std::fprintf(stderr, "ALL TESTS PASSED\n");
     return 0;
 }

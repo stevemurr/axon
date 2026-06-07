@@ -159,6 +159,52 @@ add_executable(test_widener tests/test_widener.cpp)
 target_include_directories(test_widener PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_widener PRIVATE -UNDEBUG)
 
+# -----------------------------------------------------------------------------
+# Regression tests added by the bug-hunt workflow. Each guards a confirmed,
+# fixed bug; on the pre-fix code the matching "reject"/overflow case fails.
+# -----------------------------------------------------------------------------
+
+# test_meta — load_meta/parse_dsp_block input-validation guards (needs nlohmann).
+add_executable(test_meta tests/test_meta.cpp src/meta.cpp)
+target_include_directories(test_meta PRIVATE ${CMAKE_SOURCE_DIR}/src ${JSON_INCLUDE_DIR})
+target_compile_options(test_meta PRIVATE -UNDEBUG)
+
+# test_composite_meta_validate — axon_meta.json loader guards (lookahead_ms>=0).
+add_executable(test_composite_meta_validate
+    tests/test_composite_meta_validate.cpp
+    src/composite_meta.cpp
+    src/meta.cpp
+)
+target_include_directories(test_composite_meta_validate PRIVATE ${CMAKE_SOURCE_DIR}/src ${JSON_INCLUDE_DIR})
+target_compile_options(test_composite_meta_validate PRIVATE -UNDEBUG)
+
+# test_nablafx_plugin — control-snapshot bounds + clamped normalization logic.
+add_executable(test_nablafx_plugin tests/test_nablafx_plugin.cpp src/param_id.cpp)
+target_include_directories(test_nablafx_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_nablafx_plugin PRIVATE -UNDEBUG)
+
+# test_ort_session — run() input-length precondition (mirrors run()'s arithmetic).
+add_executable(test_ort_session tests/test_ort_session.cpp)
+target_include_directories(test_ort_session PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_ort_session PRIVATE -UNDEBUG)
+
+# test_autoeq_param_guard — num_control_params <= 64 stack-buffer guard.
+add_executable(test_autoeq_param_guard tests/test_autoeq_param_guard.cpp)
+target_include_directories(test_autoeq_param_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_autoeq_param_guard PRIVATE -UNDEBUG)
+target_link_libraries(test_autoeq_param_guard PRIVATE "-framework Accelerate")
+
+# test_axon_gui_js — WKWebView JS-bridge string builders (no fixed-buffer overflow).
+add_executable(test_axon_gui_js tests/test_axon_gui_js.cpp)
+target_include_directories(test_axon_gui_js PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_axon_gui_js PRIVATE -UNDEBUG)
+
+# test_spectral_mask_eq — STFT mask EQ OLA output-ring overflow clamp.
+add_executable(test_spectral_mask_eq tests/test_spectral_mask_eq.cpp)
+target_include_directories(test_spectral_mask_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_spectral_mask_eq PRIVATE -UNDEBUG)
+target_link_libraries(test_spectral_mask_eq PRIVATE "-framework Accelerate")
+
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
     target_include_directories(axon_bench PRIVATE

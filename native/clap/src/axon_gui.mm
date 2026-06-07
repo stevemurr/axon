@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "axon_gui.h"
+#include "axon_gui_js.hpp"
 
 // ---------------------------------------------------------------------------
 // Forward declarations
@@ -151,23 +152,7 @@ static std::string read_file(const std::string& path) {
 // Helper: JSON-escape a C string
 // ---------------------------------------------------------------------------
 
-static std::string json_escape(const char* s) {
-    std::string out;
-    out.reserve(64);
-    out += '"';
-    for (const char* p = s; *p; ++p) {
-        switch (*p) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out += *p;     break;
-        }
-    }
-    out += '"';
-    return out;
-}
+using axon::json_escape;
 
 // ---------------------------------------------------------------------------
 // Public C API implementation
@@ -419,12 +404,8 @@ void axon_gui_notify_param(AxonGUIState* gui, const char* param_id, float value)
 
     auto blk = ^{
         if (!gui->web_view || !gui->page_loaded) return;
-        char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "axonSetParam(%s,%g);",
-                 json_escape(id_str.c_str()).c_str(),
-                 (double)val);
-        NSString* js = [NSString stringWithUTF8String:buf];
+        std::string js_str = axon::build_set_param_js(id_str.c_str(), val);
+        NSString* js = [NSString stringWithUTF8String:js_str.c_str()];
         [gui->web_view evaluateJavaScript:js completionHandler:nil];
     };
 

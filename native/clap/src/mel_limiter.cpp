@@ -30,6 +30,9 @@ void MelLimiter::init(int sample_rate) {
     n_freq_   = kFFTSize / 2 + 1;
     ola_scale_ = 1.f / (2.f * static_cast<float>(kFFTSize));
 
+    // Pre-allocate per-bin gain scratch so process() never allocates.
+    bin_gain_arr_.assign(n_freq_, 0.f);
+
     // Hann window.
     window_.resize(kFFTSize);
     for (int n = 0; n < kFFTSize; ++n)
@@ -289,8 +292,8 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
         brick_atk_ = std::exp(-1.f / atk_samps);
     }
 
-    // Per-bin gain scratch — updated each hop.
-    std::vector<float> bin_gain_arr(n_freq_, 0.f);
+    // Per-bin gain scratch — pre-allocated in init(); reused/cleared each hop.
+    auto& bin_gain_arr = bin_gain_arr_;
 
     for (int i = 0; i < n_samples; ++i) {
 

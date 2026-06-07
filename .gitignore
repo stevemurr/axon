@@ -31,3 +31,7 @@ wandb/
 *.ckpt
 *.pt
 !weights/static_*.pt
+
+# Sonic harness binaries (sources tracked)
+native/clap/bench/sonic/harness_*
+!native/clap/bench/sonic/harness_*.cpp

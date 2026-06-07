@@ -225,6 +225,43 @@ void test_no_dc() {
     std::fprintf(stderr, "[dc]     PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 7: regression baseline (known-answer test). Locks the exact stereo tail
+//         of a fixed input through fixed params so a future perf refactor can't
+//         silently drift it. Guards the line-write wrap change (modulo -> branch
+//         wrap), which null-tested bit-identical. Bit-stable across -O2/-O3.
+// ---------------------------------------------------------------------------
+void test_regression_kat() {
+    const int N = 8192;
+    std::vector<float> l(N), r(N);
+    for (int i = 0; i < N; ++i) {
+        l[i] = (float)(0.5 * std::sin(2.0 * kPi * 220.0 * i / kSR));
+        r[i] = (float)(0.5 * std::sin(2.0 * kPi * 330.0 * i / kSR));
+    }
+    nablafx::Reverb rv; rv.prepare(kSR);
+    rv.set_params(/*mix*/0.4f, /*size*/0.6f, /*width*/0.7f, /*damp*/6000.f, /*lowcut*/200.f);
+    rv.process(l.data(), r.data(), N);
+    assert(finite(l.data(), N) && finite(r.data(), N));
+
+    const double kRefRmsL = 3.584983289770e-01;
+    const double kRefRmsR = 3.536465769015e-01;
+    const int   kIdx[4]  = {1000, 3000, 5000, 7000};
+    const float kRefL[4] = {-3.558884561e-02f, -1.105148867e-01f,
+                            -1.745375693e-01f, -2.445018739e-01f};
+    const float kRefR[4] = { 5.332682654e-02f,  1.561866999e-01f,
+                             2.552727759e-01f,  3.340672255e-01f};
+
+    const double rmsL = rms(l.data(), 0, N), rmsR = rms(r.data(), 0, N);
+    std::fprintf(stderr, "[kat]    rmsL=%.12e rmsR=%.12e\n", rmsL, rmsR);
+    assert(std::fabs(rmsL - kRefRmsL) < 1e-9);
+    assert(std::fabs(rmsR - kRefRmsR) < 1e-9);
+    for (int j = 0; j < 4; ++j) {
+        assert(std::fabs((double)l[kIdx[j]] - kRefL[j]) < 1e-5);
+        assert(std::fabs((double)r[kIdx[j]] - kRefR[j]) < 1e-5);
+    }
+    std::fprintf(stderr, "[kat]    PASS\n");
+}
+
 }  // namespace
 
 int main() {
@@ -234,6 +271,7 @@ int main() {
     test_lowcut();
     test_width_mono_compat();
     test_no_dc();
+    test_regression_kat();
     std::fprintf(stderr, "ALL REVERB TESTS PASSED\n");
     return 0;
 }

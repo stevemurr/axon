@@ -217,6 +217,47 @@ void test_regression_kat() {
     std::fprintf(stderr, "[kat]    PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 6: polynomial (Chebyshev-class) shaper — defining property is that it
+//         generates NO harmonics above the 3rd (u² → pure 2nd, u³ → pure 3rd),
+//         unlike the biased-tanh which leaks 4th/5th/6th. At a musical drive
+//         (input stays within ±1 so the safety clamp never engages) the 4th+
+//         must sit at the noise floor. Bypass identity (amount==0) still holds.
+// ---------------------------------------------------------------------------
+void test_polynomial_shaper() {
+    const int N = 1 << 15;
+    const double f = 4000.0;     // above the 3 kHz band HPF
+    const int skip = N / 4;
+
+    auto x = sine(f, 0.3, N);    // 0.3 * ~unity drive → |u| < 1 (no clamp)
+    nablafx::Exciter ex; ex.prepare(kSR);
+    ex.set_shaper(nablafx::Exciter::Shaper::Polynomial);
+    ex.set_params(/*amount*/1.0f, 3000.f, /*drive*/3.f, /*char*/0.5f, 19000.f);
+    ex.process(x.data(), nullptr, N);
+    assert(finite(x.data(), N));
+
+    const double h1 = goertzel(x.data(), N, skip, f);
+    const double h2 = goertzel(x.data(), N, skip, 2 * f);
+    const double h3 = goertzel(x.data(), N, skip, 3 * f);
+    const double h4 = goertzel(x.data(), N, skip, 4 * f);
+    const double h5 = goertzel(x.data(), N, skip, 5 * f);
+    std::fprintf(stderr, "[poly]  h2=%.3e h3=%.3e h4=%.3e h5=%.3e (h4,h5 << h2)\n", h2, h3, h4, h5);
+    assert(h2 > 1e-4 && h3 > 1e-4);          // 2nd and 3rd are generated
+    assert(h4 < h2 * 1e-3);                   // 4th >60 dB below the 2nd (absent)
+    assert(h5 < h2 * 1e-3);                   // 5th likewise
+    (void)h1;
+
+    // amount == 0 is still a bit-identical bypass in polynomial mode.
+    auto y = sine(5000.0, 0.4, 4096); std::vector<float> y0(y);
+    nablafx::Exciter ex2; ex2.prepare(kSR);
+    ex2.set_shaper(nablafx::Exciter::Shaper::Polynomial);
+    ex2.set_params(0.f, 3000.f, 6.f, 0.5f, 18000.f);
+    ex2.process(y.data(), nullptr, (int)y.size());
+    double md = 0; for (size_t i = 0; i < y.size(); ++i) md = std::max(md, (double)std::fabs(y[i] - y0[i]));
+    assert(md == 0.0);
+    std::fprintf(stderr, "[poly]  PASS\n");
+}
+
 }  // namespace
 
 int main() {
@@ -225,6 +266,7 @@ int main() {
     test_no_dc();
     test_antialias();
     test_regression_kat();
+    test_polynomial_shaper();
     std::fprintf(stderr, "ALL EXCITER TESTS PASSED\n");
     return 0;
 }

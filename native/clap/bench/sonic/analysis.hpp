@@ -151,22 +151,25 @@ inline int measured_latency(const DUT& dut, int probe_n = 8192, int impulse_at =
     return peak - impulse_at;
 }
 
-// ---- calibrate a scalar drive so harmonic_db(h=2 at f0) hits target_db -----
-// factory(drive) returns a configured DUT. Binary search in drive.
+// ---- calibrate a scalar drive so THD(f0) hits target_thd_percent -----------
+// "Matched effect" = same total harmonic energy added, which is well-posed for
+// any Character (unlike matching a single harmonic that may be absent). THD is
+// monotonic in drive over the useful range, so binary search converges.
+// factory(drive_db) returns a configured DUT.
 inline double calibrate_drive(const std::function<DUT(double)>& factory,
-                              double f0, double sr, double target_h2_db,
-                              double lo = 0.0, double hi = 48.0, int iters = 24) {
-    auto h2 = [&](double drv) {
+                              double f0, double sr, double target_thd_percent,
+                              double lo = -36.0, double hi = 48.0, int iters = 28) {
+    auto thd_pct = [&](double drv) {
         DUT d = factory(drv);
         const int n = (int)(sr * 0.5);
         std::vector<float> in(n), out(n);
         for (int i = 0; i < n; ++i) in[i] = (float)(0.25 * std::sin(2.0 * kPi * f0 * i / sr));
         d(in.data(), out.data(), n);
-        return harmonic_db(out, f0, 2, sr);
+        return thd(out, f0, sr).percent;
     };
     for (int i = 0; i < iters; ++i) {
         const double mid = 0.5 * (lo + hi);
-        (h2(mid) < target_h2_db ? lo : hi) = mid;
+        (thd_pct(mid) < target_thd_percent ? lo : hi) = mid;
     }
     return 0.5 * (lo + hi);
 }

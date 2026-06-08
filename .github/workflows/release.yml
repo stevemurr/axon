@@ -1,0 +1,114 @@
+name: Release
+
+# Cut a release: build the composite Axon .clap from the committed bundle
+# (weights/axon_bundle/ — needs no Python/torch), gate on the unit tests, zip
+# it, and publish a GitHub Release with a checksum.
+#
+# Trigger by pushing a semver tag (the `scripts/cut_release.sh` helper does
+# this for you), or manually via the Actions tab (workflow_dispatch).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to publish, e.g. v1.2.3 (created from the selected ref if it doesn't exist)."
+        required: true
+
+permissions:
+  contents: write # create the GitHub Release + upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: build Axon.clap + publish
+    runs-on: macos-14 # Apple Silicon; the build is arm64-only (see ci.yml).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME}"            # the pushed tag, e.g. v1.2.3
+          else
+            v="${{ inputs.tag }}"
+          fi
+          case "$v" in
+            v[0-9]*) : ;;
+            *) echo "::error::tag '$v' must look like v1.2.3"; exit 1 ;;
+          esac
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building release $v"
+
+      - name: Cache fetched deps (CLAP / json / ONNX Runtime)
+        uses: actions/cache@v4
+        with:
+          path: native/clap/build/_deps
+          key: deps-${{ runner.os }}-arm64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
+          restore-keys: |
+            deps-${{ runner.os }}-arm64-
+
+      # build.sh configures + builds the dylibs (and, as part of `all`, every
+      # test_* target) then stages + ad-hoc-codesigns the .clap bundle.
+      - name: Build Axon .clap from the committed bundle
+        run: bash native/clap/build.sh axon "$PWD/weights/axon_bundle" "$PWD/dist/Axon.clap"
+
+      - name: Gate on unit tests
+        working-directory: native/clap/build
+        run: |
+          set -u
+          ran=0
+          for t in test_*; do
+            [ -x "$t" ] || continue
+            ran=$((ran + 1))
+            ./"$t" || { echo "::error::release blocked: $t failed"; exit 1; }
+          done
+          [ "$ran" -gt 0 ] || { echo "::error::no tests ran"; exit 1; }
+          echo "all $ran unit tests passed"
+
+      - name: Package + checksum
+        id: pkg
+        working-directory: dist
+        run: |
+          zip="Axon-${{ steps.ver.outputs.version }}-macos-arm64.clap.zip"
+          # ditto is the macOS-correct archiver: it preserves the bundle's
+          # internal symlink (libonnxruntime.dylib) and the codesignature, which
+          # a plain `zip` mangles.
+          ditto -c -k --sequesterRsrc --keepParent Axon.clap "$zip"
+          shasum -a 256 "$zip" > SHA256SUMS.txt
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          ls -lh "$zip"; cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: Axon ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/${{ steps.pkg.outputs.zip }}
+            dist/SHA256SUMS.txt
+          body: |
+            **Axon — CLAP plugin for macOS (Apple Silicon / arm64).**
+
+            Build: composite Axon (auto-EQ + saturator + SSL comp + leveler + true-peak ceiling).
+
+            ### Install
+            1. Unzip and move `Axon.clap` to `~/Library/Audio/Plug-Ins/CLAP/`.
+            2. This build is **ad-hoc codesigned, not notarized**. On first load,
+               clear the Gatekeeper quarantine flag:
+               ```sh
+               xattr -dr com.apple.quarantine "Axon.clap"
+               ```
+
+            Verify the download against `SHA256SUMS.txt`:
+            ```sh
+            shasum -a 256 -c SHA256SUMS.txt
+            ```

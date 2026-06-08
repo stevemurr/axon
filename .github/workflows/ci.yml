@@ -1,0 +1,86 @@
+name: CI
+
+# Build the CLAP plugins and run the C++ unit tests.
+#
+# The whole native build is Apple-Silicon-only by design:
+#   - native/clap/CMakeLists.txt FATAL_ERRORs on non-Apple and forces arm64
+#   - cmake/FetchOnnxRuntime.cmake downloads the osx-ARM64 ONNX Runtime tarball
+# so CI MUST run on an Apple-Silicon runner. macos-14 and macos-15 are arm64;
+# macos-13 is Intel and would fail to configure. Nothing here "expects" Apple
+# Silicon in a fragile way — the entire toolchain targets it natively.
+
+on:
+  push:
+    branches: [master, "feat/**", "fix/**", "chore/**"]
+    paths:
+      - "native/clap/**"
+      - "weights/axon_bundle/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "native/clap/**"
+      - "weights/axon_bundle/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build + unit tests (macOS arm64)
+    runs-on: macos-14 # Apple Silicon. macos-15 / macos-latest also work.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          cmake --version
+          clang --version | head -1
+          echo "arch: $(uname -m)"
+
+      # CLAP, nlohmann/json (git) and ONNX Runtime (release tarball) are pulled
+      # at configure time into build/_deps. Cache them keyed on the Fetch files.
+      - name: Cache fetched deps (CLAP / json / ONNX Runtime)
+        uses: actions/cache@v4
+        with:
+          path: native/clap/build/_deps
+          key: deps-${{ runner.os }}-arm64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
+          restore-keys: |
+            deps-${{ runner.os }}-arm64-
+
+      - name: Configure
+        run: >
+          cmake -S native/clap -B native/clap/build
+          -G "Unix Makefiles"
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (both plugin dylibs + all unit tests)
+        run: cmake --build native/clap/build -j
+
+      - name: Run unit tests
+        working-directory: native/clap/build
+        run: |
+          set -u
+          ran=0; fail=0
+          for t in test_*; do
+            [ -x "$t" ] || continue
+            ran=$((ran + 1))
+            echo "::group::$t"
+            if ./"$t"; then
+              echo "PASS $t"
+            else
+              echo "::error title=unit test failed::$t exited non-zero"
+              fail=$((fail + 1))
+            fi
+            echo "::endgroup::"
+          done
+          echo "ran=$ran  failed=$fail"
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::no test_* binaries were found — build likely changed"
+            exit 1
+          fi
+          exit "$fail"

@@ -1856,10 +1856,19 @@ void flush_chain_block_(Plugin& plug,
     // LUFS loop catches up.
     const float drive_db = 20.f * std::log10(std::max(1e-6f, amt.ml_drive_lin));
     const float ff_db    = drive_db * amt.ml_wet;
-    const float ag = plug.auto_gain.process(amt.auto_gain_on,
-                                            plug.meter_in.readout().lufs_s,
-                                            plug.meter_out.readout().lufs_s,
-                                            ff_db);
+    float ag;
+    if (amt.exc_solo) {
+        // HARMONICS "Listen" is an audition: the output drops to the (quiet) wet,
+        // so we FREEZE Auto Gain (hold its current makeup) instead of letting it
+        // chase the audition — otherwise it slowly swells up during the press and
+        // leaves the makeup cranked on release (a loud spike when the mix returns).
+        ag = std::pow(10.f, plug.auto_gain.gain_db() / 20.f);
+    } else {
+        ag = plug.auto_gain.process(amt.auto_gain_on,
+                                    plug.meter_in.readout().lufs_s,
+                                    plug.meter_out.readout().lufs_s,
+                                    ff_db);
+    }
     if (ag != 1.f) {
         for (uint32_t ch=0;ch<n_ch;++ch) {
             float* ob = plug.chains[ch].out_buf.data();

@@ -222,6 +222,13 @@ target_include_directories(test_spectral_mask_eq PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_compile_options(test_spectral_mask_eq PRIVATE -UNDEBUG)
 target_link_libraries(test_spectral_mask_eq PRIVATE "-framework Accelerate")
 
+# test_adaptive_eq — AdaptiveEqController (productionized C1→C2 cascade auto-EQ):
+# stability, adaptivity (no mode collapse), tonal direction, determinism, bypass.
+add_executable(test_adaptive_eq tests/test_adaptive_eq.cpp)
+target_include_directories(test_adaptive_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_adaptive_eq PRIVATE -UNDEBUG)
+target_link_libraries(test_adaptive_eq PRIVATE "-framework Accelerate")
+
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
     target_include_directories(axon_bench PRIVATE

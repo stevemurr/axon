@@ -65,8 +65,19 @@ public:
 
     void set_amount(float a) { amount_ = a < 0.f ? 0.f : (a > 1.f ? 1.f : a); }
 
+    // Clear filter/delay STATE only — must NOT wipe the band coefficients
+    // (a host reset() after activate would otherwise leave every band at
+    // passthrough, since set_amount doesn't re-design and configure() runs only
+    // once). Coefficients are (re)built by prepare()/configure() via design_().
     void reset() {
-        for (auto& c : ch_) c = Channel{};
+        for (auto& c : ch_) {
+            c.up_hist.fill(0.0); c.up_idx = 0;
+            c.dn_hist.fill(0.0); c.dn_idx = 0;
+            c.dry_ring.fill(0.0); c.dry_idx = 0;
+            for (auto& b : c.hpf) b.clear();
+            for (auto& b : c.lpf) b.clear();
+            c.wet_hpf.clear();
+        }
     }
 
     // In place, stereo. amount == 0 → bit-identical bypass (and zero wet tap).
@@ -94,6 +105,7 @@ private:
         void set(double nb0, double nb1, double nb2, double na1, double na2) {
             b0 = nb0; b1 = nb1; b2 = nb2; a1 = na1; a2 = na2;
         }
+        void clear() { z1 = z2 = 0; }   // clear STATE only (keeps coefficients)
     };
 
     struct Channel {

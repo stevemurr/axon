@@ -127,6 +127,72 @@ void test_stability() {
     std::fprintf(stderr, "[stab]  PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 5: survives a host reset() — REGRESSION for the bug where reset() wiped
+//         the band coefficients to passthrough (default Biquad b0=1), turning
+//         every narrow band full-range. CLAP hosts call reset() after activate,
+//         so this caused wideband shaping ("noise") + a passthrough wet-HPF that
+//         left a huge u² DC offset (audibly "goes to zero"). After reset the
+//         engine MUST still reject out-of-band content and match its pre-reset
+//         in-band output.
+// ---------------------------------------------------------------------------
+void test_survives_reset() {
+    const int N = 1 << 15; const int skip = N / 4;
+    auto in_band = [&](double f) { std::vector<float> x(N); for (int i = 0; i < N; ++i) x[i] = 0.4f * std::sin(2.0 * kPi * f * i / kSR); return x; };
+
+    nablafx::MultibandExciter mx; mx.prepare(kSR);
+    mx.configure(3500, 16500, 5, 0.5f, 6.f); mx.set_amount(1.f);
+
+    auto pre = in_band(5000.0); std::vector<float> wpre(N);
+    for (int i = 0; i + 128 <= N; i += 128) mx.process(&pre[i], nullptr, 128, &wpre[i]);
+    const double h2_pre = goertzel(wpre, skip, 10000.0);
+
+    mx.reset();   // <-- the host call that used to wipe the bands
+
+    // (a) out-of-band 300 Hz must be REJECTED (presence band starts at 3.5 kHz).
+    auto oob = in_band(300.0); std::vector<float> woob(N);
+    for (int i = 0; i + 128 <= N; i += 128) mx.process(&oob[i], nullptr, 128, &woob[i]);
+    const double oob_2nd = goertzel(woob, skip, 600.0);
+
+    mx.reset();
+    // (b) in-band output must MATCH pre-reset (coefficients preserved).
+    auto post = in_band(5000.0); std::vector<float> wpost(N);
+    for (int i = 0; i + 128 <= N; i += 128) mx.process(&post[i], nullptr, 128, &wpost[i]);
+    const double h2_post = goertzel(wpost, skip, 10000.0);
+
+    std::fprintf(stderr, "[reset] oob 300->600 2nd=%.3e (want ~0)  in-band 2nd pre=%.4e post=%.4e\n",
+                 oob_2nd, h2_pre, h2_post);
+    assert(h2_pre > 1e-4);                       // it was working before
+    assert(oob_2nd < h2_pre * 1e-2);             // out-of-band stays rejected (not passthrough)
+    assert(std::fabs(h2_post - h2_pre) < h2_pre * 1e-3);  // unchanged after reset
+    std::fprintf(stderr, "[reset] PASS\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: the wet contribution (what "Listen"/solo plays) is AUDIBLE — non-zero
+//         AND essentially DC-free. The reset bug left a passthrough wet-HPF, so
+//         the wet was dominated by u² DC (inaudible → "output goes to zero").
+//         Through a reset cycle, the wet must carry real AC energy and ~no DC.
+// ---------------------------------------------------------------------------
+void test_wet_is_audible_ac() {
+    const int N = 1 << 15;
+    std::vector<float> in(N);
+    for (int i = 0; i < N; ++i) in[i] = 0.4f * std::sin(2.0 * kPi * 5000.0 * i / kSR);
+    nablafx::MultibandExciter mx; mx.prepare(kSR);
+    mx.configure(3500, 16500, 5, 0.5f, 6.f); mx.set_amount(1.f);
+    mx.reset();                                   // exercise the post-activate reset path
+    std::vector<float> wet(N);
+    for (int i = 0; i + 128 <= N; i += 128) mx.process(&in[i], nullptr, 128, &wet[i]);
+
+    const int skip = N / 4; double sum = 0, sq = 0; int n = 0;
+    for (int i = skip; i < N; ++i) { sum += wet[i]; sq += (double)wet[i] * wet[i]; ++n; }
+    const double mean = sum / n, rms = std::sqrt(sq / n);
+    std::fprintf(stderr, "[wet]   rms=%.4e dcmean=%.4e (want rms>0, |dc| << rms)\n", rms, mean);
+    assert(rms > 1e-3);                           // there IS excited signal (not zero)
+    assert(std::fabs(mean) < rms * 1e-2);         // DC-free → audible, not "silent" DC
+    std::fprintf(stderr, "[wet]   PASS\n");
+}
+
 }  // namespace
 
 int main() {
@@ -134,6 +200,8 @@ int main() {
     test_harmonics();
     test_imd_reduction();
     test_stability();
+    test_survives_reset();
+    test_wet_is_audible_ac();
     std::fprintf(stderr, "ALL MULTIBAND-EXCITER TESTS PASSED\n");
     return 0;
 }

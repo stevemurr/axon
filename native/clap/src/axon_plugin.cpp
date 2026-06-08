@@ -1214,6 +1214,7 @@ struct AmountSnapshot {
     // (high 2nd+3rd level). Each knob 0..1 is the added-harmonic level for its
     // band; the band freqs / drive / character are fixed internally.
     bool  exc_on;
+    bool  exc_solo;        // momentary: output ONLY the added harmonics (audition)
     float exc_warm, exc_pres;
     // Reverb: RVB_MIX (parallel wet blend, 0 = bypass), RVB_SIZE (room size →
     // RT60), RVB_WIDTH (tail stereo width), RVB_DAMP (tail LPF Hz), RVB_LOWCUT
@@ -1232,6 +1233,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
     float eon=0.f;                                        // harmonics on/off (switch)
+    float esolo=0.f;                                      // momentary "listen" (solo wet)
     float ewarm=0.f, epres=0.f;                           // warmth / presence levels (0..1)
     float rm=0.f,rs=0.30f,rw=0.80f,rd=7000.f,rlc=250.f;  // reverb params
     float won=0.f;                                        // widener on/off (switch)
@@ -1263,6 +1265,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="EXC_ON") eon=v;
         else if(c.id=="EXC_WARM") ewarm=v;
         else if(c.id=="EXC_PRES") epres=v;
+        else if(c.id=="EXC_SOLO") esolo=v;
         else if(c.id=="RVB_MIX") rm=v; else if(c.id=="RVB_SIZE") rs=v;
         else if(c.id=="RVB_WIDTH") rw=v; else if(c.id=="RVB_DAMP") rd=v;
         else if(c.id=="RVB_LOWCUT") rlc=v;
@@ -1292,6 +1295,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.bm_wet  = bmi;
     s.bm_freq = bmf;
     s.exc_on   = (eon >= 0.5f);  // stage on/off toggle
+    s.exc_solo = (esolo >= 0.5f);// momentary: solo the added harmonics
     s.exc_warm = ewarm;          // 0..1 warmth (low-mid 2nd) level
     s.exc_pres = epres;          // 0..1 presence (high 2nd+3rd) level
     s.rvb_mix      = rm;     // 0..1 parallel wet blend (0 = bypass)
@@ -1326,6 +1330,11 @@ void flush_chain_block_(Plugin& plug,
                         const AmountSnapshot& amt) {
 
     std::array<float,kBlockSize> dry{}, wet_a{}, wet_b{};
+    // HARMONICS "Listen": when held, we capture the added-harmonics wet at the
+    // Harmonics stage and substitute it for the output AFTER the chain runs, so
+    // the audition isn't re-gained by the downstream limiter/ceiling.
+    std::array<float,kBlockSize> solo_buf{};
+    bool solo_captured = false;
 
     // Meter the raw plugin input (pre-chain).
     plug.meter_in.process(work_l, (n_ch >= 2 ? work_r : nullptr),
@@ -1745,6 +1754,14 @@ void flush_chain_block_(Plugin& plug,
             plug.exc_pres.set_params(amt.exc_pres, /*hpf*/3500.f, kHarmDriveDb,
                                      /*char*/0.5f, /*tame lpf*/16500.f);
             plug.exc_pres.process(work_l, wr, kBlockSize, wet_b.data());
+            // "Listen" (momentary): capture ONLY the added harmonics (warm +
+            // presence wet). The chain keeps running normally (so stage state
+            // stays continuous); the capture is substituted for the output after
+            // the loop, below — so the audition isn't re-gained by the limiter.
+            if (amt.exc_solo) {
+                for (int i = 0; i < kBlockSize; ++i) solo_buf[i] = wet_a[i] + wet_b[i];
+                solo_captured = true;
+            }
             // Per-band wet-spectrum overlays (mono wet contribution of each band).
             plug.exc_warm_spectrum.push(wet_a.data(), kBlockSize);
             plug.exc_pres_spectrum.push(wet_b.data(), kBlockSize);
@@ -1789,6 +1806,15 @@ void flush_chain_block_(Plugin& plug,
     // When a full 2048-sample frame has accumulated, hand off to the main thread.
     if (plug.spectrum.advance_and_transfer())
         plug.host->request_callback(plug.host);
+
+    // HARMONICS "Listen": substitute the captured added-harmonics for the output
+    // (mono → both channels), bypassing the downstream chain's gain so the user
+    // hears exactly what's being added at its true level. Still passes through the
+    // ceiling below as a safety cap (harmonics are quiet → it won't engage).
+    if (solo_captured) {
+        std::copy_n(solo_buf.data(), kBlockSize, work_l);
+        if (n_ch >= 2) std::copy_n(solo_buf.data(), kBlockSize, work_r);
+    }
 
     // Trim + TruePeakCeiling — always last, not user-reorderable. This is the
     // REAL master; the OUT meter reads it (so driving the limiter shows the
@@ -2335,6 +2361,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"EXC_ON",    "Harmonics",   0.0f,    1.0f,   1.0f,  1.0f, "switch"});
             inject(ControlSpec{"EXC_WARM",  "Warmth",      0.0f,    1.0f,   0.0f,  1.0f, ""});
             inject(ControlSpec{"EXC_PRES",  "Presence",    0.0f,    1.0f,   0.0f,  1.0f, ""});
+            inject(ControlSpec{"EXC_SOLO",  "Listen",      0.0f,    1.0f,   0.0f,  1.0f, "switch"});
             // Transparent mastering room reverb. Defaults make the stage a no-op
             // (RVB_MIX = 0 → bit-identical bypass) so existing bundles that don't
             // declare these still get the controls with safe defaults.

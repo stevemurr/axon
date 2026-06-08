@@ -832,6 +832,35 @@ function buildControl(id) {
 // RENDER CONTROL SURFACE
 // ============================================================
 
+// HARMONICS "LISTEN": press-and-hold to solo the added harmonics (EXC_SOLO is a
+// momentary switch). Held while the mouse is down; released on any window mouseup
+// (so dragging off the button still releases). The window listener is wired once.
+let _excSoloBtn = null;
+function _excSoloSet(on) {
+  if (!_excSoloBtn) return;
+  paramValues['EXC_SOLO'] = on ? 1 : 0;
+  sendParam('EXC_SOLO', on ? 1 : 0);
+  _excSoloBtn.classList.toggle('on', on);
+  const v = _excSoloBtn.parentElement && _excSoloBtn.parentElement.querySelector('.toggle-value');
+  if (v) v.textContent = on ? 'SOLO' : 'hold';
+}
+function buildListenButton() {
+  const wrap = document.createElement('div');
+  wrap.className = 'toggle-wrap';
+  wrap.innerHTML = `
+    <div class="toggle-btn">LISTEN</div>
+    <div class="toggle-label">Solo Harmonics</div>
+    <div class="toggle-value">hold</div>`;
+  _excSoloBtn = wrap.querySelector('.toggle-btn');
+  _excSoloBtn.addEventListener('mousedown', e => { e.preventDefault(); _excSoloSet(true); });
+  if (!window._excSoloWired) {
+    window._excSoloWired = true;
+    window.addEventListener('mouseup', () => _excSoloSet(false));
+    window.addEventListener('blur',    () => _excSoloSet(false));
+  }
+  return wrap;
+}
+
 function renderSurface() {
   const proc = PROCESSORS.find(p => p.id === selectedProc);
   const title = document.getElementById('surface-title');
@@ -851,6 +880,9 @@ function renderSurface() {
     const ctrl = buildControl(id);
     if (ctrl) controls.appendChild(ctrl);
   }
+
+  // HARMONICS: press-and-hold "LISTEN" — momentary solo of the added harmonics.
+  if (proc.id === 7) controls.appendChild(buildListenButton());
 
   const showFilter = selectedProc === 2;
   satWrap.style.display = showFilter ? 'block' : 'none';
@@ -1158,11 +1190,13 @@ function drawExcBand() {
   const AMBER = 'rgba(249,199,79,', CYAN = 'rgba(120,200,255,';
   const warmX0 = freqToX(WARM_LO), warmX1 = freqToX(WARM_HI);
   const presX0 = freqToX(PRES_LO), presX1 = freqToX(PRES_HI);
-  ctx.fillStyle = AMBER + '0.05)'; ctx.fillRect(warmX0, 0, warmX1 - warmX0, H);
-  ctx.fillStyle = CYAN  + '0.05)'; ctx.fillRect(presX0, 0, presX1 - presX0, H);
-
   const warm = paramValues['EXC_WARM'] ?? (paramMeta['EXC_WARM']?.def ?? 0);
   const pres = paramValues['EXC_PRES'] ?? (paramMeta['EXC_PRES']?.def ?? 0);
+  // Zone tint brightens with its knob, so engagement is visible even on dark/
+  // quiet material where the live excitation is faint (presence on a dark master
+  // can sit near −70 dBFS).
+  ctx.fillStyle = AMBER + (0.04 + 0.16 * warm) + ')'; ctx.fillRect(warmX0, 0, warmX1 - warmX0, H);
+  ctx.fillStyle = CYAN  + (0.04 + 0.16 * pres) + ')'; ctx.fillRect(presX0, 0, presX1 - presX0, H);
 
   // ── Live added-harmonic overlay per band (DIRECT wet-spectrum) ──────────
   // The DSP taps each band's actual WET contribution, FFT + EMA-smooths it, and
@@ -1170,7 +1204,7 @@ function drawExcBand() {
   // THAT directly: the glow in each zone is exactly what that knob adds NOW, so
   // it breathes with the program. Below/above each band the wet is ~0 → floor.
   const EXC_FLO = 20, EXC_FHI = 20000;
-  const FLOOR = -72, CEIL = -24;
+  const FLOOR = -90, CEIL = -30;   // wide/low window so faint presence shows
   const yFor = db => { const h = Math.max(0, Math.min(1, (db - FLOOR) / (CEIL - FLOOR))); return H - h * H; };
   const drawFill = (arr, rgb) => {
     if (!Array.isArray(arr) || arr.length < 2) return false;

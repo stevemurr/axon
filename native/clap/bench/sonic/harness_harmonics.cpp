@@ -3,22 +3,19 @@
 // and checks: bypass at 0; Warmth adds low-mid 2nd with highs ~untouched;
 // Presence adds high content with low-mids ~untouched; monotonic vs knob.
 //   c++ -O3 -std=c++17 -I src bench/sonic/harness_harmonics.cpp -o bench/sonic/harness_harmonics
-#include "../../src/exciter.hpp"
+#include "../../src/multiband_exciter.hpp"
 #include "analysis.hpp"
 #include "signals.hpp"
 #include <cstdio>
 using namespace sonic;
 constexpr double SR = 48000.0;
-using Shaper = nablafx::Exciter::Shaper;
 
 // Mirror the plugin: two CLEAN exciters in series.
 static std::vector<float> harmonics(const std::vector<float>& in, float warm, float pres) {
     std::vector<float> out = in;
-    nablafx::Exciter w; w.prepare(SR); w.set_shaper(Shaper::Polynomial);
-    w.set_params(warm, 100.f, 6.f, 0.0f, 1000.f);
+    nablafx::MultibandExciter w; w.prepare(SR); w.configure(100.0, 1000.0, 5, 0.0f, 6.f); w.set_amount(warm);
     w.process(out.data(), nullptr, (int)out.size());
-    nablafx::Exciter p; p.prepare(SR); p.set_shaper(Shaper::Polynomial);
-    p.set_params(pres, 3500.f, 6.f, 0.5f, 16500.f);
+    nablafx::MultibandExciter p; p.prepare(SR); p.configure(3500.0, 16500.0, 5, 0.5f, 6.f); p.set_amount(pres);
     p.process(out.data(), nullptr, (int)out.size());
     return out;
 }

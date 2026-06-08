@@ -16,15 +16,30 @@ short-lived RICH/CLEAN toggle is subsumed — HARMONICS is always CLEAN). Each
 knob is the **added-harmonic level** for its band; the band freqs / drive /
 character are fixed internally.
 
-## Engine
-Two `nablafx::Exciter` instances (CLEAN/polynomial shaper) in series onto an
-untouched dry, reusing the proven anti-aliased (4×) band-limited parallel
-topology, DC removal, delay-aligned dry, loudness-gentle blend:
+## Engine — narrowband multiband (`MultibandExciter`)
+Two `nablafx::MultibandExciter` instances in series onto an untouched dry. Each
+splits its range into **5 contiguous narrow bands**, shapes each band
+**independently** (CLEAN polynomial), and sums — all inside ONE 4× oversampling
+pass (up-FIR → bands+shapers → down-FIR), so cost ≈ one Exciter's FIR + a few
+biquads, not 5 full exciters.
 
-| band | HPF | LPF | character | shaper | drive |
-|---|---|---|---|---|---|
-| **Warmth** | 100 Hz | 1 kHz | even (0.0) | CLEAN u² (pure 2nd) | 6 dB (fixed) |
-| **Presence** | 3.5 kHz | 16.5 kHz | 0.5 | CLEAN u²+u³ (2nd+3rd) | 6 dB (fixed) |
+| band-range | bands | character | shaper | drive |
+|---|---|---|---|---|
+| **Warmth** 100 Hz–1 kHz | 5 | even (0.0) | CLEAN u² (pure 2nd) | 6 dB (fixed) |
+| **Presence** 3.5–16.5 kHz | 5 | 0.5 | CLEAN u²+u³ (2nd+3rd) | 6 dB (fixed) |
+
+**Why narrowband (the key fix):** a single waveshaper over a *wide* band squares
+every pair of partials at once → difference tones fill the band as broadband
+"noise" (measured presence in-band spectral flatness ~0.95, near white, audible
+as hiss). Splitting into narrow bands and shaping each independently keeps IMD
+*within* each narrow band (small, falls below the band → removed by the wet HPF):
+presence flatness drops to **~0.49** (below the dry highs at 0.55) — tonal, clean.
+
+## Listen (audition)
+`EXC_SOLO` momentary switch + a press-and-hold **LISTEN** button. While held, the
+output is replaced (after the chain, bypassing the limiter's makeup) with ONLY
+the added harmonics, so you hear exactly what's applied. With Auto Gain on, the
+quiet harmonics are auto-leveled up so their character is clearly audible.
 
 - **Knob → level:** the knob (0–1) maps directly to its band's wet-blend amount
   (drive fixed → only level changes, not character). Mapping is currently

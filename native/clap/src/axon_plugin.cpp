@@ -50,6 +50,7 @@
 #include "bass_mono.hpp"
 #include "coherence_distortion.hpp"
 #include "exciter.hpp"
+#include "multiband_exciter.hpp"
 #include "exciter_spectrum.hpp"
 #include "reverb.hpp"
 #include "widener.hpp"
@@ -665,11 +666,12 @@ struct Plugin {
     // Bass mono-maker (stereo; collapses width below a cutoff).
     nablafx::BassMono    bass_mono;
 
-    // HARMONICS: two CLEAN (polynomial) exciters in series. Warmth excites the
-    // low-mids (even/2nd → body); Presence excites the highs (even+odd → air).
-    // Both stereo, band-limited parallel; each knob is the added-harmonic level.
-    nablafx::Exciter     exc_warm;
-    nablafx::Exciter     exc_pres;
+    // HARMONICS: two CLEAN narrowband multiband exciters in series. Warmth
+    // excites the low-mids (even/2nd → body); Presence the highs (even+odd →
+    // air). Narrowband-per-knob keeps intermodulation low (a wide waveshaper
+    // makes broadband IMD "noise"). Each knob is the added-harmonic level.
+    nablafx::MultibandExciter exc_warm;
+    nablafx::MultibandExciter exc_pres;
 
     // DIRECT wet-spectrum meters for the two-zone overlay. Each is fed (read-only)
     // the mono wet CONTRIBUTION of its band, so the UI draws exactly what each
@@ -1131,6 +1133,11 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     plug->bass_mono.prepare(plug->sample_rate);
     plug->exc_warm.prepare(plug->sample_rate);
     plug->exc_pres.prepare(plug->sample_rate);
+    // Fixed voicing (drive kept modest so each narrow band stays in the CLEAN
+    // shaper's pure region). Warmth: low-mids, pure even (2nd). Presence: highs,
+    // even+odd (2nd+3rd). 5 narrow bands each → low intermodulation.
+    plug->exc_warm.configure(/*lo*/100.0,  /*hi*/1000.0,  /*bands*/5, /*char*/0.0f, /*drive*/6.f);
+    plug->exc_pres.configure(/*lo*/3500.0, /*hi*/16500.0, /*bands*/5, /*char*/0.5f, /*drive*/6.f);
     plug->exc_warm_spectrum.prepare(plug->sample_rate);
     plug->exc_pres_spectrum.prepare(plug->sample_rate);
     plug->exc_warm_db.fill(nablafx::ExciterSpectrum::kFloorDb);
@@ -1740,19 +1747,11 @@ void flush_chain_block_(Plugin& plug,
                 break;
             }
             float* wr = (n_ch >= 2 ? work_r : nullptr);
-            using Shaper = nablafx::Exciter::Shaper;
-            // Fixed drive — kept modest so the CLEAN shaper stays in its pure
-            // (un-clamped) region, so only the knob LEVEL changes, not character.
-            constexpr float kHarmDriveDb = 6.f;
-            // Warmth band: low-mid band-pass, pure even (2nd).
-            plug.exc_warm.set_shaper(Shaper::Polynomial);
-            plug.exc_warm.set_params(amt.exc_warm, /*hpf*/100.f, kHarmDriveDb,
-                                     /*char*/0.0f, /*tame lpf*/1000.f);
+            // Voicing (band range / character / drive) is fixed in activate via
+            // configure(); the knob is just the added-harmonic LEVEL.
+            plug.exc_warm.set_amount(amt.exc_warm);
             plug.exc_warm.process(work_l, wr, kBlockSize, wet_a.data());
-            // Presence band: high-pass + tame, even+odd (2nd+3rd).
-            plug.exc_pres.set_shaper(Shaper::Polynomial);
-            plug.exc_pres.set_params(amt.exc_pres, /*hpf*/3500.f, kHarmDriveDb,
-                                     /*char*/0.5f, /*tame lpf*/16500.f);
+            plug.exc_pres.set_amount(amt.exc_pres);
             plug.exc_pres.process(work_l, wr, kBlockSize, wet_b.data());
             // "Listen" (momentary): capture ONLY the added harmonics (warm +
             // presence wet). The chain keeps running normally (so stage state

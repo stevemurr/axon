@@ -205,6 +205,12 @@ add_executable(test_iir_filterbank_eq tests/test_iir_filterbank_eq.cpp)
 target_include_directories(test_iir_filterbank_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_iir_filterbank_eq PRIVATE -UNDEBUG)
 
+# test_multiband_exciter — narrowband HARMONICS engine: bypass, harmonics, the
+# IMD-reduction property (narrow bands << one wide band), stability.
+add_executable(test_multiband_exciter tests/test_multiband_exciter.cpp)
+target_include_directories(test_multiband_exciter PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_multiband_exciter PRIVATE -UNDEBUG)
+
 # test_axon_gui_js — WKWebView JS-bridge string builders (no fixed-buffer overflow).
 add_executable(test_axon_gui_js tests/test_axon_gui_js.cpp)
 target_include_directories(test_axon_gui_js PRIVATE ${CMAKE_SOURCE_DIR}/src)

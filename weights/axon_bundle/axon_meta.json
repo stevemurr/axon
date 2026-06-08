@@ -242,6 +242,15 @@
       "skew": 1.0,
       "unit": "switch"
     },
+    "EQ_ENGINE": {
+      "id": "EQ_ENGINE",
+      "name": "AutoEQ Engine",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
     "EXC_WARM": {
       "id": "EXC_WARM",
       "name": "Warmth",

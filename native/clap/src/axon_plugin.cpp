@@ -60,6 +60,7 @@
 #include "mel_limiter.hpp"
 #include "rational_a.hpp"
 #include "spectral_mask_eq.hpp"
+#include "adaptive_eq.hpp"   // deterministic Auto-EQ controller (Neural↔Adaptive toggle)
 #include "true_peak_ceiling.hpp"
 
 namespace nablafx_axon {
@@ -589,6 +590,10 @@ struct ChannelChain {
     // runtime collapsed the LSTM's input distribution. Attack-instant /
     // decay-slow tracking gives a stable scale across blocks.
     float                                  autoeq_peak_env{0.f};
+    // Deterministic Auto-EQ controller (the C1→C2 cascade). Class-agnostic, so
+    // one instance per channel drives the SAME SpectralMaskEq renderer when the
+    // EQ_ENGINE param selects "Adaptive" instead of the per-class LSTM.
+    nablafx::AdaptiveEqController          adaptive_eq;
     RationalA                              saturator;
     // 1st-order HPF for bass-preserved saturation (bilinear transform).
     float sat_hpf_fc{-1.f};               // cached cutoff; -1 = stale
@@ -1070,6 +1075,14 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
             ch.autoeq_spec_per_class[i]->reset(
                 std::get<SpectralMaskEqParams>(dsp.params));
         }
+        // Deterministic Auto-EQ controller — class-agnostic, configured from the
+        // default class's band layout (all classes share the same n_bands/span).
+        if (!g_state->autoeq_dsp_per_class.empty()) {
+            const int di = std::clamp(g_state->autoeq_default_idx, 0,
+                                      (int)g_state->autoeq_dsp_per_class.size() - 1);
+            ch.adaptive_eq.reset(std::get<SpectralMaskEqParams>(
+                g_state->autoeq_dsp_per_class[di].params));
+        }
         ch.saturator.reset(g_state->sat_rational.numerator,
                            g_state->sat_rational.denominator);
 
@@ -1184,6 +1197,13 @@ static void plugin_reset(const clap_plugin_t* p) {
         ch.out_avail = 0;
         ch.out_read  = 0;
         ch.autoeq_peak_env = 0.f;
+        // Clear the deterministic Auto-EQ controller's running spectrum + curve.
+        if (!g_state->autoeq_dsp_per_class.empty()) {
+            const int di = std::clamp(g_state->autoeq_default_idx, 0,
+                                      (int)g_state->autoeq_dsp_per_class.size() - 1);
+            ch.adaptive_eq.reset(std::get<SpectralMaskEqParams>(
+                g_state->autoeq_dsp_per_class[di].params));
+        }
         std::fill(ch.in_buf.begin(),  ch.in_buf.end(),  0.0f);
         std::fill(ch.out_buf.begin(), ch.out_buf.end(), 0.0f);
         if (!ch.bypass_fifo.empty())
@@ -1204,6 +1224,7 @@ struct AmountSnapshot {
     float sat_pre_db, sat_post_db, sat_wet_mix, sat_hpf_hz, sat_lpf_hz, sat_thresh_lin, sat_bias;
     float trim_lin;
     float eq_range;
+    bool  eq_adaptive;        // EQ_ENGINE: false = neural LSTM, true = deterministic cascade
     float eq_boost_scale;
     float eq_speed_ms;
     float ssl_comp_wet;
@@ -1242,6 +1263,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float agn=0.f,byp=0.f;
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
+    float eqeng=0.f;                                      // EQ_ENGINE: 0 neural, 1 adaptive
     float ssc=0.f;
     float ssc_in_db=0.f;
     int   cls_idx=plug.active_autoeq_cls;
@@ -1255,6 +1277,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="CLS") cls_idx=static_cast<int>(std::lround(v));
         else if(c.id=="EQR") eqr=v; else if(c.id=="EQS") eqs=v;
         else if(c.id=="EQB") eqb=v;
+        else if(c.id=="EQ_ENGINE") eqeng=v;
         else if(c.id=="TRM") trm_db=v;
         else if(c.id=="SSC") ssc=v;
         else if(c.id=="SSC_IN") ssc_in_db=v;
@@ -1283,6 +1306,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.autoeq_cls_idx = std::clamp(cls_idx, 0, n_cls > 0 ? n_cls - 1 : 0);
     s.trim_lin=std::pow(10.f,trm_db/20.f);
     s.eq_range=eqr;
+    s.eq_adaptive=(eqeng>=0.5f);
     s.eq_boost_scale=eqb;
     s.eq_speed_ms=eqs;
     s.ssl_comp_wet = ssc * g_state->axon_meta.amt_ssl_comp.wet_mix_max;
@@ -1366,20 +1390,31 @@ void flush_chain_block_(Plugin& plug,
             float* ch_buf[2] = {work_l, work_r};
             for (uint32_t ch=0; ch<n_ch; ++ch) {
                 float* blk = ch_buf[ch];
-                auto& sess = plug.chains[ch].autoeq_ort_per_class[cls];
-                // Peak-hold envelope normalisation to match training distribution.
-                std::array<float, kBlockSize> ctrl_buf;
-                float blk_peak = 0.f;
-                for (int i = 0; i < kBlockSize; ++i)
-                    blk_peak = std::max(blk_peak, std::abs(blk[i]));
-                auto& env = plug.chains[ch].autoeq_peak_env;
-                if (blk_peak > env) env = blk_peak;
-                else env = plug.autoeq_env_decay * env
-                          + (1.f - plug.autoeq_env_decay) * blk_peak;
-                const float ctrl_scale = (env > 1e-6f) ? (0.5f / env) : 1.f;
-                for (int i = 0; i < kBlockSize; ++i) ctrl_buf[i] = blk[i] * ctrl_scale;
-                sess->run_controller(ctrl_buf.data(), kBlockSize, eq_params, n_params);
-                sess->swap_state();
+                // EQ_ENGINE: fill eq_params from either the deterministic cascade
+                // controller (Adaptive) or the per-class LSTM (Neural). Both emit
+                // the same [0,1] band contract; the renderer below is unchanged.
+                if (amt.eq_adaptive) {
+                    // Range is applied by the renderer's set_range_norm below, so
+                    // ask the controller for the full-depth curve (depth01 = 1).
+                    auto& actrl = plug.chains[ch].adaptive_eq;
+                    actrl.observe(blk, kBlockSize);
+                    actrl.target_bands(eq_params, n_params, 1.0f);
+                } else {
+                    auto& sess = plug.chains[ch].autoeq_ort_per_class[cls];
+                    // Peak-hold envelope normalisation to match training distribution.
+                    std::array<float, kBlockSize> ctrl_buf;
+                    float blk_peak = 0.f;
+                    for (int i = 0; i < kBlockSize; ++i)
+                        blk_peak = std::max(blk_peak, std::abs(blk[i]));
+                    auto& env = plug.chains[ch].autoeq_peak_env;
+                    if (blk_peak > env) env = blk_peak;
+                    else env = plug.autoeq_env_decay * env
+                              + (1.f - plug.autoeq_env_decay) * blk_peak;
+                    const float ctrl_scale = (env > 1e-6f) ? (0.5f / env) : 1.f;
+                    for (int i = 0; i < kBlockSize; ++i) ctrl_buf[i] = blk[i] * ctrl_scale;
+                    sess->run_controller(ctrl_buf.data(), kBlockSize, eq_params, n_params);
+                    sess->swap_state();
+                }
 
                 std::copy_n(blk, kBlockSize, dry.data());
                 // Spectral mask: range scales the predicted dB curve toward

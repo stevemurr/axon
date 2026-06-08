@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 #include "meta.hpp"   // SpectralMaskEqParams (shared config with the renderer)
@@ -137,6 +138,13 @@ public:
     RunningMelSpectrum() = default;
     RunningMelSpectrum(const RunningMelSpectrum&) = delete;
     RunningMelSpectrum& operator=(const RunningMelSpectrum&) = delete;
+    // Movable (transfers the FFTSetup; nulls the source) so an owning
+    // AdaptiveEqController/ChannelChain can live in a std::vector.
+    RunningMelSpectrum(RunningMelSpectrum&& o) noexcept { swap_(o); }
+    RunningMelSpectrum& operator=(RunningMelSpectrum&& o) noexcept {
+        if (this != &o) { if (fft_) vDSP_destroy_fftsetup(fft_), fft_ = nullptr; swap_(o); }
+        return *this;
+    }
 
     void observe(const float* in, std::size_t n) {
         for (std::size_t i = 0; i < n; ++i) {
@@ -150,6 +158,15 @@ public:
     bool primed() const { return primed_; }
 
 private:
+    void swap_(RunningMelSpectrum& o) noexcept {
+        std::swap(cfg_, o.cfg_); std::swap(n_fft_, o.n_fft_); std::swap(hop_, o.hop_);
+        std::swap(n_freq_, o.n_freq_); std::swap(in_fill_, o.in_fill_); std::swap(since_, o.since_);
+        std::swap(log2_, o.log2_); std::swap(fft_, o.fft_); std::swap(alpha_, o.alpha_);
+        std::swap(primed_, o.primed_);
+        window_.swap(o.window_); in_ring_.swap(o.in_ring_); windowed_.swap(o.windowed_);
+        re_.swap(o.re_); im_.swap(o.im_); power_.swap(o.power_); band_to_bin_.swap(o.band_to_bin_);
+        band_wsum_.swap(o.band_wsum_); mel_db_.swap(o.mel_db_); centers_.swap(o.centers_);
+    }
     void frame_() {
         const int tail = n_fft_ - in_fill_;
         vDSP_vmul(in_ring_.data() + in_fill_, 1, window_.data(), 1, windowed_.data(), 1, tail);

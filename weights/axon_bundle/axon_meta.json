@@ -235,57 +235,39 @@
     },
     "EXC_ON": {
       "id": "EXC_ON",
-      "name": "Exciter",
+      "name": "Harmonics",
       "min": 0.0,
       "max": 1.0,
       "default": 1.0,
       "skew": 1.0,
       "unit": "switch"
     },
-    "EXC_AMT": {
-      "id": "EXC_AMT",
-      "name": "Amount",
+    "EXC_WARM": {
+      "id": "EXC_WARM",
+      "name": "Warmth",
       "min": 0.0,
       "max": 1.0,
-      "default": 1.0,
+      "default": 0.0,
       "skew": 1.0,
       "unit": ""
     },
-    "EXC_FREQ": {
-      "id": "EXC_FREQ",
-      "name": "Frequency",
-      "min": 1000.0,
-      "max": 12000.0,
-      "default": 3000.0,
-      "skew": 1.0,
-      "unit": "Hz"
-    },
-    "EXC_DRIVE": {
-      "id": "EXC_DRIVE",
-      "name": "Intensity",
-      "min": 0.0,
-      "max": 24.0,
-      "default": 16.1,
-      "skew": 1.0,
-      "unit": "dB"
-    },
-    "EXC_CHAR": {
-      "id": "EXC_CHAR",
-      "name": "Warm ◐ Bright",
+    "EXC_PRES": {
+      "id": "EXC_PRES",
+      "name": "Presence",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.5,
+      "default": 0.0,
       "skew": 1.0,
       "unit": ""
     },
-    "EXC_LPF": {
-      "id": "EXC_LPF",
-      "name": "Tame",
-      "min": 5000.0,
-      "max": 20000.0,
-      "default": 18000.0,
+    "EXC_SOLO": {
+      "id": "EXC_SOLO",
+      "name": "Listen",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
       "skew": 1.0,
-      "unit": "Hz"
+      "unit": "switch"
     },
     "RVB_MIX": {
       "id": "RVB_MIX",

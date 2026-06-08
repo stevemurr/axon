@@ -498,10 +498,11 @@ const PROCESSORS = [
   // just not exposed here. Re-add this entry + put 2 back in the order to restore.
   { id: 4, name: 'BUS COMP',  params: ['SSC', 'SSC_IN'],          wetParams: ['SSC'] },
   { id: 6, name: 'BASS MONO', params: ['BMI', 'BMF'],                   wetParams: ['BMI'] },
-  // EXC_FREQ / EXC_LPF are NOT knobs — they're draggable band edges on the
-  // exciter band display (see drawExcBand), so the user sets the excited region
-  // spatially and watches the live "what's being excited" overlay.
-  { id: 7, name: 'EXCITER',   params: ['EXC_ON','EXC_AMT','EXC_DRIVE','EXC_CHAR'], wetParams: ['EXC_ON'] },
+  // HARMONICS (id 7) removed from the chain for now — kept in the DSP/code
+  // (MultibandExciter, the stage case, drawExcBand/buildListenButton, EXC_*
+  // params), just not exposed here. Re-add this entry + put 7 back in the order
+  // (and bump kNumStages) to restore.
+  // { id: 7, name: 'HARMONICS', params: ['EXC_ON','EXC_WARM','EXC_PRES'], wetParams: ['EXC_ON'] },
   { id: 8, name: 'REVERB',    params: ['RVB_MIX','RVB_SIZE','RVB_WIDTH','RVB_DAMP','RVB_LOWCUT'], wetParams: ['RVB_MIX'] },
   { id: 9, name: 'WIDENER',   params: ['WID_ON','WID_AMT','WID_FREQ','WID_AIR'], wetParams: ['WID_ON'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
@@ -832,6 +833,35 @@ function buildControl(id) {
 // RENDER CONTROL SURFACE
 // ============================================================
 
+// HARMONICS "LISTEN": press-and-hold to solo the added harmonics (EXC_SOLO is a
+// momentary switch). Held while the mouse is down; released on any window mouseup
+// (so dragging off the button still releases). The window listener is wired once.
+let _excSoloBtn = null;
+function _excSoloSet(on) {
+  if (!_excSoloBtn) return;
+  paramValues['EXC_SOLO'] = on ? 1 : 0;
+  sendParam('EXC_SOLO', on ? 1 : 0);
+  _excSoloBtn.classList.toggle('on', on);
+  const v = _excSoloBtn.parentElement && _excSoloBtn.parentElement.querySelector('.toggle-value');
+  if (v) v.textContent = on ? 'SOLO' : 'hold';
+}
+function buildListenButton() {
+  const wrap = document.createElement('div');
+  wrap.className = 'toggle-wrap';
+  wrap.innerHTML = `
+    <div class="toggle-btn">LISTEN</div>
+    <div class="toggle-label">Solo Harmonics</div>
+    <div class="toggle-value">hold</div>`;
+  _excSoloBtn = wrap.querySelector('.toggle-btn');
+  _excSoloBtn.addEventListener('mousedown', e => { e.preventDefault(); _excSoloSet(true); });
+  if (!window._excSoloWired) {
+    window._excSoloWired = true;
+    window.addEventListener('mouseup', () => _excSoloSet(false));
+    window.addEventListener('blur',    () => _excSoloSet(false));
+  }
+  return wrap;
+}
+
 function renderSurface() {
   const proc = PROCESSORS.find(p => p.id === selectedProc);
   const title = document.getElementById('surface-title');
@@ -851,6 +881,9 @@ function renderSurface() {
     const ctrl = buildControl(id);
     if (ctrl) controls.appendChild(ctrl);
   }
+
+  // HARMONICS: press-and-hold "LISTEN" — momentary solo of the added harmonics.
+  if (proc.id === 7) controls.appendChild(buildListenButton());
 
   const showFilter = selectedProc === 2;
   satWrap.style.display = showFilter ? 'block' : 'none';
@@ -1103,8 +1136,6 @@ let excLastSpec = null;
 // This is what drawExcBand's amber overlay plots.
 let excWetSpec = null;
 
-let excBandDrag = null; // 'HPF' (Frequency) | 'LPF' (Tame) | null
-
 // ── Crossover comb-transfer helpers (analytic, see drawExcBand) ──────────
 // 2nd-order Butterworth biquads matching exciter.hpp's design_hpf_/design_lpf_
 // (RBJ, Q=1/√2), and the complex frequency response of a normalized biquad.
@@ -1153,198 +1184,66 @@ function drawExcBand() {
     ctx.fillText(lbl, freqToX(f), H - 3);
   });
 
-  const hpfHz = paramValues['EXC_FREQ'] ?? (paramMeta['EXC_FREQ']?.def ?? 3000);
-  const lpfHz = paramValues['EXC_LPF']  ?? (paramMeta['EXC_LPF']?.def  ?? 18000);
-  const amt   = paramValues['EXC_AMT']  ?? (paramMeta['EXC_AMT']?.def  ?? 0);
-  const hpfX  = freqToX(hpfHz);
-  const lpfX  = freqToX(lpfHz);
+  // ── Fixed HARMONICS zones ──────────────────────────────────────────────
+  // Warmth excites the low-mids (even/2nd → body); Presence the highs
+  // (even+odd → air). The 1–3.5 kHz mid gap is left untouched by design.
+  const WARM_LO = 100, WARM_HI = 1000, PRES_LO = 3500, PRES_HI = 16500;
+  const AMBER = 'rgba(249,199,79,', CYAN = 'rgba(120,200,255,';
+  const warmX0 = freqToX(WARM_LO), warmX1 = freqToX(WARM_HI);
+  const presX0 = freqToX(PRES_LO), presX1 = freqToX(PRES_HI);
+  const warm = paramValues['EXC_WARM'] ?? (paramMeta['EXC_WARM']?.def ?? 0);
+  const pres = paramValues['EXC_PRES'] ?? (paramMeta['EXC_PRES']?.def ?? 0);
+  // Zone tint brightens with its knob, so engagement is visible even on dark/
+  // quiet material where the live excitation is faint (presence on a dark master
+  // can sit near −70 dBFS).
+  ctx.fillStyle = AMBER + (0.04 + 0.16 * warm) + ')'; ctx.fillRect(warmX0, 0, warmX1 - warmX0, H);
+  ctx.fillStyle = CYAN  + (0.04 + 0.16 * pres) + ')'; ctx.fillRect(presX0, 0, presX1 - presX0, H);
 
-  // Excited *input* band (HPF..LPF) — the region fed to the shaper.
-  ctx.fillStyle = 'rgba(249,199,79,0.07)';
-  ctx.fillRect(hpfX, 0, Math.max(0, lpfX - hpfX), H);
-
-  // ── LIVE excitation overlay (DIRECT wet-spectrum measurement) ──────────
-  // The DSP taps the exciter's actual WET contribution (the band-limited,
-  // high-passed, shaped signal it sums onto the dry = amount*wet per sample),
-  // FFTs it, EMA-smooths it, and streams a log-spaced dBFS magnitude array
-  // (excWetSpec.db) via window.axonExciter. We draw THAT directly — so the
-  // overlay is exactly what the exciter adds: nothing below the HPF, the
-  // harmonic content in/above the band, tapering naturally at the top. No
-  // subtraction, so the loud-low-end jitter that produced phantom spikes is
-  // gone (the wet is provably ~0 below the HPF → those points sit at the floor).
-  //
-  // The streamed points are at log-spaced frequencies matching the DSP:
-  //   f_i = FLO * (FHI/FLO)^(i/(N-1)),  FLO=20 Hz, FHI=20 kHz.
-  // Display window: FLOOR (−72 dBFS) → 0 height, CEIL (−24 dBFS) → full height.
-  // With a 3–18 kHz band at Amount 50–100% the in-band wet lands ~−55..−40 dBFS
-  // → a clear, visible fraction of the strip; below the HPF it's at the floor.
+  // ── Live added-harmonic overlay per band (DIRECT wet-spectrum) ──────────
+  // The DSP taps each band's actual WET contribution, FFT + EMA-smooths it, and
+  // streams a log-spaced dBFS array (warm / pres) via window.axonExciter. We draw
+  // THAT directly: the glow in each zone is exactly what that knob adds NOW, so
+  // it breathes with the program. Below/above each band the wet is ~0 → floor.
   const EXC_FLO = 20, EXC_FHI = 20000;
-  const FLOOR = -72, CEIL = -24;
-  let drew = false;
-  if (excWetSpec && excWetSpec.active && Array.isArray(excWetSpec.db) &&
-      excWetSpec.db.length > 1 && amt > 0) {
-    const dbArr = excWetSpec.db;
-    const N = dbArr.length;
-    const yFor = db => {
-      const h = Math.max(0, Math.min(1, (db - FLOOR) / (CEIL - FLOOR)));
-      return H - h * H;
-    };
-    ctx.beginPath();
-    ctx.moveTo(0, H);
+  const FLOOR = -90, CEIL = -30;   // wide/low window so faint presence shows
+  const yFor = db => { const h = Math.max(0, Math.min(1, (db - FLOOR) / (CEIL - FLOOR))); return H - h * H; };
+  const drawFill = (arr, rgb) => {
+    if (!Array.isArray(arr) || arr.length < 2) return false;
+    const N = arr.length; let any = false;
+    ctx.beginPath(); ctx.moveTo(0, H);
     for (let i = 0; i < N; i++) {
-      const f  = EXC_FLO * Math.pow(EXC_FHI / EXC_FLO, i / (N - 1));
-      const db = dbArr[i] ?? -120;
+      const f = EXC_FLO * Math.pow(EXC_FHI / EXC_FLO, i / (N - 1));
+      const db = arr[i] ?? -120; if (db > FLOOR + 0.5) any = true;
       ctx.lineTo(freqToX(f), yFor(db));
     }
-    ctx.lineTo(W, H);
-    ctx.closePath();
-    ctx.save();
-    ctx.shadowBlur = 8;
-    ctx.shadowColor = '#f9c74f';
-    ctx.fillStyle = 'rgba(249,199,79,0.30)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(249,199,79,0.85)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    ctx.lineTo(W, H); ctx.closePath();
+    ctx.save(); ctx.shadowBlur = 8; ctx.shadowColor = rgb + '1)';
+    ctx.fillStyle = rgb + '0.28)'; ctx.fill();
+    ctx.strokeStyle = rgb + '0.85)'; ctx.lineWidth = 1.5; ctx.stroke();
     ctx.restore();
-    drew = true;
+    return any;
+  };
+  let drew = false;
+  if (excWetSpec && excWetSpec.active) {
+    if (warm > 0) drew = drawFill(excWetSpec.warm, AMBER) || drew;
+    if (pres > 0) drew = drawFill(excWetSpec.pres, CYAN) || drew;
   }
   if (!drew) {
     ctx.font = '8px -apple-system, sans-serif';
-    ctx.fillStyle = '#3a3a3a';
-    ctx.textAlign = 'center';
-    ctx.fillText(amt > 0 ? 'play audio to see excitation'
-                         : 'raise Amount to excite', W / 2, H / 2);
+    ctx.fillStyle = '#3a3a3a'; ctx.textAlign = 'center';
+    ctx.fillText((warm > 0 || pres > 0) ? 'play audio to see harmonics'
+                                        : 'raise Warmth or Presence', W / 2, H / 2);
   }
 
-  // ── Crossover comb-transfer curve (analytic, phase-induced) ────────────
-  // The band-split is IIR (min-phase), so the wet's fundamental is phase-shifted
-  // vs the dry; summing them combs in the crossover overlap. Only the ODD/bright
-  // path carries a fundamental (the even/warm path adds no fundamental → no comb),
-  // so the combing gain is G = character · 10^(Intensity/20) · sech²(0.5). We plot
-  // the effective linear transfer |1 + amount·G·H_band(f)| in dB, where
-  // H_band = H_HPF² · H_LPF (band HPF + the post-shaper wet HPF at the same cutoff,
-  // and the Tame LPF). Flat ~0 dB = natural; a dip near the Frequency corner =
-  // combing. Analytic, so it's live from the knobs even with no audio. Small-signal
-  // approximation (tanh compresses the fundamental at high level, so the real comb
-  // is a touch shallower), but the structure — where the notch sits, how it moves
-  // with Frequency/Tame/Character/Intensity/Amount — is exact.
-  if (amt > 0) {
-    const charv   = paramValues['EXC_CHAR']  ?? (paramMeta['EXC_CHAR']?.def  ?? 0.25);
-    const driveDb = paramValues['EXC_DRIVE'] ?? (paramMeta['EXC_DRIVE']?.def ?? 6);
-    const SR = 44100;                                   // display SR (cf. sat display)
-    const G  = charv * Math.pow(10, driveDb / 20) * 0.78645;  // sech²(0.5)
-    const hpf = excBiquadHPF(hpfHz, SR);
-    const lpf = (lpfHz < 19000) ? excBiquadLPF(lpfHz, SR) : null;
-    const k   = amt * G;
-    const NPTS = 256;
-    const cy = Math.round(H * 0.30) + 0.5;              // 0 dB reference line
-    const PX_PER_DB = 6;
-    const yDb = db => Math.max(2, Math.min(H - 2, cy - db * PX_PER_DB));
-
-    // 0 dB reference line.
-    ctx.strokeStyle = 'rgba(150,180,210,0.18)'; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
-    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(W, cy); ctx.stroke();
-    ctx.setLineDash([]);
-
-    ctx.beginPath();
-    for (let i = 0; i < NPTS; i++) {
-      const f = EXC_FLO * Math.pow(EXC_FHI / EXC_FLO, i / (NPTS - 1));
-      const w = 2 * Math.PI * f / SR;
-      const h = excBiquadResp(hpf, w);
-      let br = h.re * h.re - h.im * h.im, bi = 2 * h.re * h.im;   // H_HPF²
-      if (lpf) { const l = excBiquadResp(lpf, w);
-                 const r = br * l.re - bi * l.im, im = br * l.im + bi * l.re; br = r; bi = im; }
-      const Hr = 1 + k * br, Hi = k * bi;                         // 1 + amount·G·H_band
-      const db = 20 * Math.log10(Math.sqrt(Hr * Hr + Hi * Hi) + 1e-9);
-      const x = freqToX(f), y = yDb(db);
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.strokeStyle = 'rgba(120,200,255,0.92)'; ctx.lineWidth = 1.3; ctx.stroke();
-
-    ctx.font = '7px -apple-system, sans-serif';
-    ctx.fillStyle = 'rgba(120,200,255,0.7)'; ctx.textAlign = 'left';
-    ctx.fillText('CROSSOVER (transfer)', 5, cy - 4 < 14 ? cy + 11 : cy - 4);
-    ctx.fillStyle = 'rgba(150,180,210,0.45)'; ctx.textAlign = 'right';
-    ctx.fillText('0 dB', W - 5, cy - 3);
-  }
-
-  // Band-edge dashed verticals + drag handles + labels.
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
-  ctx.strokeStyle = 'rgba(249,199,79,0.55)';
-  ctx.beginPath(); ctx.moveTo(hpfX + 0.5, 0); ctx.lineTo(hpfX + 0.5, H); ctx.stroke();
-  ctx.strokeStyle = 'rgba(231,111,81,0.45)';
-  ctx.beginPath(); ctx.moveTo(lpfX + 0.5, 0); ctx.lineTo(lpfX + 0.5, H); ctx.stroke();
-  ctx.setLineDash([]);
-
-  const HR = 5;
-  ctx.lineWidth = 1.5;
-  ctx.fillStyle = 'rgba(249,199,79,0.9)';
-  ctx.strokeStyle = '#f9c74f';
-  ctx.beginPath(); ctx.arc(hpfX, HR + 2, HR, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = 'rgba(231,111,81,0.85)';
-  ctx.strokeStyle = '#e76f51';
-  ctx.beginPath(); ctx.arc(lpfX, HR + 2, HR, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
-
+  // ── Zone labels ─────────────────────────────────────────────────────────
   ctx.font = '8px -apple-system, sans-serif';
-  const fmt = hz => hz < 1000 ? `${Math.round(hz)} Hz` : `${(hz/1000).toFixed(1)} kHz`;
-  ctx.fillStyle = 'rgba(249,199,79,0.9)';
-  ctx.textAlign = hpfX > W * 0.85 ? 'right' : 'left';
-  ctx.fillText(fmt(hpfHz), hpfX + (hpfX > W * 0.85 ? -7 : 7), 22);
-  ctx.fillStyle = 'rgba(231,111,81,0.85)';
-  ctx.textAlign = lpfX < W * 0.15 ? 'left' : 'right';
-  ctx.fillText(fmt(lpfHz), lpfX + (lpfX < W * 0.15 ? 7 : -7), 22);
-
-  // Corner tags.
-  ctx.font = '7px -apple-system, sans-serif';
-  ctx.textAlign = 'left';  ctx.fillStyle = '#444';
-  ctx.fillText('FREQUENCY', 5, 10);
-  ctx.textAlign = 'right';
-  ctx.fillText('TAME', W - 5, 10);
+  ctx.fillStyle = AMBER + '0.8)'; ctx.textAlign = 'center';
+  ctx.fillText('WARMTH', (warmX0 + warmX1) / 2, 12);
+  ctx.fillStyle = CYAN + '0.8)';
+  ctx.fillText('PRESENCE', (presX0 + presX1) / 2, 12);
 }
 
-// Drag interactivity for the exciter band canvas.
-(function() {
-  const canvas = document.getElementById('exc-band-canvas');
-  if (!canvas) return;
-
-  function clientToCanvasX(e) {
-    const rect = canvas.getBoundingClientRect();
-    return (e.clientX - rect.left) * canvas.width / rect.width;
-  }
-  function hitTest(cx) {
-    const hpfHz = paramValues['EXC_FREQ'] ?? (paramMeta['EXC_FREQ']?.def ?? 3000);
-    const lpfHz = paramValues['EXC_LPF']  ?? (paramMeta['EXC_LPF']?.def  ?? 18000);
-    if (Math.abs(cx - satFreqToX(hpfHz, canvas.width)) < 14) return 'HPF';
-    if (Math.abs(cx - satFreqToX(lpfHz, canvas.width)) < 14) return 'LPF';
-    return null;
-  }
-
-  canvas.addEventListener('mousedown', (e) => {
-    excBandDrag = hitTest(clientToCanvasX(e));
-    if (excBandDrag) e.preventDefault();
-  });
-  canvas.addEventListener('mousemove', (e) => {
-    const cx = clientToCanvasX(e);
-    canvas.style.cursor = (hitTest(cx) || excBandDrag) ? 'ew-resize' : 'default';
-    if (!excBandDrag) return;
-    const f = satXToFreq(cx, canvas.width);
-    if (excBandDrag === 'HPF') {
-      const m = paramMeta['EXC_FREQ'];
-      const v = Math.max(m?.min ?? 1000, Math.min(m?.max ?? 12000, f));
-      paramValues['EXC_FREQ'] = v;
-      sendParam('EXC_FREQ', v);
-    } else {
-      const m = paramMeta['EXC_LPF'];
-      const v = Math.max(m?.min ?? 5000, Math.min(m?.max ?? 20000, f));
-      paramValues['EXC_LPF'] = v;
-      sendParam('EXC_LPF', v);
-    }
-    drawExcBand();
-  });
-  window.addEventListener('mouseup', () => { excBandDrag = null; });
-})();
+// (HARMONICS has fixed Warmth/Presence zones — no draggable band edges.)
 
 // ============================================================
 // CHAIN STRIP
@@ -2285,8 +2184,7 @@ window.axonSetParam = function(id, value) {
   }
 
   if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
-  if ((id === 'EXC_FREQ' || id === 'EXC_LPF' || id === 'EXC_AMT' ||
-       id === 'EXC_CHAR' || id === 'EXC_DRIVE') && selectedProc === 7) drawExcBand();
+  if ((id === 'EXC_WARM' || id === 'EXC_PRES' || id === 'EXC_ON') && selectedProc === 7) drawExcBand();
   // Dynamic toggle (e.g. host automation) relabels Attack/Release knobs.
   if (id === 'MLA' && selectedProc === 5) renderSurface();
   if (id === 'AGN' || id === 'BYP') refreshPanelToggles();

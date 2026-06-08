@@ -80,6 +80,14 @@ public:
         design_();    // each Channel, so coefficients must be designed AFTER it
     }
 
+    // Harmonic-generator selection. BiasedTanh = the original Aphex-style soft curve
+    // (infinite harmonic series, band-limited by 4x oversampling). Polynomial =
+    // a Chebyshev-class monomial shaper (u^2 -> pure 2nd, u^3 -> pure 3rd) with
+    // NO content above the 3rd harmonic, so it barely aliases at 4x and gives
+    // exactly-controllable 2nd/3rd. Default is BiasedTanh (unchanged behavior).
+    enum class Shaper { BiasedTanh, Polynomial };
+    void set_shaper(Shaper s) { shaper_ = s; }
+
     void reset() {
         for (auto& c : ch_) c = Channel{};
         // reset() default-constructs each Channel, which leaves the band-split
@@ -197,6 +205,20 @@ private:
     // it low-order and amplitude-proportional (quiet in → little excitation).
     // Character crossfades: 0 = pure even (warm), 1 = pure odd (grit).
     double shape_(double x) const {
+        if (shaper_ == Shaper::Polynomial) {
+            // Chebyshev-class monomial shaper. u^2 is a pure 2nd-harmonic
+            // generator (cos²θ = ½+½cos2θ → DC, removed by the wet-HPF, + 2nd),
+            // u^3 a pure 3rd (cos³θ = ¾cosθ+¼cos3θ → fundamental + 3rd). Neither
+            // produces ANY harmonic above the 3rd, so at 4× oversampling the
+            // shaped band cannot alias (3·Nyquist < oversampled Nyquist), and
+            // Character cleanly trades 2nd↔3rd with no higher-order leakage.
+            // Clamp keeps the polynomials bounded if driven past unity (only the
+            // extreme regime; at musical drive |u|≲1 so it never engages).
+            double u = drive_ * x;
+            if (u >  1.0) u =  1.0;
+            else if (u < -1.0) u = -1.0;
+            return (1.0 - character_) * (u * u) + character_ * (u * u * u);
+        }
         const double xe = drive_ * x;
         const double gp = std::tanh( xe + kEvenBias);
         const double gm = std::tanh(-xe + kEvenBias);
@@ -337,6 +359,7 @@ private:
     float  lpf_fc_  = 18000.f;
     bool   use_lpf_ = true;
     double dc_      = 0.0;
+    Shaper shaper_  = Shaper::BiasedTanh;   // default = original behavior
 
     std::array<double, kFirTaps> fir_{};
     std::array<Channel, 2>       ch_{};

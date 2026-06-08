@@ -83,11 +83,13 @@ using nablafx::param_id_for;
 // processor's TVFiLM cond_block_size. Changing this requires re-exporting both
 // ONNX bundles at the new block size.
 constexpr int kBlockSize  = 128;
-// 7 reorderable stages. The Saturator (StageID 2) is intentionally NOT in the
-// chain for now — its enum value, process case, module, and params are all kept
-// (so it can be re-added by putting 2 back into the order and bumping this count),
-// it's just not wired into processor_order, so it never runs and has no UI tab.
-constexpr int kNumStages  = 7;
+// Reorderable stages. The Saturator (StageID 2) AND the Harmonics/Exciter
+// (StageID 7) are intentionally NOT in the chain — their enum values, process
+// cases, modules (RationalA / MultibandExciter), and params are all KEPT (so
+// either can be re-added by putting its id back into the order + bumping this
+// count), they're just not wired into processor_order, so they never run and
+// have no UI tab.
+constexpr int kNumStages  = 6;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
 // 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
@@ -704,7 +706,7 @@ struct Plugin {
     // harmonic/tone shaping) and BEFORE the dynamics (SslComp). The reverb sits
     // AFTER BassMono (so its bass is already tightened) and BEFORE the limiter,
     // so the limiter still catches any reverb peaks.
-    std::array<int, kNumStages> processor_order{6, 7, 1, 8, 9, 4, 5};
+    std::array<int, kNumStages> processor_order{6, 1, 8, 9, 4, 5};   // Harmonics(7) disabled
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -719,7 +721,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{6,7,1,8,9,4,5};
+    std::array<int,kNumStages> pending_order{6,1,8,9,4,5};   // Harmonics(7) disabled
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -889,8 +891,7 @@ static uint32_t compute_latency_(const Plugin& plug) {
     uint32_t lat = kBlockSize;
     lat += static_cast<uint32_t>(plug.chains[0].ceiling.latency_samples());
 
-    float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f, exc_warm = 0.f, exc_pres = 0.f;
-    bool  exc_on = false;
+    float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f;
     int   cls_idx = 0;
     for (size_t i = 0; i < plug.meta->controls.size(); ++i) {
         const auto& c = plug.meta->controls[i];
@@ -899,9 +900,6 @@ static uint32_t compute_latency_(const Plugin& plug) {
         else if (c.id == "SSC") ssc_wet = v;
         else if (c.id == "CLS") cls_idx = static_cast<int>(std::lround(v));
         else if (c.id == "MLI") ml_wet  = v;
-        else if (c.id == "EXC_WARM") exc_warm = v;
-        else if (c.id == "EXC_PRES") exc_pres = v;
-        else if (c.id == "EXC_ON")   exc_on   = (v >= 0.5f);
     }
 
     if (eq_wet > 0.f && !g_state->autoeq_dsp_per_class.empty()) {
@@ -920,12 +918,8 @@ static uint32_t compute_latency_(const Plugin& plug) {
     if (ml_wet > 0.f)
         lat += static_cast<uint32_t>(nablafx::MelLimiter::kLatency);
 
-    // Each active Harmonics band adds its FIR group delay (the two CLEAN
-    // exciters run in series); an inactive band early-returns with no delay.
-    if (exc_on) {
-        if (exc_warm > 0.f) lat += static_cast<uint32_t>(plug.exc_warm.latency_samples());
-        if (exc_pres > 0.f) lat += static_cast<uint32_t>(plug.exc_pres.latency_samples());
-    }
+    // (Harmonics/Exciter is disabled — not in processor_order — so it adds no
+    // latency. Its FIR-group-delay contribution returns when stage 7 is re-added.)
 
     return lat;
 }

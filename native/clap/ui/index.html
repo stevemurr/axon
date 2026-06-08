@@ -498,10 +498,11 @@ const PROCESSORS = [
   // just not exposed here. Re-add this entry + put 2 back in the order to restore.
   { id: 4, name: 'BUS COMP',  params: ['SSC', 'SSC_IN'],          wetParams: ['SSC'] },
   { id: 6, name: 'BASS MONO', params: ['BMI', 'BMF'],                   wetParams: ['BMI'] },
-  // HARMONICS: two knobs (Warmth = low-mid 2nd, Presence = high 2nd+3rd). The
-  // band display shows two fixed color-coded zones with a live overlay of the
-  // actual harmonic energy each knob is adding (see drawExcBand).
-  { id: 7, name: 'HARMONICS', params: ['EXC_ON','EXC_WARM','EXC_PRES'], wetParams: ['EXC_ON'] },
+  // HARMONICS (id 7) removed from the chain for now — kept in the DSP/code
+  // (MultibandExciter, the stage case, drawExcBand/buildListenButton, EXC_*
+  // params), just not exposed here. Re-add this entry + put 7 back in the order
+  // (and bump kNumStages) to restore.
+  // { id: 7, name: 'HARMONICS', params: ['EXC_ON','EXC_WARM','EXC_PRES'], wetParams: ['EXC_ON'] },
   { id: 8, name: 'REVERB',    params: ['RVB_MIX','RVB_SIZE','RVB_WIDTH','RVB_DAMP','RVB_LOWCUT'], wetParams: ['RVB_MIX'] },
   { id: 9, name: 'WIDENER',   params: ['WID_ON','WID_AMT','WID_FREQ','WID_AIR'], wetParams: ['WID_ON'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },

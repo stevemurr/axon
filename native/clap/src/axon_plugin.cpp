@@ -1425,6 +1425,7 @@ void flush_chain_block_(Plugin& plug,
                     // ask the controller for the full-depth curve (depth01 = 1).
                     auto& actrl = plug.chains[ch].adaptive_eq;
                     actrl.set_target_curve(adaptive_curve_idx);   // follow CLS
+                    actrl.set_response_ms(amt.eq_speed_ms);       // EQ Speed knob
                     actrl.observe(blk, kBlockSize);
                     actrl.target_bands(eq_params, n_params, 1.0f);
                 } else {

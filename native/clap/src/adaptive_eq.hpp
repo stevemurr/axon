@@ -157,6 +157,12 @@ public:
     void mel_db(float* out) const { for (int b = 0; b < cfg_.n_bands; ++b) out[b] = mel_db_[b]; }
     const std::vector<double>& centers() const { return centers_; }
     bool primed() const { return primed_; }
+    // Runtime-settable averaging window (recomputes the EWMA pole; no realloc,
+    // no state reset). Shorter = tracks sudden spectral changes faster.
+    void set_tau_ms(double ms) {
+        const double frames_per_tau = (cfg_.sample_rate * ms * 1e-3) / std::max(1, hop_);
+        alpha_ = std::exp(-1.0 / std::max(1.0, frames_per_tau));
+    }
 
 private:
     void swap_(RunningMelSpectrum& o) noexcept {
@@ -327,7 +333,22 @@ public:
     }
     int  target_curve() const { return target_idx_; }
 
+    // Response time (ms) — how fast the controller re-targets when the input
+    // spectrum shifts. Drives BOTH the emitted-curve smoother (= ms) and the
+    // running-spectrum average (= ms * kSpecTauMult, floored at the FFT window
+    // so it can't resolve faster than it measures). Smaller = snappier (tracks
+    // sudden section changes); the spectrum average still rejects per-beat
+    // transients. Recomputes poles only — no realloc, no state reset.
+    void set_response_ms(float ms) {
+        const double out_ms = std::min(std::max((double)ms, 1.0), 4000.0);
+        tau_s_ = out_ms * 1e-3;
+        const double bpt = (double)cfg_.sample_rate * tau_s_ / std::max(1, cfg_.block_size);
+        alpha_ = std::exp(-1.0 / std::max(1.0, bpt));
+        spec_.set_tau_ms(std::min(std::max(out_ms * kSpecTauMult, 50.0), 4000.0));
+    }
+
 private:
+    static constexpr double kSpecTauMult = 3.0;  // spectrum averages ~3× the output TC
     float block_alpha_(float tau_ms) const {
         if (tau_ms <= 0.0f) return 0.0f;
         const double bpt = (double)cfg_.sample_rate * (tau_ms * 1e-3) / std::max(1, cfg_.block_size);

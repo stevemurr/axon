@@ -60,6 +60,7 @@
 #include "mel_limiter.hpp"
 #include "rational_a.hpp"
 #include "spectral_mask_eq.hpp"
+#include "iir_filterbank_eq.hpp"   // zero-latency renderer (STFT↔IIR toggle)
 #include "adaptive_eq.hpp"   // deterministic Auto-EQ controller (Neural↔Adaptive toggle)
 #include "true_peak_ceiling.hpp"
 
@@ -585,6 +586,10 @@ struct ChannelChain {
     // now, but each class still gets its own instance so the per-class
     // mask-smoother state doesn't bleed across class switches.
     std::vector<std::unique_ptr<SpectralMaskEq>>    autoeq_spec_per_class;
+    // Per-class zero-latency IIR-filterbank renderer — the alternate to the STFT
+    // mask, selected by EQ_RENDER. Same per-band [0,1] contract; minimum-phase
+    // biquad cascade, no STFT framing, no pre-ring.
+    std::vector<std::unique_ptr<nablafx::IirFilterbankEq>> autoeq_iir_per_class;
     // Peak-hold envelope follower for auto-EQ controller input normalization.
     // Training normalized peak per ~10 s segment; using a per-128-block peak at
     // runtime collapsed the LSTM's input distribution. Attack-instant /
@@ -896,18 +901,22 @@ static uint32_t compute_latency_(const Plugin& plug) {
     uint32_t lat = kBlockSize;
     lat += static_cast<uint32_t>(plug.chains[0].ceiling.latency_samples());
 
-    float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f;
+    float eq_wet = 0.f, ssc_wet = 0.f, ml_wet = 0.f, eq_render = 0.f;
     int   cls_idx = 0;
     for (size_t i = 0; i < plug.meta->controls.size(); ++i) {
         const auto& c = plug.meta->controls[i];
         const float v = plug.control_values[i];
-        if      (c.id == "EQ")  eq_wet  = v;
-        else if (c.id == "SSC") ssc_wet = v;
-        else if (c.id == "CLS") cls_idx = static_cast<int>(std::lround(v));
-        else if (c.id == "MLI") ml_wet  = v;
+        if      (c.id == "EQ")        eq_wet    = v;
+        else if (c.id == "SSC")       ssc_wet   = v;
+        else if (c.id == "CLS")       cls_idx   = static_cast<int>(std::lround(v));
+        else if (c.id == "MLI")       ml_wet    = v;
+        else if (c.id == "EQ_RENDER") eq_render = v;
     }
 
-    if (eq_wet > 0.f && !g_state->autoeq_dsp_per_class.empty()) {
+    // The STFT mask renderer adds n_fft latency; the IIR-bank renderer is
+    // zero-latency. This recompute fires on every param change (and notifies the
+    // host), so toggling EQ_RENDER re-PDCs exactly like toggling EQ on/off.
+    if (eq_wet > 0.f && eq_render < 0.5f && !g_state->autoeq_dsp_per_class.empty()) {
         const int n_cls = static_cast<int>(g_state->autoeq_dsp_per_class.size());
         cls_idx = std::clamp(cls_idx, 0, n_cls - 1);
         if (g_state->autoeq_dsp_per_class[cls_idx].kind == "spectral_mask_eq") {
@@ -1048,6 +1057,8 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
         ch.autoeq_ort_per_class.reserve(classes.size());
         ch.autoeq_spec_per_class.clear();
         ch.autoeq_spec_per_class.resize(classes.size());
+        ch.autoeq_iir_per_class.clear();
+        ch.autoeq_iir_per_class.resize(classes.size());
         for (size_t i = 0; i < classes.size(); ++i) {
             const std::string& cls = classes[i];
             const std::string& dir = g_state->axon_meta.auto_eq.classes.at(cls);
@@ -1073,6 +1084,10 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
             }
             ch.autoeq_spec_per_class[i] = std::make_unique<SpectralMaskEq>();
             ch.autoeq_spec_per_class[i]->reset(
+                std::get<SpectralMaskEqParams>(dsp.params));
+            // Parallel zero-latency IIR renderer for the same band layout.
+            ch.autoeq_iir_per_class[i] = std::make_unique<nablafx::IirFilterbankEq>();
+            ch.autoeq_iir_per_class[i]->reset(
                 std::get<SpectralMaskEqParams>(dsp.params));
         }
         // Deterministic Auto-EQ controller — class-agnostic, configured from the
@@ -1225,6 +1240,7 @@ struct AmountSnapshot {
     float trim_lin;
     float eq_range;
     bool  eq_adaptive;        // EQ_ENGINE: false = neural LSTM, true = deterministic cascade
+    bool  eq_render_iir;      // EQ_RENDER: false = STFT mask, true = zero-latency IIR bank
     float eq_boost_scale;
     float eq_speed_ms;
     float ssl_comp_wet;
@@ -1264,6 +1280,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
     float eqeng=0.f;                                      // EQ_ENGINE: 0 neural, 1 adaptive
+    float eqrnd=0.f;                                      // EQ_RENDER: 0 STFT mask, 1 IIR bank
     float ssc=0.f;
     float ssc_in_db=0.f;
     int   cls_idx=plug.active_autoeq_cls;
@@ -1278,6 +1295,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="EQR") eqr=v; else if(c.id=="EQS") eqs=v;
         else if(c.id=="EQB") eqb=v;
         else if(c.id=="EQ_ENGINE") eqeng=v;
+        else if(c.id=="EQ_RENDER") eqrnd=v;
         else if(c.id=="TRM") trm_db=v;
         else if(c.id=="SSC") ssc=v;
         else if(c.id=="SSC_IN") ssc_in_db=v;
@@ -1307,6 +1325,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.trim_lin=std::pow(10.f,trm_db/20.f);
     s.eq_range=eqr;
     s.eq_adaptive=(eqeng>=0.5f);
+    s.eq_render_iir=(eqrnd>=0.5f);
     s.eq_boost_scale=eqb;
     s.eq_speed_ms=eqs;
     s.ssl_comp_wet = ssc * g_state->axon_meta.amt_ssl_comp.wet_mix_max;
@@ -1417,35 +1436,53 @@ void flush_chain_block_(Plugin& plug,
                 }
 
                 std::copy_n(blk, kBlockSize, dry.data());
-                // Spectral mask: range scales the predicted dB curve toward
-                // 0 dB; speed sets the bin-gain smoother time constant. Both
-                // applied inside set_params on each tick.
-                auto& dsp = plug.chains[ch].autoeq_spec_per_class[cls];
-                dsp->set_range_norm(amt.eq_range);
-                dsp->set_boost_scale(amt.eq_boost_scale);
-                dsp->set_speed_tau_ms(amt.eq_speed_ms);
-                dsp->set_params(eq_params, n_params);
-                dsp->process(blk, wet_a.data(), kBlockSize);
-                if (ch == 0) {
-                    // 5-point curve display at the historical PEQ band centres
-                    // so the GUI's curve overlay stays where users expect.
-                    static constexpr float kDisplayHz[5] =
-                        {1010.f, 110.f, 1100.f, 7000.f, 10000.f};
-                    float gains5[5];
-                    dsp->sample_gains_db(kDisplayHz, gains5, 5);
-                    plug.spectrum.set_eq_gains(gains5);
-                    // 50-point bin display (log-spaced 20–20k Hz).
-                    static const std::array<float, SpectrumAnalyzer::kNumBins> kBinHz = []() {
-                        std::array<float, SpectrumAnalyzer::kNumBins> hz;
-                        for (int i = 0; i < SpectrumAnalyzer::kNumBins; ++i)
-                            hz[i] = 20.f * std::pow(1000.f,
-                                float(i) / (SpectrumAnalyzer::kNumBins - 1));
-                        return hz;
-                    }();
-                    float gains50[SpectrumAnalyzer::kNumBins];
-                    dsp->sample_gains_db(kBinHz.data(), gains50,
-                                         SpectrumAnalyzer::kNumBins);
-                    plug.spectrum.set_eq_bins(gains50);
+                // Display frequencies: 5-point overlay at the historical PEQ band
+                // centres + 50-point log-spaced bin curve (20–20k Hz).
+                static constexpr float kDisplayHz[5] =
+                    {1010.f, 110.f, 1100.f, 7000.f, 10000.f};
+                static const std::array<float, SpectrumAnalyzer::kNumBins> kBinHz = []() {
+                    std::array<float, SpectrumAnalyzer::kNumBins> hz;
+                    for (int i = 0; i < SpectrumAnalyzer::kNumBins; ++i)
+                        hz[i] = 20.f * std::pow(1000.f,
+                            float(i) / (SpectrumAnalyzer::kNumBins - 1));
+                    return hz;
+                }();
+                // EQ_RENDER: zero-latency minimum-phase IIR bank vs the STFT mask.
+                // Both consume the same eq_params [0,1] contract.
+                if (amt.eq_render_iir) {
+                    auto& dsp = plug.chains[ch].autoeq_iir_per_class[cls];
+                    dsp->set_range_norm(amt.eq_range);   // IIR bank: range only
+                    dsp->set_params(eq_params, n_params);
+                    dsp->process(blk, wet_a.data(), kBlockSize);
+                    if (ch == 0) {
+                        float gains5[5];
+                        for (int k = 0; k < 5; ++k)
+                            gains5[k] = static_cast<float>(dsp->magnitude_db(kDisplayHz[k]));
+                        plug.spectrum.set_eq_gains(gains5);
+                        float gains50[SpectrumAnalyzer::kNumBins];
+                        for (int k = 0; k < SpectrumAnalyzer::kNumBins; ++k)
+                            gains50[k] = static_cast<float>(dsp->magnitude_db(kBinHz[k]));
+                        plug.spectrum.set_eq_bins(gains50);
+                    }
+                } else {
+                    // Spectral mask: range scales the predicted dB curve toward
+                    // 0 dB; speed sets the bin-gain smoother time constant. Both
+                    // applied inside set_params on each tick.
+                    auto& dsp = plug.chains[ch].autoeq_spec_per_class[cls];
+                    dsp->set_range_norm(amt.eq_range);
+                    dsp->set_boost_scale(amt.eq_boost_scale);
+                    dsp->set_speed_tau_ms(amt.eq_speed_ms);
+                    dsp->set_params(eq_params, n_params);
+                    dsp->process(blk, wet_a.data(), kBlockSize);
+                    if (ch == 0) {
+                        float gains5[5];
+                        dsp->sample_gains_db(kDisplayHz, gains5, 5);
+                        plug.spectrum.set_eq_gains(gains5);
+                        float gains50[SpectrumAnalyzer::kNumBins];
+                        dsp->sample_gains_db(kBinHz.data(), gains50,
+                                             SpectrumAnalyzer::kNumBins);
+                        plug.spectrum.set_eq_bins(gains50);
+                    }
                 }
                 blend_(blk, dry.data(), wet_a.data(), amt.autoeq_wet_mix, kBlockSize);
             }

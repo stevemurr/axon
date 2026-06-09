@@ -251,6 +251,15 @@
       "skew": 1.0,
       "unit": "switch"
     },
+    "EQ_RENDER": {
+      "id": "EQ_RENDER",
+      "name": "AutoEQ Renderer",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
     "EXC_WARM": {
       "id": "EXC_WARM",
       "name": "Warmth",

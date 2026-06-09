@@ -493,7 +493,7 @@
 // ============================================================
 
 const PROCESSORS = [
-  { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
+  { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ_ENGINE', 'EQ_RENDER', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   // SATURATOR (id 2) removed from the chain for now — kept in the DSP/code,
   // just not exposed here. Re-add this entry + put 2 back in the order to restore.
   { id: 4, name: 'BUS COMP',  params: ['SSC', 'SSC_IN'],          wetParams: ['SSC'] },
@@ -701,6 +701,8 @@ function onToggleClick(id) {
 function toggleLabels(id) {
   if (id === 'C_L') return ['COMP', 'LIMIT'];
   if (id === 'MLA') return ['EVEN', 'DYNAMIC'];
+  if (id === 'EQ_ENGINE') return ['NEURAL', 'ADAPTIVE'];
+  if (id === 'EQ_RENDER') return ['STFT', 'IIR'];
   return ['OFF', 'ON'];
 }
 

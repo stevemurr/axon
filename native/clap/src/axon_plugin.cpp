@@ -1404,6 +1404,14 @@ void flush_chain_block_(Plugin& plug,
             const auto& cls_dsp = g_state->autoeq_dsp_per_class[cls];
             const int   n_params =
                 std::get<SpectralMaskEqParams>(cls_dsp.params).num_control_params;
+            // Adaptive target curve follows the CLS selector: map the active
+            // class name (bass/drums/vocals/other/full_mix) to its empirical
+            // tonal-balance curve. Unknown → full_mix (set_target_curve clamps).
+            const auto& aeq_classes = g_state->axon_meta.auto_eq.class_order;
+            const int adaptive_curve_idx =
+                (cls >= 0 && cls < static_cast<int>(aeq_classes.size()))
+                    ? nablafx::adaptive_eq_detail::target_curve_index(aeq_classes[cls].c_str())
+                    : 0;
             std::array<float, 64> eq_params_storage{};
             float* eq_params = eq_params_storage.data();
             float* ch_buf[2] = {work_l, work_r};
@@ -1416,6 +1424,7 @@ void flush_chain_block_(Plugin& plug,
                     // Range is applied by the renderer's set_range_norm below, so
                     // ask the controller for the full-depth curve (depth01 = 1).
                     auto& actrl = plug.chains[ch].adaptive_eq;
+                    actrl.set_target_curve(adaptive_curve_idx);   // follow CLS
                     actrl.observe(blk, kBlockSize);
                     actrl.target_bands(eq_params, n_params, 1.0f);
                 } else {

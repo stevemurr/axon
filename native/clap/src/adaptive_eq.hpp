@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "meta.hpp"   // SpectralMaskEqParams (shared config with the renderer)
+#include "adaptive_eq_targets.hpp"   // GENERATED empirical tonal-balance curves
 
 namespace nablafx {
 
@@ -261,7 +262,10 @@ public:
         spec_.mel_db(in_db_.data());
 
         // C1 — tonal target match: want−have, smooth, zero-mean, gate, soft deadband.
-        for (int b = 0; b < nb_; ++b) raw_[b] = (float)adaptive_eq_detail::target_db(centers_[b]) - in_db_[b];
+        // Target is the empirical corpus curve (full_mix by default; see
+        // set_target_curve), density-normalized to match the running spectrum.
+        for (int b = 0; b < nb_; ++b)
+            raw_[b] = (float)adaptive_eq_detail::target_curve_db(centers_[b], target_idx_) - in_db_[b];
         gaussian_smooth_db(raw_.data(), sm_.data(), nb_, match_sigma_);
         double mean = 0.0; for (int b = 0; b < nb_; ++b) mean += sm_[b]; mean /= nb_;
         for (int b = 0; b < nb_; ++b) {
@@ -312,6 +316,17 @@ public:
 
     int latency_samples() const { return 0; }   // analysis-only; renderer applies the curve
 
+    // Select the empirical target curve by index (0 = full_mix; see
+    // adaptive_eq_targets.hpp kTargetCurves) or by class name. Unknown → full_mix.
+    void set_target_curve(int idx) {
+        target_idx_ = (idx >= 0 && idx < adaptive_eq_detail::kNumTargetCurves) ? idx : 0;
+    }
+    void set_target_curve(const char* class_name) {
+        const int i = adaptive_eq_detail::target_curve_index(class_name);
+        target_idx_ = i >= 0 ? i : 0;
+    }
+    int  target_curve() const { return target_idx_; }
+
 private:
     float block_alpha_(float tau_ms) const {
         if (tau_ms <= 0.0f) return 0.0f;
@@ -325,6 +340,7 @@ private:
     std::vector<double> centers_;
     std::vector<float> out_db_, in_db_, raw_, sm_, base_, cut_db_, a_att_, a_rel_, db_scratch_;
     double alpha_ = 0.0;
+    int target_idx_ = 0;   // empirical target curve (0 = full_mix)
     // Tunables (validated defaults from harness_eq_control C1C2_Cascade).
     double match_sigma_ = 3.0, cut_sigma_ = 4.0, tau_s_ = 0.40;
     double gate_db_ = 45.0;

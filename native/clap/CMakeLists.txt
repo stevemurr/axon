@@ -178,6 +178,16 @@ add_executable(test_composite_meta_validate
 target_include_directories(test_composite_meta_validate PRIVATE ${CMAKE_SOURCE_DIR}/src ${JSON_INCLUDE_DIR})
 target_compile_options(test_composite_meta_validate PRIVATE -UNDEBUG)
 
+# test_control_contract — the shipped axon_meta.json control set must equal the
+# set of controls axon_plugin.cpp actually reads (guards composite.py drift), and
+# the SSL EQ port's 21 SEQ_* controls must be present with sane specs.
+add_executable(test_control_contract tests/test_control_contract.cpp)
+target_include_directories(test_control_contract PRIVATE ${CMAKE_SOURCE_DIR}/src ${JSON_INCLUDE_DIR})
+target_compile_options(test_control_contract PRIVATE -UNDEBUG)
+target_compile_definitions(test_control_contract PRIVATE
+    SRC_PATH="${CMAKE_SOURCE_DIR}/src/axon_plugin.cpp"
+    META_PATH="${CMAKE_SOURCE_DIR}/../../weights/axon_bundle/axon_meta.json")
+
 # test_nablafx_plugin — control-snapshot bounds + clamped normalization logic.
 add_executable(test_nablafx_plugin tests/test_nablafx_plugin.cpp src/param_id.cpp)
 target_include_directories(test_nablafx_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src)

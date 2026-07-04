@@ -1476,6 +1476,7 @@ void flush_chain_block_(Plugin& plug,
                     uint64_t g0 = plug.ssl_asg_gen.load(std::memory_order_acquire);
                     if (g0 & 1ull) continue;                       // writer mid-update
                     asg = plug.ssl_asg_published;
+                    std::atomic_thread_fence(std::memory_order_acquire);  // gains read before re-check
                     if (plug.ssl_asg_gen.load(std::memory_order_acquire) == g0) break;
                 }
             }
@@ -2085,11 +2086,16 @@ static void solve_ssl_coupling_(Plugin& plug, bool spec_ready) {
     const int NA = nablafx::SslChannelEq::kNumAssist;
     const uint64_t gen = plug.ssl_asg_gen.load(std::memory_order_relaxed);
     plug.ssl_asg_gen.store(gen + 1, std::memory_order_release);   // odd = writing
+    // Publish the odd marker BEFORE the (non-atomic) gain writes: a plain release
+    // store only fences *earlier* ops, so on a weakly-ordered CPU (arm64) the data
+    // stores below could otherwise become visible ahead of the odd counter and let
+    // a reader accept a torn value behind an even generation.
+    std::atomic_thread_fence(std::memory_order_release);
     for (int b = 0; b < NA && b < (int)dg.size(); ++b) {
         plug.ssl_asg_accum[b] = std::clamp(plug.ssl_asg_accum[b] + (float)dg[b], -12.f, 12.f);
         plug.ssl_asg_published[b] = plug.ssl_asg_accum[b];
     }
-    plug.ssl_asg_gen.store(gen + 2, std::memory_order_release);   // even = stable
+    plug.ssl_asg_gen.store(gen + 2, std::memory_order_release);   // even = stable (orders data before)
 }
 
 }  // namespace
@@ -2420,6 +2426,7 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
                 uint64_t g0 = plug->ssl_asg_gen.load(std::memory_order_acquire);
                 if (g0 & 1ull) continue;
                 asg = plug->ssl_asg_published;
+                std::atomic_thread_fence(std::memory_order_acquire);  // gains read before re-check
                 if (plug->ssl_asg_gen.load(std::memory_order_acquire) == g0) break;
             }
             for (int b = 0; b < NA; ++b) asg[b] *= amt.ssl_auto;

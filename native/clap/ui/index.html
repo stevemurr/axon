@@ -493,6 +493,21 @@
 // ============================================================
 
 const PROCESSORS = [
+  // SSL EQ (id 3) — SSL 9000 J channel EQ; sits before Auto EQ. LF/HF go
+  // shelf<->bell via *_BELL; LMF/HMF carry Q; HPF/LPF have on/off + cutoff.
+  // SEQ_AUTO/SPLIT/CAL are the Auto-EQ coupling (assist bands absorb the
+  // Auto-EQ correction — press CAL to solve).
+  { id: 3, name: 'SSL EQ', params: [
+      'SEQ_ON',
+      'SEQ_HPF_ON', 'SEQ_HPF_F',
+      'SEQ_LF_G',  'SEQ_LF_F',  'SEQ_LF_BELL',
+      'SEQ_LMF_G', 'SEQ_LMF_F', 'SEQ_LMF_Q',
+      'SEQ_HMF_G', 'SEQ_HMF_F', 'SEQ_HMF_Q',
+      'SEQ_HF_G',  'SEQ_HF_F',  'SEQ_HF_BELL',
+      'SEQ_LPF_ON', 'SEQ_LPF_F',
+      'SEQ_DRIVE',
+      'SEQ_AUTO', 'SEQ_SPLIT', 'SEQ_CAL',
+    ], wetParams: ['SEQ_ON'] },
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ_ENGINE', 'EQ_RENDER', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   // SATURATOR (id 2) removed from the chain for now — kept in the DSP/code,
   // just not exposed here. Re-add this entry + put 2 back in the order to restore.
@@ -511,7 +526,7 @@ const PROCESSORS = [
 // Runtime state
 let paramMeta   = {};   // id → { name, min, max, def, unit }
 let paramValues = {};   // id → float
-let procOrder   = [6,7,1,8,9,4,5];
+let procOrder   = [6,3,1,8,9,4,5];
 let selectedProc = 6;
 
 // ============================================================
@@ -703,6 +718,9 @@ function toggleLabels(id) {
   if (id === 'MLA') return ['EVEN', 'DYNAMIC'];
   if (id === 'EQ_ENGINE') return ['NEURAL', 'ADAPTIVE'];
   if (id === 'EQ_RENDER') return ['STFT', 'IIR'];
+  // SSL EQ: LF/HF shape switch and the momentary coupling recalibrate.
+  if (id === 'SEQ_LF_BELL' || id === 'SEQ_HF_BELL') return ['SHELF', 'BELL'];
+  if (id === 'SEQ_CAL') return ['IDLE', 'CALIBRATE'];
   return ['OFF', 'ON'];
 }
 
@@ -1347,7 +1365,7 @@ window.axonInit = function(state) {
   paramMeta   = state.paramMeta   || {};
   paramValues = state.paramValues || {};
   const VISIBLE = new Set(PROCESSORS.map(p => p.id));
-  procOrder   = (state.processorOrder || [6,7,1,8,9,4,5]).filter(id => VISIBLE.has(id));
+  procOrder   = (state.processorOrder || [6,3,1,8,9,4,5]).filter(id => VISIBLE.has(id));
   selectedProc = procOrder[0] ?? 1;
 
   renderChain();
@@ -1395,7 +1413,7 @@ window.axonInit = function(state) {
     '#4cc9a8',  // 0 (unused)
     '#e9c46a',  // 1 AutoEQ
     '#f4a261',  // 2 Saturator
-    '#5fa8d3',  // 3 (unused)
+    '#5fa8d3',  // 3 SSL EQ
     '#bb86fc',  // 4 SslComp (BUS COMP)
     '#e76f51',  // 5 MelLimiter
     '#90be6d',  // 6 BassMono
@@ -1403,7 +1421,7 @@ window.axonInit = function(state) {
     '#4ea8de',  // 8 Reverb
     '#c792ea',  // 9 Widener (lavender)
   ];
-  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', '—', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB', 'WIDENER'];
+  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', 'SSL EQ', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB', 'WIDENER'];
 
   const DB_MIN = -90, DB_MAX = 0;
 

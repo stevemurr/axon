@@ -222,6 +222,12 @@ target_include_directories(test_spectral_mask_eq PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_compile_options(test_spectral_mask_eq PRIVATE -UNDEBUG)
 target_link_libraries(test_spectral_mask_eq PRIVATE "-framework Accelerate")
 
+# test_ssl_channel_eq — SSL 9000 J channel EQ engine + coupling solver
+# (header-only, plain biquads — no Accelerate).
+add_executable(test_ssl_channel_eq tests/test_ssl_channel_eq.cpp)
+target_include_directories(test_ssl_channel_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_ssl_channel_eq PRIVATE -UNDEBUG)
+
 # test_adaptive_eq — AdaptiveEqController (productionized C1→C2 cascade auto-EQ):
 # stability, adaptivity (no mode collapse), tonal direction, determinism, bypass.
 add_executable(test_adaptive_eq tests/test_adaptive_eq.cpp)

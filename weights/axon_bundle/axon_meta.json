@@ -385,6 +385,195 @@
       "default": 0.0,
       "skew": 1.0,
       "unit": "switch"
+    },
+    "SEQ_ON": {
+      "id": "SEQ_ON",
+      "name": "SSL EQ",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
+    "SEQ_LF_G": {
+      "id": "SEQ_LF_G",
+      "name": "LF Gain",
+      "min": -18.0,
+      "max": 18.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "dB"
+    },
+    "SEQ_LF_F": {
+      "id": "SEQ_LF_F",
+      "name": "LF Freq",
+      "min": 30.0,
+      "max": 600.0,
+      "default": 100.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
+    "SEQ_LF_BELL": {
+      "id": "SEQ_LF_BELL",
+      "name": "LF Bell",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
+    "SEQ_LMF_G": {
+      "id": "SEQ_LMF_G",
+      "name": "LMF Gain",
+      "min": -18.0,
+      "max": 18.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "dB"
+    },
+    "SEQ_LMF_F": {
+      "id": "SEQ_LMF_F",
+      "name": "LMF Freq",
+      "min": 60.0,
+      "max": 3000.0,
+      "default": 500.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
+    "SEQ_LMF_Q": {
+      "id": "SEQ_LMF_Q",
+      "name": "LMF Q",
+      "min": 0.1,
+      "max": 4.0,
+      "default": 1.0,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "SEQ_HMF_G": {
+      "id": "SEQ_HMF_G",
+      "name": "HMF Gain",
+      "min": -18.0,
+      "max": 18.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "dB"
+    },
+    "SEQ_HMF_F": {
+      "id": "SEQ_HMF_F",
+      "name": "HMF Freq",
+      "min": 400.0,
+      "max": 20000.0,
+      "default": 3000.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
+    "SEQ_HMF_Q": {
+      "id": "SEQ_HMF_Q",
+      "name": "HMF Q",
+      "min": 0.1,
+      "max": 4.0,
+      "default": 1.0,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "SEQ_HF_G": {
+      "id": "SEQ_HF_G",
+      "name": "HF Gain",
+      "min": -18.0,
+      "max": 18.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "dB"
+    },
+    "SEQ_HF_F": {
+      "id": "SEQ_HF_F",
+      "name": "HF Freq",
+      "min": 1500.0,
+      "max": 20000.0,
+      "default": 10000.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
+    "SEQ_HF_BELL": {
+      "id": "SEQ_HF_BELL",
+      "name": "HF Bell",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
+    "SEQ_HPF_ON": {
+      "id": "SEQ_HPF_ON",
+      "name": "HPF",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
+    "SEQ_HPF_F": {
+      "id": "SEQ_HPF_F",
+      "name": "HPF Freq",
+      "min": 20.0,
+      "max": 500.0,
+      "default": 80.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
+    "SEQ_LPF_ON": {
+      "id": "SEQ_LPF_ON",
+      "name": "LPF",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
+    },
+    "SEQ_LPF_F": {
+      "id": "SEQ_LPF_F",
+      "name": "LPF Freq",
+      "min": 3000.0,
+      "max": 22000.0,
+      "default": 20000.0,
+      "skew": 1.0,
+      "unit": "Hz"
+    },
+    "SEQ_DRIVE": {
+      "id": "SEQ_DRIVE",
+      "name": "Colour",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "SEQ_AUTO": {
+      "id": "SEQ_AUTO",
+      "name": "Auto Assist",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "SEQ_SPLIT": {
+      "id": "SEQ_SPLIT",
+      "name": "Split",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.6,
+      "skew": 1.0,
+      "unit": ""
+    },
+    "SEQ_CAL": {
+      "id": "SEQ_CAL",
+      "name": "Recalibrate",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "switch"
     }
   },
   "amount_mapping": {

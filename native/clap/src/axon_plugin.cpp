@@ -62,6 +62,7 @@
 #include "spectral_mask_eq.hpp"
 #include "iir_filterbank_eq.hpp"   // zero-latency renderer (STFT↔IIR toggle)
 #include "adaptive_eq.hpp"   // deterministic Auto-EQ controller (Neural↔Adaptive toggle)
+#include "ssl_channel_eq.hpp"   // SSL 9000 J channel EQ (analytic biquads; before AutoEQ)
 #include "true_peak_ceiling.hpp"
 
 namespace nablafx_axon {
@@ -90,8 +91,9 @@ constexpr int kBlockSize  = 128;
 // cases, modules (RationalA / MultibandExciter), and params are all KEPT (so
 // either can be re-added by putting its id back into the order + bumping this
 // count), they're just not wired into processor_order, so they never run and
-// have no UI tab.
-constexpr int kNumStages  = 6;
+// have no UI tab. The SSL 9000 J channel EQ (StageID 3) reuses the freed
+// OutputLeveler slot and DOES run (before AutoEQ).
+constexpr int kNumStages  = 7;
 // SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
 // values cut CPU proportionally (1 ORT call per kSslHop samples instead of
 // 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
@@ -106,11 +108,13 @@ constexpr int kNumStages  = 6;
 constexpr int kSslHop     = 1024;
 
 // IDs are stable (kept across the leveler removal) so existing automation and
-// stage colours don't shuffle; 0 (was InputLeveler) and 3 (was OutputLeveler)
-// are intentionally unused. All remaining stages are freely reorderable.
+// stage colours don't shuffle; 0 (was InputLeveler) is intentionally unused.
+// Slot 3 (was OutputLeveler) now hosts the SSL channel EQ. All remaining stages
+// are freely reorderable.
 enum class StageID : int {
     AutoEQ        = 1,
     Saturator     = 2,
+    SslEq         = 3,   // SSL 9000 J channel EQ (native biquads; sits before AutoEQ)
     SslComp       = 4,
     MelLimiter    = 5,
     BassMono      = 6,
@@ -632,6 +636,12 @@ struct ChannelChain {
     // wet with the current dry produces hop-rate comb-filter flutter.
     std::vector<float>                     ssl_comp_dry_delay;
     int                                    ssl_comp_dry_write{0};
+    // SSL 9000 J channel EQ — native biquad cascade, per channel (holds its own
+    // z-state). Zero latency; coeffs recomputed at host SR inside set_params.
+    nablafx::SslChannelEq                  ssl_eq;
+    // Long-smoothed assist-band gains (ramp toward the main-thread solve; ~2.7 s
+    // one-pole per block so a re-solve can't zipper).
+    std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_smooth{};
     TruePeakCeiling                        ceiling;
 
     // 128-sample accumulator: kBlockSize input samples in, then a chain pass,
@@ -711,12 +721,12 @@ struct Plugin {
     int bypass_w{0}, bypass_r{0};
 
     // Processor ordering — driven by GUI drag-and-drop. All stages reorderable.
-    // Default: AutoEQ → Saturator → Exciter → SslComp → BassMono → Reverb →
-    // MelLimiter. The exciter sits right after the Saturator (both are
-    // harmonic/tone shaping) and BEFORE the dynamics (SslComp). The reverb sits
-    // AFTER BassMono (so its bass is already tightened) and BEFORE the limiter,
-    // so the limiter still catches any reverb peaks.
-    std::array<int, kNumStages> processor_order{6, 1, 8, 9, 4, 5};   // Harmonics(7) disabled
+    // Default: BassMono → SslEq → AutoEQ → Reverb → Widener → SslComp →
+    // MelLimiter. SslEq (3) sits before AutoEQ so its assist bands can pre-EQ
+    // what the Auto-EQ sees (coupling). The reverb sits AFTER BassMono (so its
+    // bass is already tightened) and BEFORE the limiter, so the limiter still
+    // catches any reverb peaks.
+    std::array<int, kNumStages> processor_order{6, 3, 1, 8, 9, 4, 5};   // Harmonics(7) disabled
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -731,7 +741,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{6,1,8,9,4,5};   // Harmonics(7) disabled
+    std::array<int,kNumStages> pending_order{6,3,1,8,9,4,5};   // Harmonics(7) disabled
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -746,6 +756,17 @@ struct Plugin {
 
     // Spectrum analyzer (audio thread accumulates, main thread computes + renders).
     SpectrumAnalyzer spectrum;
+
+    // Auto-EQ -> SSL coupling (static solve). The main thread fits the 6 assist-band
+    // gains to the auto-EQ's resolved curve (spectrum.mt_eq_bins) and publishes them
+    // via a seqlock (even generation = stable); the SslEq audio stage ramps toward
+    // them. See docs/ssl_eq_coupling.md — fixed beats dynamic, so this is slow/static.
+    nablafx::SslEqSolver ssl_solver{nablafx::SslEqSolver::assist()};
+    std::atomic<uint64_t> ssl_asg_gen{0};
+    std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_published{};
+    std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_accum{};  // main-thread accumulator
+    bool ssl_recal_prev{false};
+    int  ssl_solve_timer{0};
 
     // In/out level meters (audio thread updates; published to UI via atomics).
     nablafx::LoudnessMeter  meter_in;
@@ -1143,6 +1164,10 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
         ch.ceiling = TruePeakCeiling(tcfg);
         ch.ceiling.reset(sample_rate);
 
+        // SSL channel EQ: recompute biquad coeffs at the host SR; clear z-state.
+        ch.ssl_eq.prepare(sample_rate);
+        ch.ssl_asg_smooth.fill(0.f);
+
         ch.in_fill   = 0;
         ch.out_avail = 0;
         ch.out_read  = 0;
@@ -1264,6 +1289,15 @@ struct AmountSnapshot {
     float wid_amt, wid_freq, wid_air;
     bool  auto_gain_on;
     bool  bypass_on;
+    // SSL 9000 J channel EQ (SEQ_*). ssl_eq_on = stage master enable; ssl_eq holds
+    // the resolved biquad params built from the manual band/filter/harmonic knobs.
+    bool                    ssl_eq_on;
+    nablafx::SslEqParamsRT  ssl_eq;
+    // Auto-EQ coupling: ssl_auto = assist amount / enable, ssl_split = α (how much
+    // of the auto-EQ curve the SSL absorbs), ssl_recal = momentary recalibrate.
+    float                   ssl_auto;
+    float                   ssl_split;
+    bool                    ssl_recal;
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
@@ -1283,6 +1317,15 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float eqrnd=0.f;                                      // EQ_RENDER: 0 STFT mask, 1 IIR bank
     float ssc=0.f;
     float ssc_in_db=0.f;
+    // SSL channel EQ (SEQ_*). Defaults = flat / filters off / no colour.
+    float seon=0.f;
+    float slfg=0.f,slff=100.f,slfb=0.f;
+    float slmg=0.f,slmf=500.f,slmq=1.f;
+    float shmg=0.f,shmf=3000.f,shmq=1.f;
+    float shfg=0.f,shff=10000.f,shfb=0.f;
+    float shpon=0.f,shpf=80.f,slpon=0.f,slpf=20000.f;
+    float sdrv=0.f;
+    float sauto=0.f,ssplit=0.6f,srecal=0.f;   // auto-EQ coupling (SEQ_AUTO/SPLIT/CAL)
     int   cls_idx=plug.active_autoeq_cls;
     for (size_t i=0;i<plug.meta->controls.size();++i) {
         const auto& c=plug.meta->controls[i];
@@ -1315,6 +1358,16 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="WID_AMT") wa=v; else if(c.id=="WID_FREQ") wf=v;
         else if(c.id=="WID_AIR") war=v;
         else if(c.id=="AGN") agn=v; else if(c.id=="BYP") byp=v;
+        else if(c.id=="SEQ_ON") seon=v;
+        else if(c.id=="SEQ_LF_G") slfg=v; else if(c.id=="SEQ_LF_F") slff=v; else if(c.id=="SEQ_LF_BELL") slfb=v;
+        else if(c.id=="SEQ_LMF_G") slmg=v; else if(c.id=="SEQ_LMF_F") slmf=v; else if(c.id=="SEQ_LMF_Q") slmq=v;
+        else if(c.id=="SEQ_HMF_G") shmg=v; else if(c.id=="SEQ_HMF_F") shmf=v; else if(c.id=="SEQ_HMF_Q") shmq=v;
+        else if(c.id=="SEQ_HF_G") shfg=v; else if(c.id=="SEQ_HF_F") shff=v; else if(c.id=="SEQ_HF_BELL") shfb=v;
+        else if(c.id=="SEQ_HPF_ON") shpon=v; else if(c.id=="SEQ_HPF_F") shpf=v;
+        else if(c.id=="SEQ_LPF_ON") slpon=v; else if(c.id=="SEQ_LPF_F") slpf=v;
+        else if(c.id=="SEQ_DRIVE") sdrv=v;
+        else if(c.id=="SEQ_AUTO") sauto=v; else if(c.id=="SEQ_SPLIT") ssplit=v;
+        else if(c.id=="SEQ_CAL") srecal=v;
     }
     AmountSnapshot s{};
     s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf; s.sat_lpf_hz=slf;
@@ -1353,6 +1406,22 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.wid_air      = war;    // extra high-frequency side width (above ~6 kHz)
     s.auto_gain_on = (agn >= 0.5f);
     s.bypass_on    = (byp >= 0.5f);
+    // SSL channel EQ: build resolved biquad params from the manual knobs.
+    s.ssl_eq_on = (seon >= 0.5f);
+    {
+        nablafx::SslEqParamsRT& e = s.ssl_eq;
+        e.eq_on   = true;                              // bands active whenever the stage runs
+        e.hpf_on  = (shpon >= 0.5f); e.hpf_hz = shpf; e.hpf_q = 0.70710678f;
+        e.lpf_on  = (slpon >= 0.5f); e.lpf_hz = slpf; e.lpf_q = 0.70710678f;
+        e.lf_gain = slfg; e.lf_hz = slff; e.lf_q = 0.70710678f; e.lf_bellmix = (slfb >= 0.5f) ? 1.f : 0.f;
+        e.lmf_gain = slmg; e.lmf_hz = slmf; e.lmf_q = slmq;
+        e.hmf_gain = shmg; e.hmf_hz = shmf; e.hmf_q = shmq;
+        e.hf_gain = shfg; e.hf_hz = shff; e.hf_q = 0.70710678f; e.hf_bellmix = (shfb >= 0.5f) ? 1.f : 0.f;
+        e.harmonic_mix = sdrv;                          // SEQ_DRIVE: 0 = no colour
+    }
+    s.ssl_auto  = sauto;
+    s.ssl_split = ssplit;
+    s.ssl_recal = (srecal >= 0.5f);
     return s;
 }
 
@@ -1387,6 +1456,38 @@ void flush_chain_block_(Plugin& plug,
     for (int pos = 0; pos < kNumStages; ++pos) {
         const int stage_idx = plug.processor_order[pos];
         switch (static_cast<StageID>(stage_idx)) {
+
+        case StageID::SslEq: {
+            // SSL 9000 J channel EQ — native biquad cascade, per channel. Zero
+            // latency, coeffs recomputed at host SR inside set_params (change-
+            // guarded). Master-bypassed when SEQ_ON is off (bit-identical dry).
+            if (!amt.ssl_eq_on) break;
+            // Auto-EQ coupling: read the main-thread-solved assist gains (seqlock —
+            // retry while the generation is odd/changing), scaled by SEQ_AUTO.
+            constexpr int kNA = nablafx::SslChannelEq::kNumAssist;
+            std::array<float, kNA> asg{};
+            if (amt.ssl_auto > 0.f) {
+                for (int tries = 0; tries < 4; ++tries) {
+                    uint64_t g0 = plug.ssl_asg_gen.load(std::memory_order_acquire);
+                    if (g0 & 1ull) continue;                       // writer mid-update
+                    asg = plug.ssl_asg_published;
+                    if (plug.ssl_asg_gen.load(std::memory_order_acquire) == g0) break;
+                }
+            }
+            float* ch_buf[2] = {work_l, work_r};
+            for (uint32_t ch = 0; ch < n_ch; ++ch) {
+                auto& e = plug.chains[ch].ssl_eq;
+                e.set_params(amt.ssl_eq);
+                // Ramp the assist gains toward the published target (~2.7 s one-pole
+                // per 128-sample block) so the static solve engages smoothly.
+                auto& sm = plug.chains[ch].ssl_asg_smooth;
+                for (int b = 0; b < kNA; ++b)
+                    sm[b] = 0.999f * sm[b] + 0.001f * (amt.ssl_auto * asg[b]);
+                e.set_assist_gains(sm.data(), kNA);
+                e.process(ch_buf[ch], nullptr, kBlockSize);   // in place, this channel's state
+            }
+            break;
+        }
 
         case StageID::AutoEQ: {
             // If CLS changed since the previous block, swap the active class
@@ -1953,6 +2054,39 @@ void flush_chain_block_(Plugin& plug,
     }
 }
 
+// Auto-EQ -> SSL coupling: on the main thread, fit the 6 assist bands to the auto-EQ
+// curve (spectrum.mt_eq_bins) and publish via a seqlock. STATIC solve — triggered by
+// SEQ_CAL (recalibrate edge) or a slow ~1 s timer (fixed beats dynamic; see
+// docs/ssl_eq_coupling.md). Accumulates: each solve absorbs SEQ_SPLIT of the CURRENT
+// residual, so it converges as the auto-EQ curve shrinks (geometric contraction).
+static void solve_ssl_coupling_(Plugin& plug, bool spec_ready) {
+    const AmountSnapshot amt = resolve_amount_(plug);
+    if (amt.ssl_auto <= 0.f || !amt.ssl_eq_on) { plug.ssl_recal_prev = amt.ssl_recal; return; }
+    const bool recal_edge = amt.ssl_recal && !plug.ssl_recal_prev;
+    plug.ssl_recal_prev = amt.ssl_recal;
+    const bool timer_fire = (++plug.ssl_solve_timer >= 21);   // ~1 s at ~21 fps
+    if (timer_fire) plug.ssl_solve_timer = 0;
+    if (!recal_edge && !timer_fire) return;
+    if (!spec_ready && !recal_edge) return;                   // need a fresh curve
+
+    constexpr int NB = SpectrumAnalyzer::kNumBins;
+    double f[NB], tgt[NB];
+    for (int k = 0; k < NB; ++k) {
+        f[k]   = 20.0 * std::pow(1000.0, (double)k / (NB - 1));   // 20 Hz-20 kHz log
+        tgt[k] = amt.ssl_split * (double)plug.spectrum.mt_eq_bins[k];
+    }
+    const std::vector<double> dg = plug.ssl_solver.solve(f, tgt, NB, plug.sample_rate, 12.0);
+
+    const int NA = nablafx::SslChannelEq::kNumAssist;
+    const uint64_t gen = plug.ssl_asg_gen.load(std::memory_order_relaxed);
+    plug.ssl_asg_gen.store(gen + 1, std::memory_order_release);   // odd = writing
+    for (int b = 0; b < NA && b < (int)dg.size(); ++b) {
+        plug.ssl_asg_accum[b] = std::clamp(plug.ssl_asg_accum[b] + (float)dg[b], -12.f, 12.f);
+        plug.ssl_asg_published[b] = plug.ssl_asg_accum[b];
+    }
+    plug.ssl_asg_gen.store(gen + 2, std::memory_order_release);   // even = stable
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -2255,8 +2389,13 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
             plug->host_latency_ext->changed(plug->host);
     }
 
+    // Pump the spectrum transport regardless of GUI so the SSL coupling solve runs
+    // headless (the assist-band fit needs a fresh auto-EQ curve every ~1 s).
+    const bool spec_ready = plug->spectrum.process_if_ready(plug->sample_rate);
+    solve_ssl_coupling_(*plug, spec_ready);
+
     if (!plug->gui_state) return;
-    if (plug->spectrum.process_if_ready(plug->sample_rate)) {
+    if (spec_ready) {
         const std::string js = plug->spectrum.build_js(plug->processor_order);
         axon_gui_eval_js(plug->gui_state, js.c_str());
     }
@@ -2461,6 +2600,31 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"WID_AMT",   "Amount",   0.0f,    2.0f,   1.38f, 1.0f, ""});
             inject(ControlSpec{"WID_FREQ",  "Low",     50.0f, 1000.0f,  250.0f, 1.0f, "Hz"});
             inject(ControlSpec{"WID_AIR",   "Air",      0.0f,    1.0f,    1.0f, 1.0f, ""});
+            // SSL 9000 J channel EQ (SEQ_*). Defaults make the stage a no-op
+            // (SEQ_ON = OFF → bit-identical bypass). LF/HF switch shelf<->bell via
+            // *_BELL; LMF/HMF carry Q; HPF/LPF have on/off + cutoff. SEQ_AUTO/SPLIT/CAL
+            // are the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
+            inject(ControlSpec{"SEQ_ON",     "SSL EQ",       0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_LF_G",   "LF Gain",    -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
+            inject(ControlSpec{"SEQ_LF_F",   "LF Freq",     30.0f,   600.0f,  100.0f,  1.0f, "Hz"});
+            inject(ControlSpec{"SEQ_LF_BELL","LF Bell",      0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_LMF_G",  "LMF Gain",   -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
+            inject(ControlSpec{"SEQ_LMF_F",  "LMF Freq",    60.0f,  3000.0f,  500.0f,  1.0f, "Hz"});
+            inject(ControlSpec{"SEQ_LMF_Q",  "LMF Q",        0.1f,     4.0f,    1.0f,  1.0f, ""});
+            inject(ControlSpec{"SEQ_HMF_G",  "HMF Gain",   -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
+            inject(ControlSpec{"SEQ_HMF_F",  "HMF Freq",   400.0f, 20000.0f, 3000.0f,  1.0f, "Hz"});
+            inject(ControlSpec{"SEQ_HMF_Q",  "HMF Q",        0.1f,     4.0f,    1.0f,  1.0f, ""});
+            inject(ControlSpec{"SEQ_HF_G",   "HF Gain",    -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
+            inject(ControlSpec{"SEQ_HF_F",   "HF Freq",   1500.0f, 20000.0f,10000.0f,  1.0f, "Hz"});
+            inject(ControlSpec{"SEQ_HF_BELL","HF Bell",      0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_HPF_ON", "HPF",          0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_HPF_F",  "HPF Freq",    20.0f,   500.0f,   80.0f,  1.0f, "Hz"});
+            inject(ControlSpec{"SEQ_LPF_ON", "LPF",          0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_LPF_F",  "LPF Freq",  3000.0f, 22000.0f,20000.0f,  1.0f, "Hz"});
+            inject(ControlSpec{"SEQ_DRIVE",  "Colour",       0.0f,     1.0f,    0.0f,  1.0f, ""});
+            inject(ControlSpec{"SEQ_AUTO",   "Auto Assist",  0.0f,     1.0f,    0.0f,  1.0f, ""});
+            inject(ControlSpec{"SEQ_SPLIT",  "Split",        0.0f,     1.0f,    0.6f,  1.0f, ""});
+            inject(ControlSpec{"SEQ_CAL",    "Recalibrate",  0.0f,     1.0f,    0.0f,  1.0f, "switch"});
         }
 
         st->sat_meta    = load_meta(st->resources_dir + "/" +

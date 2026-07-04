@@ -767,6 +767,10 @@ struct Plugin {
     std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_accum{};  // main-thread accumulator
     bool ssl_recal_prev{false};
     int  ssl_solve_timer{0};
+    // Main-thread scratch SSL EQ used only to compute the display curve (manual
+    // bands + the published assist gains) so the UI can show the SSL's TOTAL
+    // contribution, incl. the coupling assist bands. Never touched by audio.
+    nablafx::SslChannelEq ssl_viz_eq;
 
     // In/out level meters (audio thread updates; published to UI via atomics).
     nablafx::LoudnessMeter  meter_in;
@@ -1192,6 +1196,7 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     plug->exc_spec_active = false;
     plug->reverb.prepare(plug->sample_rate);
     plug->widener.prepare(plug->sample_rate);
+    plug->ssl_viz_eq.prepare(plug->sample_rate);   // main-thread display-curve scratch
     plug->auto_gain.reset();
     plug->bc_coherence.prepare(plug->sample_rate);
     plug->meter_in.reset(plug->sample_rate);
@@ -2397,6 +2402,41 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
     if (!plug->gui_state) return;
     if (spec_ready) {
         const std::string js = plug->spectrum.build_js(plug->processor_order);
+        axon_gui_eval_js(plug->gui_state, js.c_str());
+    }
+
+    // SSL EQ display curve: the stage's TOTAL magnitude response — manual bands
+    // PLUS the published coupling assist gains (scaled by SEQ_AUTO) — at the same
+    // 50 log bins as the auto-EQ curve. This is what lets the UI show what the SSL
+    // contributes incl. the assist bands, which is what makes SEQ_CAL visible.
+    {
+        const AmountSnapshot amt = resolve_amount_(*plug);
+        auto& e = plug->ssl_viz_eq;
+        e.set_params(amt.ssl_eq);
+        constexpr int NA = nablafx::SslChannelEq::kNumAssist;
+        std::array<float, NA> asg{};
+        if (amt.ssl_auto > 0.f) {
+            for (int tries = 0; tries < 4; ++tries) {
+                uint64_t g0 = plug->ssl_asg_gen.load(std::memory_order_acquire);
+                if (g0 & 1ull) continue;
+                asg = plug->ssl_asg_published;
+                if (plug->ssl_asg_gen.load(std::memory_order_acquire) == g0) break;
+            }
+            for (int b = 0; b < NA; ++b) asg[b] *= amt.ssl_auto;
+        }
+        e.set_assist_gains(asg.data(), NA);
+        constexpr int NB = SpectrumAnalyzer::kNumBins;
+        std::string js = "axonSslCurve({\"on\":";
+        js += amt.ssl_eq_on ? "true" : "false";
+        js += ",\"bins\":[";
+        char buf[16];
+        for (int k = 0; k < NB; ++k) {
+            if (k) js += ',';
+            const double hz = 20.0 * std::pow(1000.0, (double)k / (NB - 1));
+            std::snprintf(buf, sizeof(buf), "%.2f", e.magnitude_db(hz));
+            js += buf;
+        }
+        js += "]});";
         axon_gui_eval_js(plug->gui_state, js.c_str());
     }
 

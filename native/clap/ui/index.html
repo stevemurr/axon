@@ -1696,12 +1696,63 @@ window.axonInit = function(state) {
     });
   }
 
-  // Called with no data on init to draw the empty grid.
-  drawSpectrum(null);
+  // ── Complete-EQ decomposition overlay ────────────────────────
+  // Layers, on top of the Auto-EQ curve: the SSL EQ's contribution (incl. its
+  // coupling assist bands — pushed from C++ via axonSslCurve, so SEQ_CAL is
+  // visible) and the TOTAL EQ change (Auto EQ + SSL). Lets you see the whole EQ
+  // and read off what each stage contributes.
+  let sslCurveBins = null;   // 50 log-bins (dB) of the SSL EQ total response, or null when off
+  function drawEqOverlay() {
+    const canvas = document.getElementById('spectrum-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height, CY = H / 2, DB_RANGE = 12;
+    const d2y = db => CY - Math.max(-1, Math.min(1, db / DB_RANGE)) * CY;
+    const autoBins = (excLastSpec && excLastSpec.eq_bins) ? excLastSpec.eq_bins : null;
+    const sslBins  = sslCurveBins;
+    const bx = binFreqs.map(f => freqToX(f, W));
+    const line = (vals, color, width, dash, glow) => {
+      ctx.save(); ctx.beginPath();
+      for (let i = 0; i < N_BINS; i++) {
+        const y = d2y(vals[i]); i === 0 ? ctx.moveTo(bx[i], y) : ctx.lineTo(bx[i], y);
+      }
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash);
+      if (glow) { ctx.shadowBlur = 6; ctx.shadowColor = glow; }
+      ctx.stroke(); ctx.restore();
+    };
+    // SSL contribution (dashed blue), then TOTAL = Auto EQ + SSL (prominent white).
+    if (sslBins) line(sslBins, STAGE_COLORS[3], 1.5, [5, 3], null);
+    if (autoBins || sslBins) {
+      const tot = Array.from({length: N_BINS}, (_, i) =>
+        (autoBins ? (autoBins[i] || 0) : 0) + (sslBins ? (sslBins[i] || 0) : 0));
+      line(tot, '#f2f2f2', 2.5, [], 'rgba(255,255,255,0.5)');
+    }
+    // Legend: TOTAL / AUTO EQ / SSL.
+    ctx.save();
+    ctx.font = '8px -apple-system, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    let lx = 6;
+    const item = (color, label, dashed) => {
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dashed ? [4, 2] : []);
+      ctx.beginPath(); ctx.moveTo(lx, 8); ctx.lineTo(lx + 14, 8); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = color; ctx.fillText(label, lx + 18, 8);
+      lx += 18 + ctx.measureText(label).width + 12;
+    };
+    item('#f2f2f2', 'TOTAL', false);
+    item(STAGE_COLORS[1], 'AUTO EQ', false);
+    item(sslBins ? STAGE_COLORS[3] : 'rgba(95,168,211,0.4)', 'SSL', true);
+    ctx.restore();
+  }
 
-  window.axonSpectrum = function(data) {
-    drawSpectrum(data);
-  };
+  function paint(data) { drawSpectrum(data); drawEqOverlay(); }
+
+  // Called with no data on init to draw the empty grid.
+  paint(null);
+
+  window.axonSpectrum = function(data) { paint(data); };
+  // SSL total curve (manual bands + assist) pushed from C++ each ~21fps tick.
+  window.axonSslCurve = function(d) { sslCurveBins = (d && d.on) ? d.bins : null; paint(excLastSpec); };
+  // Lets SSL knob/toggle edits repaint immediately (curve refreshes next C++ tick).
+  window.axonRenderSpectrum = function() { paint(excLastSpec); };
 })();
 
 // ============================================================

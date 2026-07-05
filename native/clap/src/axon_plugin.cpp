@@ -766,6 +766,7 @@ struct Plugin {
     std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_published{};
     std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_accum{};  // main-thread accumulator
     bool ssl_recal_prev{false};
+    bool ssl_reset_prev{false};
     int  ssl_solve_timer{0};
     // Main-thread scratch SSL EQ used only to compute the display curve (manual
     // bands + the published assist gains) so the UI can show the SSL's TOTAL
@@ -1303,6 +1304,7 @@ struct AmountSnapshot {
     float                   ssl_auto;
     float                   ssl_split;
     bool                    ssl_recal;
+    bool                    ssl_reset;   // SEQ_RESET: momentary — flatten the SSL calibration
 };
 
 AmountSnapshot resolve_amount_(const Plugin& plug) {
@@ -1330,7 +1332,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float shfg=0.f,shff=10000.f,shfb=0.f;
     float shpon=0.f,shpf=80.f,slpon=0.f,slpf=20000.f;
     float sdrv=0.f;
-    float sauto=0.f,ssplit=0.6f,srecal=0.f;   // auto-EQ coupling (SEQ_AUTO/SPLIT/CAL)
+    float sauto=0.f,ssplit=0.6f,srecal=0.f,sreset=0.f;   // auto-EQ coupling (SEQ_AUTO/SPLIT/CAL/RESET)
     int   cls_idx=plug.active_autoeq_cls;
     for (size_t i=0;i<plug.meta->controls.size();++i) {
         const auto& c=plug.meta->controls[i];
@@ -1373,6 +1375,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="SEQ_DRIVE") sdrv=v;
         else if(c.id=="SEQ_AUTO") sauto=v; else if(c.id=="SEQ_SPLIT") ssplit=v;
         else if(c.id=="SEQ_CAL") srecal=v;
+        else if(c.id=="SEQ_RESET") sreset=v;
     }
     AmountSnapshot s{};
     s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf; s.sat_lpf_hz=slf;
@@ -1427,6 +1430,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.ssl_auto  = sauto;
     s.ssl_split = ssplit;
     s.ssl_recal = (srecal >= 0.5f);
+    s.ssl_reset = (sreset >= 0.5f);
     return s;
 }
 
@@ -2060,20 +2064,59 @@ void flush_chain_block_(Plugin& plug,
     }
 }
 
-// Auto-EQ -> SSL coupling: on the main thread, fit the 6 assist bands to the auto-EQ
-// curve (spectrum.mt_eq_bins) and publish via a seqlock. STATIC solve — triggered by
-// SEQ_CAL (recalibrate edge) or a slow ~1 s timer (fixed beats dynamic; see
-// docs/ssl_eq_coupling.md). Accumulates: each solve absorbs SEQ_SPLIT of the CURRENT
-// residual, so it converges as the auto-EQ curve shrinks (geometric contraction).
-static void solve_ssl_coupling_(Plugin& plug, bool spec_ready) {
+// Index of a control by id in the loaded meta (main thread; -1 if absent).
+static int control_index_(const Plugin& plug, const char* id) {
+    for (size_t i = 0; i < plug.meta->controls.size(); ++i)
+        if (plug.meta->controls[i].id == id) return (int)i;
+    return -1;
+}
+
+// Push a param value onto the GUI->audio queue (thread-safe; the audio thread drains
+// it into control_values) AND reflect it on the WebView knob. Used by the coupling +
+// reset to write the visible SSL gain knobs from the main thread.
+static void set_visible_param_(Plugin& plug, const char* id, float value) {
+    const int idx = control_index_(plug, id);
+    if (idx < 0) return;
+    { std::lock_guard<std::mutex> lk(plug.param_mutex); plug.param_queue.emplace_back(idx, value); }
+    if (plug.gui_state) {
+        char js[128];
+        std::snprintf(js, sizeof(js), "axonSetParam(\"%s\",%.4f);", id, value);
+        axon_gui_eval_js(plug.gui_state, js);
+    }
+}
+
+// Auto-EQ -> SSL coupling ("calibration"). On a SEQ_CAL rising edge, fit the FOUR
+// real SSL bands (the user's LF/LMF/HMF/HF at their current freq/Q/shelf-or-bell) to
+// SEQ_SPLIT * the current auto-EQ curve (spectrum.mt_eq_bins), then ADD the solved
+// gains onto the VISIBLE LF/LMF/HMF/HF knobs. This keeps the correction musical (a
+// real broad SSL curve, not 6 narrow bells) and visible. It is a single partial step
+// per press — it deliberately does NOT auto-contract to full cancellation (the auto-
+// EQ is transparent and should keep doing the residual); press again to absorb more.
+// The hidden 6-band assist layer (ssl_asg_*) is left dormant for now.
+static void solve_ssl_coupling_(Plugin& plug, bool /*spec_ready*/) {
     const AmountSnapshot amt = resolve_amount_(plug);
+
+    // Reset (SEQ_RESET rising edge) — flatten the 4 visible SSL gain knobs and clear
+    // the dormant assist layer. Runs regardless of the SEQ_AUTO gate.
+    const bool reset_edge = amt.ssl_reset && !plug.ssl_reset_prev;
+    plug.ssl_reset_prev = amt.ssl_reset;
+    if (reset_edge) {
+        static const char* kId[4] = { "SEQ_LF_G", "SEQ_LMF_G", "SEQ_HMF_G", "SEQ_HF_G" };
+        for (int b = 0; b < 4; ++b) set_visible_param_(plug, kId[b], 0.f);
+        plug.ssl_asg_accum.fill(0.f);
+        const uint64_t gen = plug.ssl_asg_gen.load(std::memory_order_relaxed);
+        plug.ssl_asg_gen.store(gen + 1, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_release);
+        plug.ssl_asg_published.fill(0.f);
+        plug.ssl_asg_gen.store(gen + 2, std::memory_order_release);
+        for (auto& ch : plug.chains) ch.ssl_asg_smooth.fill(0.f);
+        plug.ssl_solve_timer = 0;
+    }
+
     if (amt.ssl_auto <= 0.f || !amt.ssl_eq_on) { plug.ssl_recal_prev = amt.ssl_recal; return; }
     const bool recal_edge = amt.ssl_recal && !plug.ssl_recal_prev;
     plug.ssl_recal_prev = amt.ssl_recal;
-    const bool timer_fire = (++plug.ssl_solve_timer >= 21);   // ~1 s at ~21 fps
-    if (timer_fire) plug.ssl_solve_timer = 0;
-    if (!recal_edge && !timer_fire) return;
-    if (!spec_ready && !recal_edge) return;                   // need a fresh curve
+    if (!recal_edge) return;                                  // CAL-triggered only
 
     constexpr int NB = SpectrumAnalyzer::kNumBins;
     double f[NB], tgt[NB];
@@ -2081,21 +2124,26 @@ static void solve_ssl_coupling_(Plugin& plug, bool spec_ready) {
         f[k]   = 20.0 * std::pow(1000.0, (double)k / (NB - 1));   // 20 Hz-20 kHz log
         tgt[k] = amt.ssl_split * (double)plug.spectrum.mt_eq_bins[k];
     }
-    const std::vector<double> dg = plug.ssl_solver.solve(f, tgt, NB, plug.sample_rate, 12.0);
 
-    const int NA = nablafx::SslChannelEq::kNumAssist;
-    const uint64_t gen = plug.ssl_asg_gen.load(std::memory_order_relaxed);
-    plug.ssl_asg_gen.store(gen + 1, std::memory_order_release);   // odd = writing
-    // Publish the odd marker BEFORE the (non-atomic) gain writes: a plain release
-    // store only fences *earlier* ops, so on a weakly-ordered CPU (arm64) the data
-    // stores below could otherwise become visible ahead of the odd counter and let
-    // a reader accept a torn value behind an even generation.
-    std::atomic_thread_fence(std::memory_order_release);
-    for (int b = 0; b < NA && b < (int)dg.size(); ++b) {
-        plug.ssl_asg_accum[b] = std::clamp(plug.ssl_asg_accum[b] + (float)dg[b], -12.f, 12.f);
-        plug.ssl_asg_published[b] = plug.ssl_asg_accum[b];
-    }
-    plug.ssl_asg_gen.store(gen + 2, std::memory_order_release);   // even = stable (orders data before)
+    // Solver bands = the 4 real SSL bands at their CURRENT freq/Q/type (LF/HF follow
+    // the shelf<->bell switch). type: 0 bell, 1 lo-shelf, 2 hi-shelf.
+    const nablafx::SslEqParamsRT& e = amt.ssl_eq;
+    std::vector<nablafx::SslSolverBand> bands = {
+        { e.lf_bellmix >= 0.5f ? 0 : 1, (double)e.lf_hz,  (double)e.lf_q  },
+        { 0,                            (double)e.lmf_hz, (double)e.lmf_q },
+        { 0,                            (double)e.hmf_hz, (double)e.hmf_q },
+        { e.hf_bellmix >= 0.5f ? 0 : 2, (double)e.hf_hz,  (double)e.hf_q  },
+    };
+    nablafx::SslEqSolver solver(std::move(bands));
+    const std::vector<double> dg = solver.solve(f, tgt, NB, plug.sample_rate, 9.0);
+    if ((int)dg.size() < 4) return;
+
+    // Accumulate onto the visible gain knobs (the knobs ARE the integrator), clamped
+    // to the SEQ_*_G range, then push through the GUI->audio path + GUI display.
+    const float cur[4]        = { e.lf_gain, e.lmf_gain, e.hmf_gain, e.hf_gain };
+    static const char* kId[4] = { "SEQ_LF_G", "SEQ_LMF_G", "SEQ_HMF_G", "SEQ_HF_G" };
+    for (int b = 0; b < 4; ++b)
+        set_visible_param_(plug, kId[b], std::clamp(cur[b] + (float)dg[b], -18.f, 18.f));
 }
 
 }  // namespace
@@ -2672,6 +2720,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"SEQ_AUTO",   "Auto Assist",  0.0f,     1.0f,    0.0f,  1.0f, ""});
             inject(ControlSpec{"SEQ_SPLIT",  "Split",        0.0f,     1.0f,    0.6f,  1.0f, ""});
             inject(ControlSpec{"SEQ_CAL",    "Recalibrate",  0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_RESET",  "Reset",        0.0f,     1.0f,    0.0f,  1.0f, "switch"});
         }
 
         st->sat_meta    = load_meta(st->resources_dir + "/" +

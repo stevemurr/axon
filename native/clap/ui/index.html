@@ -506,7 +506,7 @@ const PROCESSORS = [
       'SEQ_HF_G',  'SEQ_HF_F',  'SEQ_HF_BELL',
       'SEQ_LPF_ON', 'SEQ_LPF_F',
       'SEQ_DRIVE',
-      'SEQ_AUTO', 'SEQ_SPLIT', 'SEQ_CAL',
+      'SEQ_AUTO', 'SEQ_SPLIT', 'SEQ_CAL', 'SEQ_RESET',
     ], wetParams: ['SEQ_ON'] },
   { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ_ENGINE', 'EQ_RENDER', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   // SATURATOR (id 2) removed from the chain for now — kept in the DSP/code,
@@ -721,6 +721,7 @@ function toggleLabels(id) {
   // SSL EQ: LF/HF shape switch and the momentary coupling recalibrate.
   if (id === 'SEQ_LF_BELL' || id === 'SEQ_HF_BELL') return ['SHELF', 'BELL'];
   if (id === 'SEQ_CAL') return ['IDLE', 'CALIBRATE'];
+  if (id === 'SEQ_RESET') return ['IDLE', 'RESET'];
   return ['OFF', 'ON'];
 }
 

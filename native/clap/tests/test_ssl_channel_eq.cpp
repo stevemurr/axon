@@ -233,6 +233,41 @@ void test_solver_clamps() {
 
 }  // namespace
 
+// The musical calibration redesign: fitting the auto-EQ curve with the 4 broad SSL
+// bands (2 shelves + 2 gentle bells) must produce a far SMOOTHER cascade than the
+// old 6 narrow (Q=1.4) assist bells, which chase FFT wiggles and ring. Guards the
+// "musical" property via total variation of the fitted magnitude curve.
+void test_musical_vs_assist_fit() {
+    const double fs = 48000.0;
+    const int NB = 50;
+    std::vector<double> f(NB), tgt(NB);
+    for (int k = 0; k < NB; ++k) {
+        f[k]   = 20.0 * std::pow(1000.0, (double)k / (NB - 1));
+        tgt[k] = 3.0 * std::sin(k * 0.9) + 2.0 * std::sin(k * 2.3);   // multi-scale wiggle
+    }
+    auto fitted_tv = [&](const SslEqSolver& s) {
+        auto g = s.solve(f.data(), tgt.data(), NB, fs, 12.0);
+        const int N = 400; double prev = 0.0, tv = 0.0;
+        for (int i = 0; i < N; ++i) {
+            const double hz = 20.0 * std::pow(1000.0, (double)i / (N - 1));
+            const double w  = 2.0 * kPi * hz / fs;
+            double db = 0.0;
+            for (int b = 0; b < s.num_bands(); ++b) {
+                auto bd = s.band(b);
+                db += 20.0 * std::log10(std::max(ssl_design(bd.type, g[b], bd.freq, bd.q, fs).mag(w), 1e-12));
+            }
+            if (i) tv += std::fabs(db - prev);
+            prev = db;
+        }
+        return tv;
+    };
+    const double tv_bells   = fitted_tv(SslEqSolver::assist());   // 6 Q1.4 bells (old)
+    const double tv_musical = fitted_tv(SslEqSolver());           // 4 broad bands (new)
+    printf("[musical] fitted-curve total variation: 6-bell=%.1f dB, 4-musical=%.1f dB\n",
+           tv_bells, tv_musical);
+    assert(tv_musical < tv_bells * 0.7);   // the musical fit is materially smoother
+}
+
 int main() {
     test_neutral_is_transparent();
     test_bell_placement_and_gain();
@@ -245,6 +280,7 @@ int main() {
     test_solver_recovers_gains();
     test_assist_bands_and_coupling();
     test_solver_clamps();
+    test_musical_vs_assist_fit();
     printf("\nAll SSL channel EQ tests passed.\n");
     return 0;
 }

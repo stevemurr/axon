@@ -497,7 +497,7 @@ const PROCESSORS = [
   // shelf<->bell via *_BELL; LMF/HMF carry Q; HPF/LPF have on/off + cutoff.
   // SEQ_AUTO/SPLIT/CAL are the Auto-EQ coupling (assist bands absorb the
   // Auto-EQ correction — press CAL to solve).
-  { id: 3, name: 'SSL EQ', params: [
+  { id: 3, name: 'EQ', params: [
       'SEQ_ON',
       'SEQ_HPF_ON', 'SEQ_HPF_F',
       'SEQ_LF_G',  'SEQ_LF_F',  'SEQ_LF_BELL',
@@ -1422,7 +1422,7 @@ window.axonInit = function(state) {
     '#4ea8de',  // 8 Reverb
     '#c792ea',  // 9 Widener (lavender)
   ];
-  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', 'SSL EQ', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB', 'WIDENER'];
+  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', 'EQ', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB', 'WIDENER'];
 
   const DB_MIN = -90, DB_MAX = 0;
 
@@ -1740,7 +1740,7 @@ window.axonInit = function(state) {
     };
     item('#f2f2f2', 'TOTAL', false);
     item(STAGE_COLORS[1], 'AUTO EQ', false);
-    item(sslBins ? STAGE_COLORS[3] : 'rgba(95,168,211,0.4)', 'SSL', true);
+    item(sslBins ? STAGE_COLORS[3] : 'rgba(95,168,211,0.4)', 'EQ', true);
     ctx.restore();
   }
 

@@ -1321,7 +1321,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float eq=0.5f,trm_db=0.f;
     float eqr=1.f,eqs=100.f,eqb=1.f;
     float eqeng=0.f;                                      // EQ_ENGINE: 0 neural, 1 adaptive
-    float eqrnd=0.f;                                      // EQ_RENDER: 0 STFT mask, 1 IIR bank
+    float eqrnd=1.f;                                      // EQ_RENDER: 0 STFT mask, 1 IIR bank (default IIR)
     float ssc=0.f;
     float ssc_in_db=0.f;
     // SSL channel EQ (SEQ_*). Defaults = flat / filters off / no colour.
@@ -2699,7 +2699,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             // (SEQ_ON = OFF → bit-identical bypass). LF/HF switch shelf<->bell via
             // *_BELL; LMF/HMF carry Q; HPF/LPF have on/off + cutoff. SEQ_AUTO/SPLIT/CAL
             // are the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
-            inject(ControlSpec{"SEQ_ON",     "SSL EQ",       0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_ON",     "EQ",           0.0f,     1.0f,    0.0f,  1.0f, "switch"});
             inject(ControlSpec{"SEQ_LF_G",   "LF Gain",    -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
             inject(ControlSpec{"SEQ_LF_F",   "LF Freq",     30.0f,   600.0f,  100.0f,  1.0f, "Hz"});
             inject(ControlSpec{"SEQ_LF_BELL","LF Bell",      0.0f,     1.0f,    0.0f,  1.0f, "switch"});

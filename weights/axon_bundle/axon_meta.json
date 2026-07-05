@@ -256,7 +256,7 @@
       "name": "AutoEQ Renderer",
       "min": 0.0,
       "max": 1.0,
-      "default": 0.0,
+      "default": 1.0,
       "skew": 1.0,
       "unit": "switch"
     },
@@ -388,7 +388,7 @@
     },
     "SEQ_ON": {
       "id": "SEQ_ON",
-      "name": "SSL EQ",
+      "name": "EQ",
       "min": 0.0,
       "max": 1.0,
       "default": 0.0,

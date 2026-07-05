@@ -220,7 +220,7 @@
       "deadline_miss_pct": 0.0
     },
     {
-      "scenario": "ssl_comp_only",
+      "scenario": "bus_comp_only",
       "buffer_size": 64,
       "p50_us": 0.375,
       "p95_us": 281.875,
@@ -234,7 +234,7 @@
       "deadline_miss_pct": 4.1707
     },
     {
-      "scenario": "ssl_comp_only",
+      "scenario": "bus_comp_only",
       "buffer_size": 128,
       "p50_us": 242.875,
       "p95_us": 2474.708,
@@ -248,7 +248,7 @@
       "deadline_miss_pct": 0.1219
     },
     {
-      "scenario": "ssl_comp_only",
+      "scenario": "bus_comp_only",
       "buffer_size": 256,
       "p50_us": 482.834,
       "p95_us": 2745.459,
@@ -262,7 +262,7 @@
       "deadline_miss_pct": 0.0174
     },
     {
-      "scenario": "ssl_comp_only",
+      "scenario": "bus_comp_only",
       "buffer_size": 512,
       "p50_us": 2659.875,
       "p95_us": 3262.125,
@@ -276,7 +276,7 @@
       "deadline_miss_pct": 0.0116
     },
     {
-      "scenario": "ssl_comp_only",
+      "scenario": "bus_comp_only",
       "buffer_size": 1024,
       "p50_us": 4137.875,
       "p95_us": 4369.208,

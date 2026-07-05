@@ -10,9 +10,9 @@ newcomers and veteran engineers alike.
 The default processing order (stages are reorderable in the UI):
 
 ```
-input ─▶ Auto EQ ─▶ Saturator ─▶ SSL Comp ─▶ Bass Mono ─▶ Mel Limiter ─▶ True-Peak Ceiling ─▶ output
-          (neural)   (neural)     (neural)                                                        │
-                                                                                                  ▼
+input ─▶ Bass Mono ─▶ EQ ─▶ Auto EQ ─▶ Reverb ─▶ Widener ─▶ Bus Comp ─▶ Limiter ─▶ True-Peak Ceiling ─▶ output
+                            (neural)                        (neural)                                          │
+                                                                                                             ▼
   in/out taps ─▶ Loudness Meter ─▶ Auto Gain (monitoring-only level-matched bypass)
   per-stage taps ─▶ Spectrum Analyzer (UI visualization)
 ```
@@ -22,7 +22,7 @@ input ─▶ Auto EQ ─▶ Saturator ─▶ SSL Comp ─▶ Bass Mono ─▶ Me
 | # | Module | Doc | What it does |
 |---|--------|-----|--------------|
 | 1 | Auto EQ (Spectral-Mask EQ) | [auto_eq_spectral_mask.md](auto_eq_spectral_mask.md) | Neural, per-band STFT magnitude-mask EQ |
-| 2 | Saturator / SSL Comp (neural engine) | [neural_inference_ort.md](neural_inference_ort.md) | ONNX-Runtime streaming TCN inference for learned saturation & compression |
+| 2 | Bus Comp (neural engine) | [neural_inference_ort.md](neural_inference_ort.md) | ONNX-Runtime streaming TCN inference for learned bus compression |
 | – | Rational-A nonlinearity | [rational_a.md](rational_a.md) | The learned rational waveshaper used inside the Saturator |
 | 3 | Bass Mono | [bass_mono.md](bass_mono.md) | Collapses stereo to mono below a cutoff (LR4 on the side) |
 | 4 | Mel Limiter | [mel_limiter.md](mel_limiter.md) | Mel-spaced multiband spectral limiter |

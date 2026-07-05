@@ -51,7 +51,7 @@ FULL_CHAIN = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,
 # Single-stage isolations: zero everything else so attribution is clean.
 EQ_ONLY      = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
 SAT_ONLY     = "EQ=0,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
-SSL_COMP_ONLY = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=1.0,CLS=4,LVL=0,OLV=0,TRM=0"
+BUS_COMP_ONLY = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=1.0,CLS=4,LVL=0,OLV=0,TRM=0"
 
 # Bypass: every stage's amount at 0 to measure plumbing overhead only.
 BYPASS = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
@@ -60,7 +60,7 @@ SCENARIOS: List[tuple[str, str]] = [
     ("full_chain",    FULL_CHAIN),
     ("eq_only",       EQ_ONLY),
     ("sat_only",      SAT_ONLY),
-    ("ssl_comp_only", SSL_COMP_ONLY),
+    ("bus_comp_only", BUS_COMP_ONLY),
     ("bypass",        BYPASS),
 ]
 

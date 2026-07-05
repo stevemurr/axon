@@ -49,7 +49,7 @@ machine-readable dump with every cell's stats.
 | `full_chain`    | every stage active at moderate-to-high amounts          |
 | `eq_only`       | just the auto-EQ (controller + SpectralMaskEq)          |
 | `sat_only`      | just the saturator (RationalA)                          |
-| `ssl_comp_only` | just the SSL bus comp TCN                               |
+| `bus_comp_only` | just the bus comp TCN                               |
 | `bypass`        | every stage's amount at 0 — measures plumbing overhead  |
 
 Buffers: `64, 128, 256, 512, 1024` frames @ 44.1 kHz (deadlines:
@@ -61,8 +61,8 @@ Default cell config: 10 timed iters + 2 warmup. Override with
 ## Subset runs
 
 ```bash
-# Just the SSL comp on small buffers
-./run_bench.py --scenarios ssl_comp_only --buffers 64,128
+# Just the bus comp on small buffers
+./run_bench.py --scenarios bus_comp_only --buffers 64,128
 
 # Faster iteration: 3 iters, no warmup, no compare
 ./run_bench.py --iters 3 --warmup 0 --no-compare

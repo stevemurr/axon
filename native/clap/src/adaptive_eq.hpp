@@ -6,7 +6,9 @@
 // tonal-balance target and (C2) dynamically suppresses resonances, with one
 // energy-domain makeup so the stage is loudness-neutral. It cannot mode-collapse
 // (the curve is a deterministic function of the input spectrum) and needs no
-// per-class model — one instance per channel.
+// per-class model — LINKED-STEREO: one instance observes the mono sum and its
+// single curve is rendered on every channel (independent per-channel solves
+// drift apart on decorrelated material — stereo-image wobble).
 //
 // Drop-in for the existing renderer: feed observe() the input block, then push
 // target_bands() into SpectralMaskEq/IirFilterbankEq::set_params (it emits the
@@ -24,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -132,6 +135,7 @@ public:
         build_mel_();
         mel_db_.assign(cfg_.n_bands, -120.0f);
         primed_ = false;
+        frames_ = 0;
         const double frames_per_tau = (cfg_.sample_rate * tau_s) / std::max(1, hop_);
         alpha_ = std::exp(-1.0 / std::max(1.0, frames_per_tau));
     }
@@ -169,7 +173,7 @@ private:
         std::swap(cfg_, o.cfg_); std::swap(n_fft_, o.n_fft_); std::swap(hop_, o.hop_);
         std::swap(n_freq_, o.n_freq_); std::swap(in_fill_, o.in_fill_); std::swap(since_, o.since_);
         std::swap(log2_, o.log2_); std::swap(fft_, o.fft_); std::swap(alpha_, o.alpha_);
-        std::swap(primed_, o.primed_);
+        std::swap(primed_, o.primed_); std::swap(frames_, o.frames_);
         window_.swap(o.window_); in_ring_.swap(o.in_ring_); windowed_.swap(o.windowed_);
         re_.swap(o.re_); im_.swap(o.im_); power_.swap(o.power_); band_to_bin_.swap(o.band_to_bin_);
         band_wsum_.swap(o.band_wsum_); mel_db_.swap(o.mel_db_); centers_.swap(o.centers_);
@@ -185,15 +189,21 @@ private:
         power_[0] = re_[0] * re_[0];
         power_[n_freq_ - 1] = im_[0] * im_[0];
         for (int k = 1; k < n_fft_ / 2; ++k) power_[k] = re_[k] * re_[k] + im_[k] * im_[k];
+        // Warm-up: until the growing true mean's window reaches the EWMA tau,
+        // use whichever pole is faster (n/(n+1) = cumulative mean of all frames
+        // so far). The estimate converges within a few frames of reset instead
+        // of dragging the full tau, then the steady-state EWMA takes over.
+        const double a = std::min(alpha_, (double)frames_ / (double)(frames_ + 1));
         for (int b = 0; b < cfg_.n_bands; ++b) {
             double p = 0.0;
             const float* w = band_to_bin_.data() + (size_t)b * n_freq_;
             for (int k = 0; k < n_freq_; ++k) p += (double)w[k] * power_[k];
             p /= band_wsum_[b];
             const float db = 10.0f * std::log10((float)std::max(p, 1e-20));
-            mel_db_[b] = primed_ ? (float)(alpha_ * mel_db_[b] + (1.0 - alpha_) * db) : db;
+            mel_db_[b] = primed_ ? (float)(a * mel_db_[b] + (1.0 - a) * db) : db;
         }
         primed_ = true;
+        ++frames_;
     }
     void build_mel_() {
         const double mel_min = 2595.0 * std::log10(1.0 + cfg_.f_min / 700.0);
@@ -225,6 +235,7 @@ private:
     vDSP_Length log2_ = 11;
     FFTSetup fft_ = nullptr;
     double alpha_ = 0.0; bool primed_ = false;
+    uint64_t frames_ = 0;   // frames since reset (drives the warm-up mean)
     std::vector<float> window_, in_ring_, windowed_, re_, im_, power_, band_to_bin_, band_wsum_, mel_db_;
     std::vector<double> centers_;
 };
@@ -232,13 +243,27 @@ private:
 }  // namespace adaptive_eq_detail
 
 // ----------------------------------------------------------------------------
-// The controller. One per channel; class-agnostic (no per-class model).
+// The controller. ONE instance shared by all channels (linked stereo, fed the
+// mono sum); class-agnostic (no per-class model).
 // ----------------------------------------------------------------------------
 class AdaptiveEqController {
 public:
     void reset(const SpectralMaskEqParams& cfg) {
         cfg_ = cfg; nb_ = cfg.n_bands;
-        spec_.reset(cfg);
+        spec_.reset(cfg);   // spectrum EWMA pinned at the validated 2 s default
+        // Smoothing widths are constant in FREQUENCY, not band count: scale the
+        // A/B-validated 24-band/40–18k sigmas (3 and 4 bands) by this layout's
+        // bands-per-octave, so a 64-band config smooths the same spectral span
+        // instead of ~2.5× narrower (narrower = C2 chases sharper "resonances").
+        {
+            const double octs = std::log2(
+                std::max((double)cfg.f_min * 2.0, (double)cfg.f_max)
+                / std::max(1.0, (double)cfg.f_min));
+            const double bpo     = nb_ / std::max(1.0, octs);
+            const double ref_bpo = 24.0 / std::log2(18000.0 / 40.0);  // bench layout
+            match_sigma_ = 3.0 * bpo / ref_bpo;
+            cut_sigma_   = 4.0 * bpo / ref_bpo;
+        }
         centers_ = adaptive_eq_detail::mel_centers(cfg);
         out_db_.assign(nb_, 0.0f);
         in_db_.assign(nb_, 0.0f); raw_.assign(nb_, 0.0f); sm_.assign(nb_, 0.0f); base_.assign(nb_, 0.0f);
@@ -333,22 +358,20 @@ public:
     }
     int  target_curve() const { return target_idx_; }
 
-    // Response time (ms) — how fast the controller re-targets when the input
-    // spectrum shifts. Drives BOTH the emitted-curve smoother (= ms) and the
-    // running-spectrum average (= ms * kSpecTauMult, floored at the FFT window
-    // so it can't resolve faster than it measures). Smaller = snappier (tracks
-    // sudden section changes); the spectrum average still rejects per-beat
-    // transients. Recomputes poles only — no realloc, no state reset.
+    // Response time (ms) — how fast the EMITTED curve follows the (slow)
+    // running-spectrum estimate. Drives ONLY the output smoother. The spectrum
+    // average itself stays pinned at the 2 s the A/B validated (spec_.reset
+    // default): coupling it to this knob re-solved the target on every chord
+    // change ("wobble") and made the validated smoothness unreachable from the
+    // UI. Recomputes the pole only — no realloc, no state reset.
     void set_response_ms(float ms) {
         const double out_ms = std::min(std::max((double)ms, 1.0), 4000.0);
         tau_s_ = out_ms * 1e-3;
         const double bpt = (double)cfg_.sample_rate * tau_s_ / std::max(1, cfg_.block_size);
         alpha_ = std::exp(-1.0 / std::max(1.0, bpt));
-        spec_.set_tau_ms(std::min(std::max(out_ms * kSpecTauMult, 50.0), 4000.0));
     }
 
 private:
-    static constexpr double kSpecTauMult = 3.0;  // spectrum averages ~3× the output TC
     float block_alpha_(float tau_ms) const {
         if (tau_ms <= 0.0f) return 0.0f;
         const double bpt = (double)cfg_.sample_rate * (tau_ms * 1e-3) / std::max(1, cfg_.block_size);
@@ -362,7 +385,8 @@ private:
     std::vector<float> out_db_, in_db_, raw_, sm_, base_, cut_db_, a_att_, a_rel_, db_scratch_;
     double alpha_ = 0.0;
     int target_idx_ = 0;   // empirical target curve (0 = full_mix)
-    // Tunables (validated defaults from harness_eq_control C1C2_Cascade).
+    // Tunables (validated defaults from harness_eq_control C1C2_Cascade; the
+    // sigmas are rescaled to the actual band layout in reset()).
     double match_sigma_ = 3.0, cut_sigma_ = 4.0, tau_s_ = 0.40;
     double gate_db_ = 45.0;
     float depth_ = 0.7f, thresh_db_ = 4.0f, sharpness_ = 1.3f, attack_ms_ = 50.0f, release_ms_ = 180.0f;

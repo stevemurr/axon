@@ -65,6 +65,12 @@
 #include "ssl_channel_eq.hpp"   // SSL 9000 J channel EQ (analytic biquads; before AutoEQ)
 #include "true_peak_ceiling.hpp"
 
+#if AXON_STAGE_TIMING
+// Bench-only per-stage CPU timing (see axon_stage_timing.h for the contract).
+// Compiled in ONLY via -DAXON_STAGE_TIMING=1 (cmake option; never ship).
+#include "axon_stage_timing.h"
+#endif
+
 namespace nablafx_axon {
 
 namespace fs = std::filesystem;
@@ -514,18 +520,31 @@ public:
     }
 
     // Run-arbitrary variant for the auto-EQ controller, where the audio
-    // output channel name is "params_proc_0" and represents [1, 15, T]
-    // sigmoid params instead of audio. We expose only the first sample
+    // output channel name is "params_proc_0" and represents sigmoid params
+    // instead of audio. BATCH-2 contract: the class models were resized in
+    // place (2026-07-05) to audio_in [2,1,T] / LSTM state [2,2,64] so both
+    // channels share ONE ORT call — this graph is a tiny single-step LSTM
+    // whose cost is dominated by per-node dispatch, so one batch-2 call is
+    // ~1.2x cheaper than two batch-1 calls. Batch element 0 = left/mono,
+    // element 1 = right; for mono feed the same buffer twice and read only
+    // params0. We expose only the first sample of each element's params
     // (all samples in a block are identical post-repeat_interleave).
-    void run_controller(const float* audio_in, int audio_in_len,
-                        float* params_out_first, int params_out_count) {
+    void run_controller(const float* audio0, const float* audio1,
+                        int audio_in_len,
+                        float* params0_first, float* params1_first,
+                        int params_out_count) {
         std::vector<Ort::Value>  inputs;
         std::vector<const char*> in_names;
         std::vector<const char*> out_names;
 
-        std::array<int64_t, 3> aud_shape{1, 1, audio_in_len};
+        if ((int)ctrl_stack_.size() < 2 * audio_in_len)
+            ctrl_stack_.assign(2 * audio_in_len, 0.0f);   // first block only
+        std::copy_n(audio0, audio_in_len, ctrl_stack_.data());
+        std::copy_n(audio1, audio_in_len, ctrl_stack_.data() + audio_in_len);
+
+        std::array<int64_t, 3> aud_shape{2, 1, audio_in_len};
         inputs.push_back(Ort::Value::CreateTensor<float>(
-            cpu_, const_cast<float*>(audio_in), audio_in_len,
+            cpu_, ctrl_stack_.data(), 2 * audio_in_len,
             aud_shape.data(), aud_shape.size()));
         in_names.push_back("audio_in");
 
@@ -542,14 +561,13 @@ public:
                                   in_names.data(), inputs.data(), inputs.size(),
                                   out_names.data(), out_names.size());
 
-        // First output is the params tensor [1, 15, T]. We want the first
-        // sample (all are identical within a block per the controller's
-        // repeat_interleave structure).
+        // First output is the params tensor [2, C, T]; element [b, c, 0] is
+        // at offset b*C*T + c*T (channel-major contiguous within a batch
+        // element).
         const float* p = outs[0].GetTensorData<float>();
-        // Stride: T = audio_in_len, channel-major contiguous so element
-        // [channel c, sample 0] is at offset c * T.
         for (int c = 0; c < params_out_count; ++c) {
-            params_out_first[c] = p[c * audio_in_len + 0];
+            params0_first[c] = p[c * audio_in_len + 0];
+            params1_first[c] = p[(params_out_count + c) * audio_in_len + 0];
         }
 
         for (std::size_t si = 0; si < meta_.state_tensors.size(); ++si) {
@@ -577,15 +595,11 @@ private:
     std::vector<const char*>      out_names_;
     std::unordered_map<std::string, StateBuf> in_states_;
     std::unordered_map<std::string, StateBuf> out_states_;
+    std::vector<float>            ctrl_stack_;   // [2*T] batched controller input
 };
 
 struct ChannelChain {
     // Per-channel stage instances. TruePeakCeiling runs per-channel.
-    // One ORT session per auto-EQ class (bass/drums/vocals/other/full_mix);
-    // CLS picks which one is active. Inactive sessions hold zeroed state
-    // so a class switch starts the LSTM from a neutral init and avoids
-    // bleeding stale activations from a different class's signal.
-    std::vector<std::unique_ptr<OrtMiniSession>> autoeq_ort_per_class;
     // Per-class SpectralMaskEq instance. Every class shares the same kind
     // now, but each class still gets its own instance so the per-class
     // mask-smoother state doesn't bleed across class switches.
@@ -599,10 +613,6 @@ struct ChannelChain {
     // runtime collapsed the LSTM's input distribution. Attack-instant /
     // decay-slow tracking gives a stable scale across blocks.
     float                                  autoeq_peak_env{0.f};
-    // Deterministic Auto-EQ controller (the C1→C2 cascade). Class-agnostic, so
-    // one instance per channel drives the SAME SpectralMaskEq renderer when the
-    // EQ_ENGINE param selects "Adaptive" instead of the per-class LSTM.
-    nablafx::AdaptiveEqController          adaptive_eq;
     RationalA                              saturator;
     // 1st-order HPF for bass-preserved saturation (bilinear transform).
     float sat_hpf_fc{-1.f};               // cached cutoff; -1 = stale
@@ -734,6 +744,34 @@ struct Plugin {
     // chains[ch].autoeq_ort_per_class[active_autoeq_cls].
     int active_autoeq_cls{0};
 
+    // Flush counter gating the auto-EQ display-curve evaluation (audio thread
+    // only; see the AutoEQ stage case).
+    uint32_t autoeq_disp_tick{0};
+
+    // Deterministic Auto-EQ controller (the C1→C2 cascade), used when the
+    // EQ_ENGINE param selects "Adaptive" instead of the per-class LSTM.
+    // LINKED-STEREO by design: ONE instance observes the L+R mono sum and its
+    // single curve is rendered on every channel — per-channel instances drift
+    // apart on decorrelated material (stereo-image wobble).
+    nablafx::AdaptiveEqController adaptive_eq;
+
+    // Neural Auto-EQ controller sessions, one per class (bass/drums/vocals/
+    // other/full_mix); CLS picks which one is active. BATCHED: each model
+    // takes [2,1,T] audio (batch element per channel) so both channels share
+    // one ORT call per block; per-channel LSTM state lives in the batch dim
+    // of the state tensors [2,2,64]. Inactive sessions hold zeroed state so
+    // a class switch starts from a neutral init.
+    std::vector<std::unique_ptr<OrtMiniSession>> autoeq_ort_per_class;
+
+    // EQ_FREEZE: the last live-solved [0,1] band curves, rendered while the
+    // Freeze toggle is engaged (controller inference — LSTM or adaptive — is
+    // skipped entirely). 0.5 = flat 0 dB, what Freeze holds before any live
+    // solve has happened. autoeq_freeze_prev tracks the toggle edge so an
+    // unfreeze restarts the controllers from a clean state.
+    std::array<float, 64> autoeq_held_l{};
+    std::array<float, 64> autoeq_held_r{};
+    bool autoeq_freeze_prev{false};
+
     // GUI → audio-thread param queue (try_lock on audio thread, never blocks).
     std::mutex                       param_mutex;
     std::vector<std::pair<int,float>> param_queue;
@@ -804,6 +842,12 @@ struct Plugin {
     // phase-invariant distortion measure. Allocated in activate, fed read-only
     // from the SslComp tap (mono sum of dry_aligned / wet_a).
     nablafx::CoherenceDistortion bc_coherence;
+
+#if AXON_STAGE_TIMING
+    // Bench-only per-stage timing bank. Audio thread writes (no atomics by
+    // design — see axon_stage_timing.h); readers only between process() calls.
+    AxonStageTimingBank stage_timing;
+#endif
 
     std::vector<ChannelChain> chains;
 };
@@ -1077,18 +1121,30 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
 
     plug->chains.clear();
     plug->chains.resize(plug->channels);
-    for (auto& ch : plug->chains) {
+    // Deterministic Auto-EQ controller — class-agnostic and linked-stereo (one
+    // instance for all channels), configured from the default class's band
+    // layout (all classes share the same n_bands/span).
+    if (!g_state->autoeq_dsp_per_class.empty()) {
+        const int di = std::clamp(g_state->autoeq_default_idx, 0,
+                                  (int)g_state->autoeq_dsp_per_class.size() - 1);
+        plug->adaptive_eq.reset(std::get<SpectralMaskEqParams>(
+            g_state->autoeq_dsp_per_class[di].params));
+    }
+    // Freeze starts disengaged holding a flat curve (params 0.5 = 0 dB).
+    plug->autoeq_held_l.fill(0.5f);
+    plug->autoeq_held_r.fill(0.5f);
+    plug->autoeq_freeze_prev = false;
+    // Neural Auto-EQ controller sessions — one BATCHED session per class
+    // (audio_in [2,1,T], per-channel state in the batch dim), shared by all
+    // channels, so they live on the Plugin, not the per-channel chains.
+    {
         const auto& classes = g_state->axon_meta.auto_eq.class_order;
-        ch.autoeq_ort_per_class.clear();
-        ch.autoeq_ort_per_class.reserve(classes.size());
-        ch.autoeq_spec_per_class.clear();
-        ch.autoeq_spec_per_class.resize(classes.size());
-        ch.autoeq_iir_per_class.clear();
-        ch.autoeq_iir_per_class.resize(classes.size());
+        plug->autoeq_ort_per_class.clear();
+        plug->autoeq_ort_per_class.reserve(classes.size());
         for (size_t i = 0; i < classes.size(); ++i) {
             const std::string& cls = classes[i];
             const std::string& dir = g_state->axon_meta.auto_eq.classes.at(cls);
-            ch.autoeq_ort_per_class.push_back(std::make_unique<OrtMiniSession>(
+            plug->autoeq_ort_per_class.push_back(std::make_unique<OrtMiniSession>(
                 *g_state->ort_env,
                 g_state->resources_dir + "/" + dir + "/model.onnx",
                 g_state->autoeq_metas[i]));
@@ -1096,9 +1152,9 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
             // Every auto-EQ class declares spectral_mask_eq as its
             // dsp_blocks[0]; meta.cpp throws if anything else slips through.
             const auto& dsp = g_state->autoeq_dsp_per_class[i];
-            // The audio thread stages control params through a fixed 64-element
-            // stack array (eq_params_storage in flush_chain_block_). Fail fast
-            // here rather than overflowing that buffer during processing.
+            // The audio thread stages control params through fixed 64-element
+            // stack arrays (eq_params storage in flush_chain_block_). Fail fast
+            // here rather than overflowing those buffers during processing.
             const int n_control =
                 std::get<SpectralMaskEqParams>(dsp.params).num_control_params;
             if (n_control > 64) {
@@ -1106,8 +1162,18 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
                     "auto_eq class '" + cls + "' declares num_control_params=" +
                     std::to_string(n_control) +
                     " which exceeds the 64-element control buffer; "
-                    "re-export the bundle or raise eq_params_storage size.");
+                    "re-export the bundle or raise eq_params storage size.");
             }
+        }
+    }
+    for (auto& ch : plug->chains) {
+        const auto& classes = g_state->axon_meta.auto_eq.class_order;
+        ch.autoeq_spec_per_class.clear();
+        ch.autoeq_spec_per_class.resize(classes.size());
+        ch.autoeq_iir_per_class.clear();
+        ch.autoeq_iir_per_class.resize(classes.size());
+        for (size_t i = 0; i < classes.size(); ++i) {
+            const auto& dsp = g_state->autoeq_dsp_per_class[i];
             ch.autoeq_spec_per_class[i] = std::make_unique<SpectralMaskEq>();
             ch.autoeq_spec_per_class[i]->reset(
                 std::get<SpectralMaskEqParams>(dsp.params));
@@ -1115,14 +1181,6 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
             ch.autoeq_iir_per_class[i] = std::make_unique<nablafx::IirFilterbankEq>();
             ch.autoeq_iir_per_class[i]->reset(
                 std::get<SpectralMaskEqParams>(dsp.params));
-        }
-        // Deterministic Auto-EQ controller — class-agnostic, configured from the
-        // default class's band layout (all classes share the same n_bands/span).
-        if (!g_state->autoeq_dsp_per_class.empty()) {
-            const int di = std::clamp(g_state->autoeq_default_idx, 0,
-                                      (int)g_state->autoeq_dsp_per_class.size() - 1);
-            ch.adaptive_eq.reset(std::get<SpectralMaskEqParams>(
-                g_state->autoeq_dsp_per_class[di].params));
         }
         ch.saturator.reset(g_state->sat_rational.numerator,
                            g_state->sat_rational.denominator);
@@ -1208,6 +1266,9 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
                                    plug->lim_centers.data());
 
     plug->current_latency.store(compute_latency_(*plug), std::memory_order_relaxed);
+#if AXON_STAGE_TIMING
+    plug->stage_timing.reset();
+#endif
     plug->activated = true;
     return true;
 }
@@ -1234,27 +1295,31 @@ static void plugin_reset(const clap_plugin_t* p) {
     plug->auto_gain.reset();
     plug->meter_in.reset(plug->sample_rate);
     plug->meter_out.reset(plug->sample_rate);
+    for (auto& s : plug->autoeq_ort_per_class) {
+        if (s) s->reset_state();
+    }
     for (auto& ch : plug->chains) {
-        for (auto& s : ch.autoeq_ort_per_class) {
-            if (s) s->reset_state();
-        }
         ch.ceiling.reset(plug->sample_rate);
         ch.in_fill   = 0;
         ch.out_avail = 0;
         ch.out_read  = 0;
         ch.autoeq_peak_env = 0.f;
-        // Clear the deterministic Auto-EQ controller's running spectrum + curve.
-        if (!g_state->autoeq_dsp_per_class.empty()) {
-            const int di = std::clamp(g_state->autoeq_default_idx, 0,
-                                      (int)g_state->autoeq_dsp_per_class.size() - 1);
-            ch.adaptive_eq.reset(std::get<SpectralMaskEqParams>(
-                g_state->autoeq_dsp_per_class[di].params));
-        }
         std::fill(ch.in_buf.begin(),  ch.in_buf.end(),  0.0f);
         std::fill(ch.out_buf.begin(), ch.out_buf.end(), 0.0f);
         if (!ch.bypass_fifo.empty())
             std::fill(ch.bypass_fifo.begin(), ch.bypass_fifo.end(), 0.0f);
     }
+    // Clear the linked deterministic Auto-EQ controller's running spectrum +
+    // curve (one instance, not per chain).
+    if (!g_state->autoeq_dsp_per_class.empty()) {
+        const int di = std::clamp(g_state->autoeq_default_idx, 0,
+                                  (int)g_state->autoeq_dsp_per_class.size() - 1);
+        plug->adaptive_eq.reset(std::get<SpectralMaskEqParams>(
+            g_state->autoeq_dsp_per_class[di].params));
+    }
+    plug->autoeq_held_l.fill(0.5f);
+    plug->autoeq_held_r.fill(0.5f);
+    plug->autoeq_freeze_prev = false;
     plug->bypass_w = plug->bypass_r = 0;
 }
 
@@ -1272,6 +1337,7 @@ struct AmountSnapshot {
     float eq_range;
     bool  eq_adaptive;        // EQ_ENGINE: false = neural LSTM, true = deterministic cascade
     bool  eq_render_iir;      // EQ_RENDER: false = STFT mask, true = zero-latency IIR bank
+    bool  eq_freeze;          // EQ_FREEZE: hold the last live-solved curve, skip controllers
     float eq_boost_scale;
     float eq_speed_ms;
     float ssl_comp_wet;
@@ -1322,6 +1388,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float eqr=1.f,eqs=100.f,eqb=1.f;
     float eqeng=0.f;                                      // EQ_ENGINE: 0 neural, 1 adaptive
     float eqrnd=1.f;                                      // EQ_RENDER: 0 STFT mask, 1 IIR bank (default IIR)
+    float eqfrz=0.f;                                      // EQ_FREEZE: 0 live, 1 hold current curve
     float ssc=0.f;
     float ssc_in_db=0.f;
     // SSL channel EQ (SEQ_*). Defaults = flat / filters off / no colour.
@@ -1346,6 +1413,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="EQB") eqb=v;
         else if(c.id=="EQ_ENGINE") eqeng=v;
         else if(c.id=="EQ_RENDER") eqrnd=v;
+        else if(c.id=="EQ_FREEZE") eqfrz=v;
         else if(c.id=="TRM") trm_db=v;
         else if(c.id=="SSC") ssc=v;
         else if(c.id=="SSC_IN") ssc_in_db=v;
@@ -1387,6 +1455,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.eq_range=eqr;
     s.eq_adaptive=(eqeng>=0.5f);
     s.eq_render_iir=(eqrnd>=0.5f);
+    s.eq_freeze=(eqfrz>=0.5f);
     s.eq_boost_scale=eqb;
     s.eq_speed_ms=eqs;
     s.ssl_comp_wet = ssc * g_state->axon_meta.amt_ssl_comp.wet_mix_max;
@@ -1459,11 +1528,22 @@ void flush_chain_block_(Plugin& plug,
     bool solo_captured = false;
 
     // Meter the raw plugin input (pre-chain).
+#if AXON_STAGE_TIMING
+    uint64_t st_t0 = axon_st_now();
+#endif
     plug.meter_in.process(work_l, (n_ch >= 2 ? work_r : nullptr),
                           static_cast<int>(n_ch), kBlockSize);
+#if AXON_STAGE_TIMING
+    plug.stage_timing.record(AXON_ST_METER_IN, axon_st_now() - st_t0);
+#endif
 
     for (int pos = 0; pos < kNumStages; ++pos) {
         const int stage_idx = plug.processor_order[pos];
+#if AXON_STAGE_TIMING
+        // One instrumentation point covers all stages: stage_idx == StageID
+        // == timing slot (slots 1-9 mirror the enum by construction).
+        st_t0 = axon_st_now();
+#endif
         switch (static_cast<StageID>(stage_idx)) {
 
         case StageID::SslEq: {
@@ -1505,11 +1585,10 @@ void flush_chain_block_(Plugin& plug,
             // hidden activations conditioned on a different signal class.
             if (amt.autoeq_cls_idx != plug.active_autoeq_cls) {
                 plug.active_autoeq_cls = amt.autoeq_cls_idx;
-                for (auto& chan : plug.chains) {
-                    auto& s = chan.autoeq_ort_per_class[plug.active_autoeq_cls];
-                    if (s) s->reset_state();
+                if (auto& s = plug.autoeq_ort_per_class[plug.active_autoeq_cls])
+                    s->reset_state();
+                for (auto& chan : plug.chains)
                     chan.autoeq_peak_env = 0.f;
-                }
             }
             const int cls = plug.active_autoeq_cls;
             const auto& cls_dsp = g_state->autoeq_dsp_per_class[cls];
@@ -1523,26 +1602,70 @@ void flush_chain_block_(Plugin& plug,
                 (cls >= 0 && cls < static_cast<int>(aeq_classes.size()))
                     ? nablafx::adaptive_eq_detail::target_curve_index(aeq_classes[cls].c_str())
                     : 0;
-            std::array<float, 64> eq_params_storage{};
-            float* eq_params = eq_params_storage.data();
+            // Per-channel [0,1] band params. The adaptive engine solves ONE
+            // linked curve (both channels point at the left slot); the neural
+            // LSTM solves both channels in one batched ORT call.
+            std::array<float, 64> eq_params_l_storage{}, eq_params_r_storage{};
+            float* eq_params_by_ch[2] = {eq_params_l_storage.data(),
+                                         eq_params_l_storage.data()};
             float* ch_buf[2] = {work_l, work_r};
-            for (uint32_t ch=0; ch<n_ch; ++ch) {
-                float* blk = ch_buf[ch];
-                // EQ_ENGINE: fill eq_params from either the deterministic cascade
-                // controller (Adaptive) or the per-class LSTM (Neural). Both emit
-                // the same [0,1] band contract; the renderer below is unchanged.
-                if (amt.eq_adaptive) {
-                    // Range is applied by the renderer's set_range_norm below, so
-                    // ask the controller for the full-depth curve (depth01 = 1).
-                    auto& actrl = plug.chains[ch].adaptive_eq;
-                    actrl.set_target_curve(adaptive_curve_idx);   // follow CLS
-                    actrl.set_response_ms(amt.eq_speed_ms);       // EQ Speed knob
-                    actrl.observe(blk, kBlockSize);
-                    actrl.target_bands(eq_params, n_params, 1.0f);
-                } else {
-                    auto& sess = plug.chains[ch].autoeq_ort_per_class[cls];
-                    // Peak-hold envelope normalisation to match training distribution.
-                    std::array<float, kBlockSize> ctrl_buf;
+            // EQ_FREEZE falling edge: re-solve from a clean start, mirroring
+            // the class-switch semantics — zero the active class's LSTM state
+            // and peak envelopes, and restart the adaptive controller (its
+            // warm-up mean re-converges within a few frames).
+            if (!amt.eq_freeze && plug.autoeq_freeze_prev) {
+                plug.autoeq_freeze_prev = false;
+                if (auto& s = plug.autoeq_ort_per_class[cls]) s->reset_state();
+                for (auto& chan : plug.chains) chan.autoeq_peak_env = 0.f;
+                if (!g_state->autoeq_dsp_per_class.empty()) {
+                    const int di = std::clamp(g_state->autoeq_default_idx, 0,
+                        (int)g_state->autoeq_dsp_per_class.size() - 1);
+                    plug.adaptive_eq.reset(std::get<SpectralMaskEqParams>(
+                        g_state->autoeq_dsp_per_class[di].params));
+                }
+            }
+            // EQ_ENGINE "Adaptive": the deterministic cascade is linked-stereo —
+            // observe the L+R mono sum ONCE per block and solve one curve that
+            // every channel renders (independent per-channel solves drift apart
+            // on decorrelated material → stereo-image wobble). The EQ Speed knob
+            // drives only the emitted-curve smoother, remapped so the default
+            // (EQS=100) lands on the A/B-validated 0.40 s; the running-spectrum
+            // average is pinned at 2 s inside the controller. Range is applied
+            // by the renderer's set_range_norm, so ask for the full-depth curve.
+            if (amt.eq_freeze) {
+                // FREEZE: render the held curve and skip all controller
+                // inference (LSTM or adaptive) — the controller cost drops to
+                // ~zero while engaged. The curve held is whatever was live
+                // when the toggle engaged (flat 0 dB if nothing has been
+                // solved yet this activation).
+                plug.autoeq_freeze_prev = true;
+                eq_params_by_ch[0] = plug.autoeq_held_l.data();
+                eq_params_by_ch[1] = (n_ch >= 2) ? plug.autoeq_held_r.data()
+                                                 : plug.autoeq_held_l.data();
+            } else if (amt.eq_adaptive) {
+                std::array<float, kBlockSize> mono;
+                if (n_ch >= 2)
+                    for (int i = 0; i < kBlockSize; ++i)
+                        mono[i] = 0.5f * (work_l[i] + work_r[i]);
+                else
+                    std::copy_n(work_l, kBlockSize, mono.begin());
+                auto& actrl = plug.adaptive_eq;
+                actrl.set_target_curve(adaptive_curve_idx);   // follow CLS
+                actrl.set_response_ms(200.f + 2.f * amt.eq_speed_ms);  // EQS 10..500 → 0.22..1.2 s
+                actrl.observe(mono.data(), kBlockSize);
+                actrl.target_bands(eq_params_l_storage.data(), n_params, 1.0f);
+            } else {
+                // EQ_ENGINE "Neural": per-class LSTM, both channels solved in
+                // ONE batched ORT call (batch element per channel; per-channel
+                // LSTM state lives in the state tensors' batch dim). Mono feeds
+                // the left buffer twice and reads only the left params. Same
+                // [0,1] band contract as the adaptive path.
+                auto& sess = plug.autoeq_ort_per_class[cls];
+                std::array<float, kBlockSize> ctrl_l, ctrl_r;
+                // Peak-hold envelope normalisation (per channel) to match the
+                // training distribution.
+                auto normalize = [&](uint32_t ch, float* out) {
+                    const float* blk = ch_buf[ch];
                     float blk_peak = 0.f;
                     for (int i = 0; i < kBlockSize; ++i)
                         blk_peak = std::max(blk_peak, std::abs(blk[i]));
@@ -1551,10 +1674,32 @@ void flush_chain_block_(Plugin& plug,
                     else env = plug.autoeq_env_decay * env
                               + (1.f - plug.autoeq_env_decay) * blk_peak;
                     const float ctrl_scale = (env > 1e-6f) ? (0.5f / env) : 1.f;
-                    for (int i = 0; i < kBlockSize; ++i) ctrl_buf[i] = blk[i] * ctrl_scale;
-                    sess->run_controller(ctrl_buf.data(), kBlockSize, eq_params, n_params);
-                    sess->swap_state();
-                }
+                    for (int i = 0; i < kBlockSize; ++i) out[i] = blk[i] * ctrl_scale;
+                };
+                normalize(0, ctrl_l.data());
+                if (n_ch >= 2) normalize(1, ctrl_r.data());
+                else std::copy_n(ctrl_l.data(), kBlockSize, ctrl_r.data());
+#if AXON_STAGE_TIMING
+                const uint64_t st_sub0 = axon_st_now();
+#endif
+                sess->run_controller(ctrl_l.data(), ctrl_r.data(), kBlockSize,
+                                     eq_params_l_storage.data(),
+                                     eq_params_r_storage.data(), n_params);
+                sess->swap_state();
+#if AXON_STAGE_TIMING
+                plug.stage_timing.record(AXON_ST_AUTOEQ_ORT_CTRL,
+                                         axon_st_now() - st_sub0);
+#endif
+                if (n_ch >= 2) eq_params_by_ch[1] = eq_params_r_storage.data();
+            }
+            if (!amt.eq_freeze) {
+                // Remember the live curve so engaging Freeze holds it.
+                std::copy_n(eq_params_by_ch[0], n_params, plug.autoeq_held_l.begin());
+                std::copy_n(eq_params_by_ch[1], n_params, plug.autoeq_held_r.begin());
+            }
+            for (uint32_t ch=0; ch<n_ch; ++ch) {
+                float* blk = ch_buf[ch];
+                float* eq_params = eq_params_by_ch[ch];
 
                 std::copy_n(blk, kBlockSize, dry.data());
                 // Display frequencies: 5-point overlay at the historical PEQ band
@@ -1568,6 +1713,14 @@ void flush_chain_block_(Plugin& plug,
                             float(i) / (SpectrumAnalyzer::kNumBins - 1));
                     return hz;
                 }();
+                // The spectrum UI consumes the EQ overlay curves only when its
+                // 2048-sample window fills — every 16th flush (~46 ms) — so
+                // evaluating the 55-point magnitude response on every flush
+                // discards 15 of 16 results unseen. Every 8th flush keeps the
+                // overlay ≤ ~23 ms stale, still ahead of the UI cadence. The
+                // audio path is untouched by this gate.
+                const bool eval_disp =
+                    (ch == 0) && (plug.autoeq_disp_tick++ & 7u) == 0;
                 // EQ_RENDER: zero-latency minimum-phase IIR bank vs the STFT mask.
                 // Both consume the same eq_params [0,1] contract.
                 if (amt.eq_render_iir) {
@@ -1575,7 +1728,7 @@ void flush_chain_block_(Plugin& plug,
                     dsp->set_range_norm(amt.eq_range);   // IIR bank: range only
                     dsp->set_params(eq_params, n_params);
                     dsp->process(blk, wet_a.data(), kBlockSize);
-                    if (ch == 0) {
+                    if (eval_disp) {
                         float gains5[5];
                         for (int k = 0; k < 5; ++k)
                             gains5[k] = static_cast<float>(dsp->magnitude_db(kDisplayHz[k]));
@@ -1595,7 +1748,7 @@ void flush_chain_block_(Plugin& plug,
                     dsp->set_speed_tau_ms(amt.eq_speed_ms);
                     dsp->set_params(eq_params, n_params);
                     dsp->process(blk, wet_a.data(), kBlockSize);
-                    if (ch == 0) {
+                    if (eval_disp) {
                         float gains5[5];
                         dsp->sample_gains_db(kDisplayHz, gains5, 5);
                         plug.spectrum.set_eq_gains(gains5);
@@ -1785,9 +1938,16 @@ void flush_chain_block_(Plugin& plug,
                     // ORT produces `actual_olen` (= N - rf + 1) samples;
                     // pass that as audio_out_len so OrtMiniSession doesn't
                     // read past the tensor end.
+#if AXON_STAGE_TIMING
+                    const uint64_t st_sub0 = axon_st_now();
+#endif
                     plug.chains[ch].ssl_comp_ort->run(ring.data(), N,
                         obuf.data(), actual_olen,
                         nullptr, 0, "audio_out");
+#if AXON_STAGE_TIMING
+                    plug.stage_timing.record(AXON_ST_SSL_ORT_FORWARD,
+                                             axon_st_now() - st_sub0);
+#endif
 
                     // Output sample i corresponds to ring position (rf-1+i).
                     // We want the kSslHop newest predictions (ring positions
@@ -1985,8 +2145,18 @@ void flush_chain_block_(Plugin& plug,
 
         } // switch
 
+#if AXON_STAGE_TIMING
+        // stage_idx comes from the GUI-driven processor_order; bounds-check
+        // before indexing the bank (slots 1-9 are the only expected values).
+        if (static_cast<unsigned>(stage_idx) < AXON_ST_SLOT_COUNT)
+            plug.stage_timing.record(stage_idx, axon_st_now() - st_t0);
+        st_t0 = axon_st_now();
+#endif
         // Capture stage output for the spectrum analyzer.
         plug.spectrum.push(pos, work_l, work_r, n_ch, kBlockSize);
+#if AXON_STAGE_TIMING
+        plug.stage_timing.record(AXON_ST_SPECTRUM_PUSH, axon_st_now() - st_t0);
+#endif
     } // for stage
 
     // When a full 2048-sample frame has accumulated, hand off to the main thread.
@@ -2005,6 +2175,9 @@ void flush_chain_block_(Plugin& plug,
     // Trim + TruePeakCeiling — always last, not user-reorderable. This is the
     // REAL master; the OUT meter reads it (so driving the limiter shows the
     // actual target loudness), and Auto Gain is applied *after* metering.
+#if AXON_STAGE_TIMING
+    st_t0 = axon_st_now();
+#endif
     if (amt.trim_lin != 1.f) {
         for (int i=0;i<kBlockSize;++i) work_l[i]*=amt.trim_lin;
         if (n_ch>=2) for (int i=0;i<kBlockSize;++i) work_r[i]*=amt.trim_lin;
@@ -2015,6 +2188,10 @@ void flush_chain_block_(Plugin& plug,
         plug.chains[ch].out_avail=kBlockSize;
         plug.chains[ch].out_read=0;
     }
+#if AXON_STAGE_TIMING
+    plug.stage_timing.record(AXON_ST_TRIM_CEILING, axon_st_now() - st_t0);
+    st_t0 = axon_st_now();
+#endif
 
     // Meter the real master (pre Auto Gain) and publish both meters.
     plug.meter_out.process(plug.chains[0].out_buf.data(),
@@ -2032,6 +2209,10 @@ void flush_chain_block_(Plugin& plug,
         plug.m_out_rms.store(out_r.rms_db,    std::memory_order_relaxed);
         plug.m_out_peak.store(out_r.peak_db,  std::memory_order_relaxed);
     }
+#if AXON_STAGE_TIMING
+    plug.stage_timing.record(AXON_ST_METER_OUT, axon_st_now() - st_t0);
+    st_t0 = axon_st_now();
+#endif
 
     // Auto gain (level-matched bypass): a *monitoring* trim that brings the
     // delivered output down to the input's loudness for fair A/B. Computed
@@ -2062,6 +2243,9 @@ void flush_chain_block_(Plugin& plug,
             for (int i=0;i<kBlockSize;++i) ob[i] *= ag;
         }
     }
+#if AXON_STAGE_TIMING
+    plug.stage_timing.record(AXON_ST_AUTO_GAIN, axon_st_now() - st_t0);
+#endif
 }
 
 // Index of a control by id in the loaded meta (main thread; -1 if absent).
@@ -2431,12 +2615,38 @@ static const clap_plugin_gui_t s_ext_gui = {
     gui_hide,
 };
 
+#if AXON_STAGE_TIMING
+// ---------------------------------------------------------------------------
+// Custom CLAP extension: per-stage timing readout (bench-only instrumentation;
+// see axon_stage_timing.h for the ABI + threading contract).
+// ---------------------------------------------------------------------------
+static uint32_t stage_timing_count(const clap_plugin_t*) {
+    return AXON_ST_SLOT_COUNT;
+}
+static bool stage_timing_get(const clap_plugin_t* p, uint32_t index,
+                             axon_stage_timing_entry* out) {
+    if (index >= AXON_ST_SLOT_COUNT || out == nullptr) return false;
+    const auto* plug = static_cast<const Plugin*>(p->plugin_data);
+    *out = plug->stage_timing.entries[index];
+    return true;
+}
+static void stage_timing_reset(const clap_plugin_t* p) {
+    static_cast<Plugin*>(p->plugin_data)->stage_timing.reset();
+}
+static const axon_stage_timing s_ext_stage_timing = {
+    stage_timing_count, stage_timing_get, stage_timing_reset,
+};
+#endif  // AXON_STAGE_TIMING
+
 static const void* plugin_get_extension(const clap_plugin_t*, const char* id) {
     if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) return &s_ext_audio_ports;
     if (std::strcmp(id, CLAP_EXT_PARAMS)       == 0) return &s_ext_params;
     if (std::strcmp(id, CLAP_EXT_LATENCY)      == 0) return &s_ext_latency;
     if (std::strcmp(id, CLAP_EXT_STATE)        == 0) return &s_ext_state;
     if (std::strcmp(id, CLAP_EXT_GUI)          == 0) return &s_ext_gui;
+#if AXON_STAGE_TIMING
+    if (std::strcmp(id, AXON_EXT_STAGE_TIMING) == 0) return &s_ext_stage_timing;
+#endif
     return nullptr;
 }
 

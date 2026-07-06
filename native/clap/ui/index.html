@@ -508,7 +508,7 @@ const PROCESSORS = [
       'SEQ_DRIVE',
       'SEQ_AUTO', 'SEQ_SPLIT', 'SEQ_CAL', 'SEQ_RESET',
     ], wetParams: ['SEQ_ON'] },
-  { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ_ENGINE', 'EQ_RENDER', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
+  { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ_ENGINE', 'EQ_RENDER', 'EQ_FREEZE', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
   // SATURATOR (id 2) removed from the chain for now — kept in the DSP/code,
   // just not exposed here. Re-add this entry + put 2 back in the order to restore.
   { id: 4, name: 'BUS COMP',  params: ['SSC', 'SSC_IN'],          wetParams: ['SSC'] },
@@ -718,6 +718,7 @@ function toggleLabels(id) {
   if (id === 'MLA') return ['EVEN', 'DYNAMIC'];
   if (id === 'EQ_ENGINE') return ['NEURAL', 'ADAPTIVE'];
   if (id === 'EQ_RENDER') return ['STFT', 'IIR'];
+  if (id === 'EQ_FREEZE') return ['LIVE', 'HOLD'];
   // SSL EQ: LF/HF shape switch and the momentary coupling recalibrate.
   if (id === 'SEQ_LF_BELL' || id === 'SEQ_HF_BELL') return ['SHELF', 'BELL'];
   if (id === 'SEQ_CAL') return ['IDLE', 'CALIBRATE'];

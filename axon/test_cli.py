@@ -57,6 +57,12 @@ def test_parser_routing() -> None:
     assert args.fn is cli.cmd_autoeq_probe and extra == ["--run-dir", "/r"]
     check("autoeq probe routes")
 
+    args, extra = p.parse_known_args(
+        ["train", "nablafx", "data=ssl_comp_musdb_trainval", "model=tcn/model_bb_tcn_ssl_comp"])
+    assert args.fn is cli.cmd_train_nablafx
+    assert extra == ["data=ssl_comp_musdb_trainval", "model=tcn/model_bb_tcn_ssl_comp"]
+    check("train nablafx routes + forwards hydra overrides")
+
     args, extra = p.parse_known_args(["bench", "--json", "--buffers", "128"])
     assert args.fn is cli.cmd_bench and args.as_json and extra == ["--buffers", "128"]
     check("bench keeps own --json, forwards the rest")

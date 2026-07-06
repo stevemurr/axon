@@ -359,7 +359,7 @@ response across input levels instead of memorizing one operating point.
 **Train.** On the GPU host, via the nablafx CLI directly:
 
 ```sh
-uv run nablafx data=ssl_comp_musdb_trainval model=tcn/model_bb_tcn_ssl_comp
+uv run axon train nablafx data=ssl_comp_musdb_trainval model=tcn/model_bb_tcn_ssl_comp
 ```
 
 (BlackBoxSystem; loss = 0.33·L1 + 0.67·MRSTFT. An LSTM alternative,

@@ -108,9 +108,14 @@ private:
     Fn fn_;
 };
 
+// NOTE: the parameter is spelled via the nested Fn alias — a NON-DEDUCED
+// context — so the explicit <Iface, Args...> arguments fully fix the type and
+// a lambda argument implicitly converts. (A plain std::function<HRESULT(
+// Args...)> parameter would leave the pack open for deduction, which fails
+// against lambdas.)
 template <typename Iface, typename... Args>
 ComHandler<Iface, Args...>* make_handler(
-    std::function<HRESULT(Args...)> fn) {
+    typename ComHandler<Iface, Args...>::Fn fn) {
     return new ComHandler<Iface, Args...>(std::move(fn));
 }
 
@@ -204,7 +209,9 @@ bool ensure_wnd_class() {
     wc.lpfnWndProc   = wnd_proc;
     wc.hInstance     = GetModuleHandleW(nullptr);
     wc.lpszClassName = kWndClass;
-    wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    // IDC_ARROW expands to an ANSI MAKEINTRESOURCE without UNICODE defined;
+    // spell the W flavor explicitly (32512 == IDC_ARROW's resource ordinal).
+    wc.hCursor       = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     if (!RegisterClassW(&wc) &&
         GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return false;

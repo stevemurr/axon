@@ -19,6 +19,11 @@
 int main(int argc, char** argv) {
     const char* path = (argc > 1) ? argv[1]
                                    : std::getenv("AXON_META_JSON");
+#ifdef DEFAULT_META_PATH
+    // CMake injects the committed weights/axon_bundle/axon_meta.json so the
+    // canonical suite runs this against the shipped artifact with no args.
+    if (!path) path = DEFAULT_META_PATH;
+#endif
     if (!path) {
         std::fprintf(stderr,
             "usage: test_composite_meta <axon_meta.json>  (or set AXON_META_JSON)\n");

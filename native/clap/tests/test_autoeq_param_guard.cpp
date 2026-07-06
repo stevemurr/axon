@@ -37,6 +37,7 @@
 
 #include "../src/spectral_mask_eq.hpp"   // SpectralMaskEq (pure DSP, no CLAP/ORT)
 #include "../src/meta.hpp"               // SpectralMaskEqParams
+#include "../src/axon_limits.hpp"        // kEqParamsStorage (the REAL constant)
 
 #include <cassert>
 #include <cmath>
@@ -46,10 +47,11 @@
 
 namespace {
 
-// Mirror of the audio thread's fixed staging buffer size in
-// flush_chain_block_ (std::array<float, 64> eq_params_storage). The guard in
-// plugin_activate compares num_control_params against exactly this value.
-constexpr int kEqParamsStorage = 64;
+// The audio thread's fixed staging buffer size in flush_chain_block_
+// (std::array<float, kEqParamsStorage> eq_params_storage) — shared via
+// axon_limits.hpp so this test can't drift from the plugin's real arrays and
+// activate guard.
+using nablafx_axon::kEqParamsStorage;
 constexpr int kSR = 44100;
 
 // Build a geometrically-valid SpectralMaskEqParams for `n_bands` bands. n_fft

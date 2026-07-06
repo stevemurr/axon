@@ -24,7 +24,7 @@
 //   * ONE set of side biquads (filters run on the single side signal).
 //
 // Header-only, pure DSP in namespace nablafx, no CLAP/ORT deps — unit-testable
-// standalone (cf. bass_mono.hpp, exciter.hpp).
+// standalone (cf. bass_mono.hpp).
 //
 //   Widener w;
 //   w.prepare(44100.0);
@@ -36,6 +36,8 @@
 
 #pragma once
 #include <cmath>
+
+#include "biquad.hpp"
 
 namespace nablafx {
 
@@ -93,20 +95,7 @@ public:
     }
 
 private:
-    struct Biquad {
-        double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-        double z1 = 0, z2 = 0;
-        double process(double x) {
-            double y = b0 * x + z1;
-            z1 = b1 * x - a1 * y + z2;
-            z2 = b2 * x - a2 * y;
-            return y;
-        }
-        void clear() { z1 = z2 = 0; }
-        void set(double nb0, double nb1, double nb2, double na1, double na2) {
-            b0 = nb0; b1 = nb1; b2 = nb2; a1 = na1; a2 = na2;
-        }
-    };
+    using Biquad = BiquadTDF2;
 
     void design_() { design_low_(); design_air_(); }
 
@@ -115,18 +104,8 @@ private:
     // untouched lows. Helper writes into the two supplied biquads.
     void design_hpf_(double fc_req, double fallback, Biquad& s1, Biquad& s2) {
         const double fc = (fc_req > 1.0 && fc_req < 0.49 * sr_) ? fc_req : fallback;
-        const double w0 = 2.0 * M_PI * fc / sr_;
-        const double cw = std::cos(w0), sw = std::sin(w0);
-        const double Q  = 0.70710678;
-        const double alpha = sw / (2.0 * Q);
-        const double a0 = 1.0 + alpha;
-        const double b0 = (1.0 + cw) / 2.0 / a0;
-        const double b1 = -(1.0 + cw)     / a0;
-        const double b2 = (1.0 + cw) / 2.0 / a0;
-        const double a1 = -2.0 * cw       / a0;
-        const double a2 = (1.0 - alpha)   / a0;
-        s1.set(b0, b1, b2, a1, a2);
-        s2.set(b0, b1, b2, a1, a2);
+        rbj_butterworth_hpf(fc, sr_, s1);
+        rbj_butterworth_hpf(fc, sr_, s2);
     }
 
     void design_low_() { design_hpf_((double)low_hz_, 250.0, hp_lo1_, hp_lo2_); }

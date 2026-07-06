@@ -14,6 +14,8 @@
 #include <cmath>
 #include <vector>
 
+#include "stft_common.hpp"
+
 namespace nablafx {
 
 class MelLimiter {
@@ -73,11 +75,7 @@ private:
         std::vector<float> in_ring;
         int                in_fill{0};
         int                samples_since{0};
-        std::vector<float> out_ring;
-        std::vector<float> norm_ring;
-        int                out_write{0};
-        int                out_read{0};
-        int                out_avail{0};
+        OlaAccumulator     ola;      // OLA audio + window² rings (kFFTSize + kHopSize)
         // The WOLA wet path has a natural group delay of kFFTSize-1; this
         // single-sample delay aligns it to the reported kLatency (kFFTSize)
         // and to the dry delay ring.

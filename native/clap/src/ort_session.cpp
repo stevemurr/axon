@@ -87,12 +87,10 @@ void OrtSession::swap_state_buffers() {
 }
 
 const float* OrtSession::run(int input_len) {
-    if (input_len > max_input_len_) {
-        throw std::runtime_error("OrtSession::run: input_len exceeds max configured block length");
-    }
-    if (input_len < meta_.receptive_field) {
-        throw std::runtime_error("OrtSession::run: input_len must be at least receptive_field");
-    }
+    // Precondition checks + output-length arithmetic live in ort_run_guard.hpp
+    // (header-only) so tests/test_ort_session.cpp pins the real guard.
+    const int audio_out_len =
+        static_cast<int>(ort_run_out_len(meta_, max_input_len_, input_len));
 
     // Compose the input tensor list in ONNX declaration order. We built
     // input_names_ from session inspection, so it already matches.
@@ -123,7 +121,6 @@ const float* OrtSession::run(int input_len) {
     std::vector<Ort::Value> output_values;
     output_values.reserve(output_name_cstrs_.size());
 
-    const int audio_out_len = input_len - (meta_.receptive_field - 1);
     const std::vector<int64_t> audio_out_shape = {1, 1, audio_out_len};
     output_values.emplace_back(Ort::Value::CreateTensor<float>(
         cpu_memory_, audio_out_.data(), static_cast<size_t>(audio_out_len),

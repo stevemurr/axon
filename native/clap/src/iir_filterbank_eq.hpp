@@ -23,6 +23,8 @@
 #include <cmath>
 #include <vector>
 
+#include "biquad.hpp"
+#include "mel_scale.hpp"
 #include "meta.hpp"   // SpectralMaskEqParams (reused for drop-in compatibility)
 
 namespace nablafx {
@@ -37,14 +39,7 @@ public:
         max_db_ = cfg.max_gain_db;
 
         // Mel band centers (HTK), matching SpectralMaskEq::build_mel_.
-        const double mmin = 2595.0 * std::log10(1.0 + cfg.f_min / 700.0);
-        const double mmax = 2595.0 * std::log10(1.0 + cfg.f_max / 700.0);
-        center_.assign(nb_, 0.0);
-        for (int b = 0; b < nb_; ++b) {
-            const double mel = mmin + (mmax - mmin) * (b + 1) / (nb_ + 1);
-            center_[b] = 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
-            center_[b] = std::min(center_[b], 0.49 * sr_);
-        }
+        center_ = mel_band_centers_htk(nb_, cfg.f_min, cfg.f_max, 0.49 * sr_);
         // Per-band Q from neighbour spacing (bell spans roughly to its neighbours).
         q_.assign(nb_, 1.0);
         for (int b = 0; b < nb_; ++b) {
@@ -112,18 +107,10 @@ public:
     }
 
 private:
-    struct Biquad {
-        double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-        double z1 = 0, z2 = 0;
-        double process(double x) {
-            double y = b0 * x + z1;
-            z1 = b1 * x - a1 * y + z2;
-            z2 = b2 * x - a2 * y;
-            return y;
-        }
-        void set(double nb0, double nb1, double nb2, double na1, double na2) {
-            b0 = nb0; b1 = nb1; b2 = nb2; a1 = na1; a2 = na2;
-        }
+    // Shared TDF2 biquad + the trig-based magnitude probe the interaction
+    // matrix samples. mag_db stays HERE (deliberately different evaluation
+    // from SslBiquad's complex-based mag() — do not merge).
+    struct Biquad : BiquadTDF2 {
         // |H(e^jw)| in dB without disturbing state.
         double mag_db(double w) const {
             const double cw = std::cos(w), c2 = std::cos(2 * w), sw = std::sin(w), s2 = std::sin(2 * w);

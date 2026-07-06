@@ -17,6 +17,8 @@
 #include <cstddef>
 #include <vector>
 
+#include "biquad.hpp"
+
 namespace nablafx {
 
 class LoudnessMeter {
@@ -37,23 +39,7 @@ public:
     Readout readout() const;
 
 private:
-    struct Biquad {
-        double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
-        double z1l = 0.0, z2l = 0.0, z1r = 0.0, z2r = 0.0;
-        double step_l(double x) {
-            double y = b0 * x + z1l;
-            z1l = b1 * x - a1 * y + z2l;
-            z2l = b2 * x - a2 * y;
-            return y;
-        }
-        double step_r(double x) {
-            double y = b0 * x + z1r;
-            z1r = b1 * x - a1 * y + z2r;
-            z2r = b2 * x - a2 * y;
-            return y;
-        }
-        void clear() { z1l = z2l = z1r = z2r = 0.0; }
-    };
+    using Biquad = BiquadTDF2Stereo;
 
     void set_k_weighting_(double sr);
 

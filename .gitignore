@@ -35,3 +35,6 @@ wandb/
 # Sonic harness binaries (sources tracked)
 native/clap/bench/sonic/harness_*
 !native/clap/bench/sonic/harness_*.cpp
+
+# Coverage build tree (run_coverage.sh)
+native/clap/build-cov/

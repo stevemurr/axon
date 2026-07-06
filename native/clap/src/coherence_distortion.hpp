@@ -38,6 +38,8 @@
 #include <cmath>
 #include <vector>
 
+#include "stft_common.hpp"
+
 namespace nablafx {
 
 class CoherenceDistortion {
@@ -60,8 +62,7 @@ public:
         fft_setup_ = vDSP_create_fftsetup(log2_nfft_, kFFTRadix2);
 
         window_.assign(kNfft, 0.f);
-        for (int n = 0; n < kNfft; ++n)
-            window_[n] = 0.5f * (1.f - std::cos(2.f * (float)M_PI * n / kNfft));
+        make_hann(window_.data(), kNfft);
 
         in_dry_.assign(kNfft, 0.f);
         in_wet_.assign(kNfft, 0.f);
@@ -133,14 +134,10 @@ public:
 
 private:
     void run_frame_() {
-        // Window the rings (oldest-first) into wx_/wy_, then pack + forward FFT.
-        const int tail = kNfft - fill_;
-        vDSP_vmul(in_dry_.data() + fill_, 1, window_.data(), 1, wx_.data(), 1, (vDSP_Length)tail);
-        vDSP_vmul(in_wet_.data() + fill_, 1, window_.data(), 1, wy_.data(), 1, (vDSP_Length)tail);
-        if (fill_ > 0) {
-            vDSP_vmul(in_dry_.data(), 1, window_.data() + tail, 1, wx_.data() + tail, 1, (vDSP_Length)fill_);
-            vDSP_vmul(in_wet_.data(), 1, window_.data() + tail, 1, wy_.data() + tail, 1, (vDSP_Length)fill_);
-        }
+        // Window the rings (oldest-first) into wx_/wy_, then pack + forward FFT
+        // (shared helpers — stft_common.hpp).
+        window_ring_oldest_first(in_dry_.data(), fill_, kNfft, window_.data(), wx_.data());
+        window_ring_oldest_first(in_wet_.data(), fill_, kNfft, window_.data(), wy_.data());
 
         // GATE: skip the EMA update on near-silent frames so the floor stays
         // clean and the meter holds rather than flashing garbage. Use the dry
@@ -151,10 +148,8 @@ private:
 
         DSPSplitComplex sx{xr_.data(), xi_.data()};
         DSPSplitComplex sy{yr_.data(), yi_.data()};
-        vDSP_ctoz(reinterpret_cast<DSPComplex*>(wx_.data()), 2, &sx, 1, kNfft / 2);
-        vDSP_ctoz(reinterpret_cast<DSPComplex*>(wy_.data()), 2, &sy, 1, kNfft / 2);
-        vDSP_fft_zrip(fft_setup_, &sx, 1, log2_nfft_, kFFTDirection_Forward);
-        vDSP_fft_zrip(fft_setup_, &sy, 1, log2_nfft_, kFFTDirection_Forward);
+        forward_zrip(fft_setup_, log2_nfft_, kNfft, wx_.data(), &sx);
+        forward_zrip(fft_setup_, log2_nfft_, kNfft, wy_.data(), &sy);
 
         // zrip packing: realp[0]=X(DC), imagp[0]=X(Nyquist), realp[k]+i*imagp[k]
         // = bin k for 0<k<N/2. Build a helper that yields (Xre,Xim,Yre,Yim) per

@@ -3,51 +3,18 @@
 #include <algorithm>
 #include <cmath>
 
+#include "k_weighting.hpp"
+
 namespace nablafx {
 
-namespace {
-
-// BS.1770-4 K-weighting coefficients (same constants as LufsLeveler /
-// libebur128). Exact for 44.1 and 48 kHz; otherwise a proportional z-plane
-// warp from 48 kHz (good enough — LUFS integrates over seconds).
-struct KCoeffs {
-    double pb0, pb1, pb2, pa1, pa2;
-    double rb0, rb1, rb2, ra1, ra2;
-};
-constexpr KCoeffs k48{
-    1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585,
-    1.0, -2.0, 1.0, -1.99004745483398, 0.99007225036621,
-};
-constexpr KCoeffs k44{
-    1.5308412300503478, -2.6509799000031379, 1.1690790340624427, -1.6636551132560902, 0.7125954280732254,
-    1.0, -2.0, 1.0, -1.9891696736297957, 0.9891959257876969,
-};
-
-inline double lufs_from_ms(double ms) {
-    if (ms <= 0.0) return -120.0;
-    return -0.691 + 10.0 * std::log10(ms);
-}
-
-}  // namespace
-
 void LoudnessMeter::set_k_weighting_(double sr) {
-    if (sr < 1.0) sr = 1.0;  // guard against div-by-zero / Inf coeffs in the warp path below
+    if (sr < 1.0) sr = 1.0;  // guard against div-by-zero / Inf coeffs in the warp fallback
 
-    const KCoeffs* c = nullptr;
-    if (std::abs(sr - 44100.0) < 0.5)      c = &k44;
-    else if (std::abs(sr - 48000.0) < 0.5) c = &k48;
-
-    if (c) {
-        pre_.b0 = c->pb0; pre_.b1 = c->pb1; pre_.b2 = c->pb2; pre_.a1 = c->pa1; pre_.a2 = c->pa2;
-        rlb_.b0 = c->rb0; rlb_.b1 = c->rb1; rlb_.b2 = c->rb2; rlb_.a1 = c->ra1; rlb_.a2 = c->ra2;
-    } else {
-        // Proportional warp from 48 kHz.
-        const double s = 48000.0 / sr;
-        pre_.b0 = k48.pb0; pre_.b1 = k48.pb1 * s; pre_.b2 = k48.pb2 * s * s;
-        pre_.a1 = k48.pa1 * s; pre_.a2 = k48.pa2 * s * s;
-        rlb_.b0 = k48.rb0; rlb_.b1 = k48.rb1 * s; rlb_.b2 = k48.rb2 * s * s;
-        rlb_.a1 = k48.ra1 * s; rlb_.a2 = k48.ra2 * s * s;
-    }
+    // BS.1770-4 constants + rate selection shared with LufsLeveler
+    // (k_weighting.hpp) — exact tables for 44.1/48 kHz, warp otherwise.
+    const KCoeffs c = k_weighting_coeffs(sr);
+    pre_.b0 = c.pre_b0; pre_.b1 = c.pre_b1; pre_.b2 = c.pre_b2; pre_.a1 = c.pre_a1; pre_.a2 = c.pre_a2;
+    rlb_.b0 = c.rlb_b0; rlb_.b1 = c.rlb_b1; rlb_.b2 = c.rlb_b2; rlb_.a1 = c.rlb_a1; rlb_.a2 = c.rlb_a2;
     pre_.clear();
     rlb_.clear();
 }

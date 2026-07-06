@@ -34,7 +34,9 @@
 #include <string>
 #include <vector>
 
+#include "mel_scale.hpp"
 #include "meta.hpp"
+#include "stft_common.hpp"
 
 namespace nablafx {
 
@@ -72,21 +74,15 @@ public:
         }
 
         window_.assign(n_fft_, 0.0f);
-        for (int n = 0; n < n_fft_; ++n) {
-            window_[n] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * n / n_fft_));
-        }
+        make_hann(window_.data(), n_fft_);
         window_sq_.assign(n_fft_, 0.0f);
         vDSP_vmul(window_.data(), 1, window_.data(), 1, window_sq_.data(), 1,
                   static_cast<vDSP_Length>(n_fft_));
 
         in_ring_.assign(n_fft_, 0.0f);
-        out_ring_.assign(n_fft_ + hop_, 0.0f);
-        norm_ring_.assign(n_fft_ + hop_, 0.0f);  // OLA window² accumulator
+        ola_.assign(n_fft_ + hop_);              // OLA audio + window² rings
         in_fill_         = 0;
         samples_since_   = 0;
-        out_write_       = 0;
-        out_read_        = 0;
-        out_avail_       = 0;
 
         // Mel filterbank.
         build_mel_(cfg_.sample_rate, n_fft_, n_bands_, cfg_.f_min, cfg_.f_max);
@@ -233,18 +229,8 @@ public:
 
             // Hand back one sample. Divide by accumulated window² to match
             // torch.istft per-sample normalisation; guards against near-zero
-            // norm at Hann window edges.
-            if (out_avail_ > 0) {
-                const int   rd   = out_read_;
-                const float norm = norm_ring_[rd];
-                out[i] = (norm > 1e-8f) ? (out_ring_[rd] / norm) : 0.0f;
-                out_ring_[rd]  = 0.0f;
-                norm_ring_[rd] = 0.0f;
-                out_read_ = (rd + 1) % static_cast<int>(out_ring_.size());
-                --out_avail_;
-            } else {
-                out[i] = 0.0f;
-            }
+            // norm at Hann window edges (OlaAccumulator::pull_sample).
+            out[i] = ola_.pull_sample();
         }
     }
 
@@ -266,21 +252,12 @@ public:
 
 private:
     void run_frame_() {
-        // Copy ring (oldest first) into windowed_, vectorized via two-segment vmul.
-        const int tail = n_fft_ - in_fill_;
-        vDSP_vmul(in_ring_.data() + in_fill_, 1, window_.data(),       1,
-                  windowed_.data(),            1, static_cast<vDSP_Length>(tail));
-        if (in_fill_ > 0)
-            vDSP_vmul(in_ring_.data(), 1, window_.data() + tail, 1,
-                      windowed_.data() + tail, 1, static_cast<vDSP_Length>(in_fill_));
-
-        // Pack real input into split form for vDSP.
+        // Copy ring (oldest first) into windowed_, then pack + forward FFT
+        // (shared two-segment vmul / ctoz+zrip helpers — stft_common.hpp).
+        window_ring_oldest_first(in_ring_.data(), in_fill_, n_fft_,
+                                 window_.data(), windowed_.data());
         DSPSplitComplex split{split_real_.data(), split_imag_.data()};
-        vDSP_ctoz(reinterpret_cast<DSPComplex*>(windowed_.data()), 2,
-                  &split, 1, n_fft_ / 2);
-
-        // Forward FFT (in-place split-complex).
-        vDSP_fft_zrip(fft_setup_, &split, 1, log2_nfft_, kFFTDirection_Forward);
+        forward_zrip(fft_setup_, log2_nfft_, n_fft_, windowed_.data(), &split);
 
         // After zrip-forward: split_real_[0] = DC,
         //                    split_imag_[0] = Nyquist real (packed),
@@ -317,36 +294,17 @@ private:
 
         // Hann²-OLA: reuse windowed_ (forward FFT has consumed it) as scratch for
         // time_out_ * window_ * ola_scale_, then accumulate into the ring via two
-        // contiguous segments to avoid per-sample modulo.
+        // contiguous segments (OlaAccumulator). clamp_avail guards against ring
+        // overflow: if process() falls behind frame generation, avail must never
+        // exceed the ring capacity, or the read pointer would chase the write
+        // pointer into samples currently being written by the OLA vDSP_vadd —
+        // the oldest unread samples are dropped instead (graceful under stall).
         vDSP_vmul(time_out_.data(), 1, window_.data(), 1,
                   windowed_.data(), 1, static_cast<vDSP_Length>(n_fft_));
         vDSP_vsmul(windowed_.data(), 1, &ola_scale_,
                    windowed_.data(), 1, static_cast<vDSP_Length>(n_fft_));
-        const int ring_sz = static_cast<int>(out_ring_.size());
-        const int seg1    = std::min(n_fft_, ring_sz - out_write_);
-        const int seg2    = n_fft_ - seg1;
-        vDSP_vadd(windowed_.data(),        1, out_ring_.data()  + out_write_, 1,
-                  out_ring_.data()  + out_write_, 1, static_cast<vDSP_Length>(seg1));
-        vDSP_vadd(window_sq_.data(),       1, norm_ring_.data() + out_write_, 1,
-                  norm_ring_.data() + out_write_, 1, static_cast<vDSP_Length>(seg1));
-        if (seg2 > 0) {
-            vDSP_vadd(windowed_.data()  + seg1, 1, out_ring_.data(),  1,
-                      out_ring_.data(),  1, static_cast<vDSP_Length>(seg2));
-            vDSP_vadd(window_sq_.data() + seg1, 1, norm_ring_.data(), 1,
-                      norm_ring_.data(), 1, static_cast<vDSP_Length>(seg2));
-        }
-        out_write_ = (out_write_ + hop_) % ring_sz;
-        // Guard against ring overflow: if process() falls behind frame
-        // generation, out_avail_ must never exceed the ring capacity, or
-        // out_read_ would chase out_write_ into samples currently being
-        // written by the vDSP_vadd OLA above. Clamp instead of letting the
-        // counter grow unbounded; the oldest unread samples are effectively
-        // dropped (graceful degradation under stall).
-        if (out_avail_ + hop_ <= ring_sz) {
-            out_avail_ += hop_;
-        } else {
-            out_avail_ = ring_sz;
-        }
+        ola_.add_frame(windowed_.data(), window_sq_.data(), n_fft_, hop_,
+                       /*clamp_avail=*/true);
     }
 
     // Build a minimum-phase per-bin filter from a magnitude vector
@@ -477,14 +435,14 @@ private:
 
     void build_mel_(int sr, int n_fft, int n_bands, float f_min, float f_max) {
         const int n_freq = n_fft / 2 + 1;
-        const float mel_min = 2595.0f * std::log10(1.0f + f_min / 700.0f);
-        const float mel_max = 2595.0f * std::log10(1.0f + f_max / 700.0f);
+        const float mel_min = hz_to_mel<float>(f_min);
+        const float mel_max = hz_to_mel<float>(f_max);
         std::vector<float> mel_pts(n_bands + 2, 0.0f);
         std::vector<float> hz_pts(n_bands + 2, 0.0f);
         std::vector<float> bin_pts(n_bands + 2, 0.0f);
         for (int i = 0; i < n_bands + 2; ++i) {
             mel_pts[i] = mel_min + (mel_max - mel_min) * i / (n_bands + 1);
-            hz_pts[i]  = 700.0f * (std::pow(10.0f, mel_pts[i] / 2595.0f) - 1.0f);
+            hz_pts[i]  = mel_to_hz<float>(mel_pts[i]);
             bin_pts[i] = hz_pts[i] * (n_fft / static_cast<float>(sr));
             if (bin_pts[i] < 0.0f) bin_pts[i] = 0.0f;
             if (bin_pts[i] > n_freq - 1) bin_pts[i] = n_freq - 1;
@@ -523,11 +481,7 @@ private:
     int                in_fill_{0};
     int                samples_since_{0};
 
-    std::vector<float> out_ring_;     // OLA audio accumulator (n_fft + hop)
-    std::vector<float> norm_ring_;   // OLA window² accumulator (same size)
-    int                out_write_{0};
-    int                out_read_{0};
-    int                out_avail_{0};
+    OlaAccumulator     ola_;          // OLA audio + window² rings (n_fft + hop)
 
     std::vector<float> band_to_bin_;     // [n_bands * n_freq]
     std::vector<float> bin_norm_;        // [n_freq]

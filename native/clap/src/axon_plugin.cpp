@@ -1,7 +1,7 @@
 // Composite Axon CLAP plugin: 1 dylib that wires
 //
 //   audio → ort(autoeq controller) → SpectralMaskEq
-//         → RationalA (saturator)  → Exciter → ort(ssl_comp) → BassMono
+//         → RationalA (saturator)  → ort(ssl_comp) → BassMono
 //         → MelLimiter             → TruePeakCeiling → output trim
 //
 // The composite has two host-exposed knobs (AMT, TRM) defined in the
@@ -26,10 +26,12 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -46,18 +48,17 @@
 #include <onnxruntime_cxx_api.h>
 
 #include "composite_meta.hpp"
+#include "axon_limits.hpp"     // kBlockSize / kSslHop / kEqParamsStorage (shared with tests)
 #include "auto_gain.hpp"
 #include "bass_mono.hpp"
 #include "coherence_distortion.hpp"
-#include "exciter.hpp"
-#include "multiband_exciter.hpp"
-#include "exciter_spectrum.hpp"
 #include "reverb.hpp"
 #include "widener.hpp"
 #include "meta.hpp"
 #include "meter.hpp"
 #include "param_id.hpp"
 #include "mel_limiter.hpp"
+#include "stft_common.hpp"
 #include "rational_a.hpp"
 #include "spectral_mask_eq.hpp"
 #include "iir_filterbank_eq.hpp"   // zero-latency renderer (STFT↔IIR toggle)
@@ -87,31 +88,16 @@ using nablafx::load_composite_meta;
 using nablafx::load_meta;
 using nablafx::param_id_for;
 
-// All ORT sessions in this plugin process audio in fixed kBlockSize chunks,
-// which matches both the auto-EQ controller's cond_block_size and the LA-2A
-// processor's TVFiLM cond_block_size. Changing this requires re-exporting both
-// ONNX bundles at the new block size.
-constexpr int kBlockSize  = 128;
-// Reorderable stages. The Saturator (StageID 2) AND the Harmonics/Exciter
-// (StageID 7) are intentionally NOT in the chain — their enum values, process
-// cases, modules (RationalA / MultibandExciter), and params are all KEPT (so
-// either can be re-added by putting its id back into the order + bumping this
-// count), they're just not wired into processor_order, so they never run and
-// have no UI tab. The SSL 9000 J channel EQ (StageID 3) reuses the freed
+// kBlockSize, kSslHop and kEqParamsStorage live in axon_limits.hpp so the
+// contract tests compile against the real values (not hand-copied mirrors).
+
+// Reorderable stages. The Saturator (StageID 2) is intentionally NOT in the
+// chain — its enum value, process case, module (RationalA), and params are all
+// KEPT (so it can be re-added by putting its id back into the order + bumping
+// this count), it's just not wired into processor_order, so it never runs and
+// has no UI tab. The SSL 9000 J channel EQ (StageID 3) reuses the freed
 // OutputLeveler slot and DOES run (before AutoEQ).
 constexpr int kNumStages  = 7;
-// SSL bus comp accumulator size — must be a multiple of kBlockSize. Larger
-// values cut CPU proportionally (1 ORT call per kSslHop samples instead of
-// 1 per kBlockSize) at the cost of (kSslHop - kBlockSize) extra latency.
-//
-// CRITICAL CONSTRAINT: `kSslHop <= trace_len - RF` so every ring shift
-// preserves at least RF samples of past context for the model's causal
-// convolutions. Asserted at activate.
-//
-// The wet output is delayed by `kSslHop - kBlockSize` samples relative to
-// the dry signal at the blend step. We compensate via a per-channel dry
-// delay ring (see ssl_comp_dry_delay) so the wet/dry mix is sample-aligned.
-constexpr int kSslHop     = 1024;
 
 // IDs are stable (kept across the leveler removal) so existing automation and
 // stage colours don't shuffle; 0 (was InputLeveler) is intentionally unused.
@@ -124,10 +110,19 @@ enum class StageID : int {
     SslComp       = 4,
     MelLimiter    = 5,
     BassMono      = 6,
-    Exciter       = 7,   // Aphex-style aural exciter (band-limited parallel)
+    // 7 retired (Exciter/Harmonics, removed 2026-07) — value gap kept so
+    // processor_order and saved sessions never re-key the remaining stages.
     Reverb        = 8,   // transparent mastering room reverb (8-line FDN)
     Widener       = 9,   // transparent M/S stereo widener (Blumlein shuffler)
 };
+
+// Default stage order. Single source of truth for the processor_order /
+// pending_order member initializers AND for state_load's validation that a
+// restored order is a permutation of exactly this stage set (anything else —
+// corrupt session, hand-edited json, a future version's ids — would silently
+// bypass unknown stages via the dispatch switch's default and/or run one
+// stage twice against shared state).
+constexpr std::array<int, kNumStages> kDefaultStageOrder{6, 3, 1, 8, 9, 4, 5};
 
 // ---------------------------------------------------------------------------
 // Spectrum analyzer — Goertzel-based, runs on main thread
@@ -177,8 +172,7 @@ struct SpectrumAnalyzer {
     std::array<std::array<float, kFFT>, kNumStages> mt_frames{};
 
     void init() {
-        for (int i = 0; i < kFFT; ++i)
-            hann[i] = 0.5f * (1.f - std::cos(2.f * static_cast<float>(M_PI) * i / kFFT));
+        nablafx::make_hann(hann.data(), kFFT);
         for (int i = 0; i < kDisp; ++i)
             disp_hz[i] = kFlo * std::pow(kFhi / kFlo, float(i) / (kDisp - 1));
         for (auto& row : ema) row.fill(0.f);
@@ -698,23 +692,6 @@ struct Plugin {
     // Bass mono-maker (stereo; collapses width below a cutoff).
     nablafx::BassMono    bass_mono;
 
-    // HARMONICS: two CLEAN narrowband multiband exciters in series. Warmth
-    // excites the low-mids (even/2nd → body); Presence the highs (even+odd →
-    // air). Narrowband-per-knob keeps intermodulation low (a wide waveshaper
-    // makes broadband IMD "noise"). Each knob is the added-harmonic level.
-    nablafx::MultibandExciter exc_warm;
-    nablafx::MultibandExciter exc_pres;
-
-    // DIRECT wet-spectrum meters for the two-zone overlay. Each is fed (read-only)
-    // the mono wet CONTRIBUTION of its band, so the UI draws exactly what each
-    // knob adds. Updated from the Harmonics stage; snapshotted to *_db under a
-    // benign meter race (same pattern as lim_brick).
-    nablafx::ExciterSpectrum exc_warm_spectrum;
-    nablafx::ExciterSpectrum exc_pres_spectrum;
-    std::array<float, nablafx::ExciterSpectrum::kNumBins> exc_warm_db{};
-    std::array<float, nablafx::ExciterSpectrum::kNumBins> exc_pres_db{};
-    bool exc_spec_active{false};
-
     // Transparent mastering room reverb (single stereo 8-line FDN network).
     nablafx::Reverb      reverb;
 
@@ -736,7 +713,7 @@ struct Plugin {
     // what the Auto-EQ sees (coupling). The reverb sits AFTER BassMono (so its
     // bass is already tightened) and BEFORE the limiter, so the limiter still
     // catches any reverb peaks.
-    std::array<int, kNumStages> processor_order{6, 3, 1, 8, 9, 4, 5};   // Harmonics(7) disabled
+    std::array<int, kNumStages> processor_order = kDefaultStageOrder;
 
     // Active auto-EQ class index (into ModuleState::autoeq_metas /
     // axon_meta.auto_eq.class_order). Updated from the audio thread when the
@@ -768,8 +745,8 @@ struct Plugin {
     // skipped entirely). 0.5 = flat 0 dB, what Freeze holds before any live
     // solve has happened. autoeq_freeze_prev tracks the toggle edge so an
     // unfreeze restarts the controllers from a clean state.
-    std::array<float, 64> autoeq_held_l{};
-    std::array<float, 64> autoeq_held_r{};
+    std::array<float, kEqParamsStorage> autoeq_held_l{};
+    std::array<float, kEqParamsStorage> autoeq_held_r{};
     bool autoeq_freeze_prev{false};
 
     // GUI → audio-thread param queue (try_lock on audio thread, never blocks).
@@ -779,7 +756,7 @@ struct Plugin {
     // GUI → audio-thread order change.
     std::mutex               order_mutex;
     bool                     order_pending{false};
-    std::array<int,kNumStages> pending_order{6,3,1,8,9,4,5};   // Harmonics(7) disabled
+    std::array<int,kNumStages> pending_order = kDefaultStageOrder;
 
     // CLAP GUI handle (main thread only).
     AxonGUIState* gui_state{nullptr};
@@ -799,13 +776,10 @@ struct Plugin {
     // gains to the auto-EQ's resolved curve (spectrum.mt_eq_bins) and publishes them
     // via a seqlock (even generation = stable); the SslEq audio stage ramps toward
     // them. See docs/ssl_eq_coupling.md — fixed beats dynamic, so this is slow/static.
-    nablafx::SslEqSolver ssl_solver{nablafx::SslEqSolver::assist()};
     std::atomic<uint64_t> ssl_asg_gen{0};
     std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_published{};
-    std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_accum{};  // main-thread accumulator
     bool ssl_recal_prev{false};
     bool ssl_reset_prev{false};
-    int  ssl_solve_timer{0};
     // Main-thread scratch SSL EQ used only to compute the display curve (manual
     // bands + the published assist gains) so the UI can show the SSL's TOTAL
     // contribution, incl. the coupling assist bands. Never touched by audio.
@@ -963,7 +937,6 @@ static const clap_plugin_params_t s_ext_params = {
 //   kBlockSize          — input accumulator always present
 //   SpectralMaskEq      — n_fft - hop, only when EQ wet > 0 and class is spectral
 //   SSL bus comp        — kSslHop - kBlockSize, only when SSC > 0 and loaded
-//   Exciter             — oversampler FIR group delay, only when EXC_AMT > 0
 //   TruePeakCeiling     — lookahead, always present once activated
 static uint32_t compute_latency_(const Plugin& plug) {
     if (plug.chains.empty() || !g_state) return 0;
@@ -1001,9 +974,6 @@ static uint32_t compute_latency_(const Plugin& plug) {
 
     if (ml_wet > 0.f)
         lat += static_cast<uint32_t>(nablafx::MelLimiter::kLatency);
-
-    // (Harmonics/Exciter is disabled — not in processor_order — so it adds no
-    // latency. Its FIR-group-delay contribution returns when stage 7 is re-added.)
 
     return lat;
 }
@@ -1054,8 +1024,27 @@ static bool state_load(const clap_plugin_t* p, const clap_istream_t* stream) {
         if (j.contains("processor_order")) {
             auto& jo = j.at("processor_order");
             if (jo.is_array() && static_cast<int>(jo.size()) == kNumStages) {
+                // Accept only a permutation of the known stage set
+                // (kDefaultStageOrder). Anything else — corrupt/hand-edited
+                // session, a future version's stage ids — would silently
+                // bypass unknown stages (dispatch switch default is a no-op)
+                // and/or run one stage twice against shared state. On
+                // mismatch keep the current order but still load the rest.
+                std::array<int, kNumStages> parsed{};
                 for (int i = 0; i < kNumStages; ++i)
-                    plug->processor_order[i] = jo[i].get<int>();
+                    parsed[i] = jo[i].get<int>();
+                std::array<int, kNumStages> got = parsed;
+                std::array<int, kNumStages> want = kDefaultStageOrder;
+                std::sort(got.begin(), got.end());
+                std::sort(want.begin(), want.end());
+                if (got == want) {
+                    plug->processor_order = parsed;
+                } else {
+                    std::fprintf(stderr,
+                        "axon: state_load: processor_order is not a "
+                        "permutation of the known stage set; keeping the "
+                        "current order\n");
+                }
             }
         }
     } catch (...) { return false; }
@@ -1092,8 +1081,8 @@ static void plugin_destroy(const clap_plugin_t* p) {
     delete plug;
 }
 
-static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
-                            uint32_t /*min_frames*/, uint32_t /*max_frames*/) {
+// Throwing core of plugin_activate — see the try/catch wrapper below.
+static bool plugin_activate_impl(const clap_plugin_t* p, double sample_rate) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     plug->sample_rate = sample_rate;
     // ~500 ms peak-envelope decay, evaluated once per kBlockSize-sample block.
@@ -1152,16 +1141,17 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
             // Every auto-EQ class declares spectral_mask_eq as its
             // dsp_blocks[0]; meta.cpp throws if anything else slips through.
             const auto& dsp = g_state->autoeq_dsp_per_class[i];
-            // The audio thread stages control params through fixed 64-element
-            // stack arrays (eq_params storage in flush_chain_block_). Fail fast
-            // here rather than overflowing those buffers during processing.
+            // The audio thread stages control params through fixed
+            // kEqParamsStorage-element stack arrays (eq_params storage in
+            // flush_chain_block_). Fail fast here rather than overflowing
+            // those buffers during processing.
             const int n_control =
                 std::get<SpectralMaskEqParams>(dsp.params).num_control_params;
-            if (n_control > 64) {
+            if (n_control > kEqParamsStorage) {
                 throw std::runtime_error(
                     "auto_eq class '" + cls + "' declares num_control_params=" +
-                    std::to_string(n_control) +
-                    " which exceeds the 64-element control buffer; "
+                    std::to_string(n_control) + " which exceeds the " +
+                    std::to_string(kEqParamsStorage) + "-element control buffer; "
                     "re-export the bundle or raise eq_params storage size.");
             }
         }
@@ -1241,18 +1231,6 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
 
     plug->spectrum.init();
     plug->bass_mono.prepare(plug->sample_rate);
-    plug->exc_warm.prepare(plug->sample_rate);
-    plug->exc_pres.prepare(plug->sample_rate);
-    // Fixed voicing (drive kept modest so each narrow band stays in the CLEAN
-    // shaper's pure region). Warmth: low-mids, pure even (2nd). Presence: highs,
-    // even+odd (2nd+3rd). 5 narrow bands each → low intermodulation.
-    plug->exc_warm.configure(/*lo*/100.0,  /*hi*/1000.0,  /*bands*/5, /*char*/0.0f, /*drive*/6.f);
-    plug->exc_pres.configure(/*lo*/3500.0, /*hi*/16500.0, /*bands*/5, /*char*/0.5f, /*drive*/6.f);
-    plug->exc_warm_spectrum.prepare(plug->sample_rate);
-    plug->exc_pres_spectrum.prepare(plug->sample_rate);
-    plug->exc_warm_db.fill(nablafx::ExciterSpectrum::kFloorDb);
-    plug->exc_pres_db.fill(nablafx::ExciterSpectrum::kFloorDb);
-    plug->exc_spec_active = false;
     plug->reverb.prepare(plug->sample_rate);
     plug->widener.prepare(plug->sample_rate);
     plug->ssl_viz_eq.prepare(plug->sample_rate);   // main-thread display-curve scratch
@@ -1273,6 +1251,26 @@ static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
     return true;
 }
 
+static bool plugin_activate(const clap_plugin_t* p, double sample_rate,
+                            uint32_t /*min_frames*/, uint32_t /*max_frames*/) {
+    // activate is a C-ABI CLAP callback: an exception escaping it is
+    // std::terminate — i.e. it crashes the host. The impl above deliberately
+    // throws on a bad bundle (the kSslHop <= trace_len-RF guard, the
+    // num_control_params > kEqParamsStorage guard, map .at() lookups on
+    // inconsistent meta, and the Ort::Session ctor on a missing/corrupt
+    // model.onnx). Turn all of those into a clean activation failure the
+    // host can report instead.
+    try {
+        return plugin_activate_impl(p, sample_rate);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "axon: activate failed: %s\n", e.what());
+        auto* plug = static_cast<Plugin*>(p->plugin_data);
+        plug->chains.clear();
+        plug->activated = false;
+        return false;
+    }
+}
+
 static void plugin_deactivate(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     plug->chains.clear();
@@ -1286,10 +1284,6 @@ static void plugin_reset(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     plug->mel_limiter.reset();
     plug->bass_mono.reset();
-    plug->exc_warm.reset();
-    plug->exc_pres.reset();
-    plug->exc_warm_spectrum.reset();
-    plug->exc_pres_spectrum.reset();
     plug->reverb.reset();
     plug->widener.reset();
     plug->auto_gain.reset();
@@ -1345,12 +1339,6 @@ struct AmountSnapshot {
     float ml_wet, ml_ceiling_lin, ml_drive_lin, ml_adaptive_gain, ml_adaptive_speed;
     bool  ml_adaptive_brickwall;
     float bm_wet, bm_freq;
-    // HARMONICS: EXC_ON (stage on/off), EXC_WARM (low-mid 2nd level), EXC_PRES
-    // (high 2nd+3rd level). Each knob 0..1 is the added-harmonic level for its
-    // band; the band freqs / drive / character are fixed internally.
-    bool  exc_on;
-    bool  exc_solo;        // momentary: output ONLY the added harmonics (audition)
-    float exc_warm, exc_pres;
     // Reverb: RVB_MIX (parallel wet blend, 0 = bypass), RVB_SIZE (room size →
     // RT60), RVB_WIDTH (tail stereo width), RVB_DAMP (tail LPF Hz), RVB_LOWCUT
     // (send high-pass Hz — bass is never reverberated).
@@ -1373,13 +1361,19 @@ struct AmountSnapshot {
     bool                    ssl_reset;   // SEQ_RESET: momentary — flatten the SSL calibration
 };
 
+// HARD RULE: every control read in this plugin MUST use the literal
+// `c.id == "xyz"` spelling (with the control id in UPPERCASE in the quotes) —
+// tests/test_control_contract.cpp extracts the C++ read-set from this file
+// with exactly that regex and diffs it against the shipped axon_meta.json.
+// A read written any other way (helper function, lookup table, the
+// `controls[i].id == ...` spelling only) silently drops out of the contract
+// check. The regex also scans comments, so never write that pattern with an
+// uppercase id in a comment — it would keep a dead control "alive". Keep
+// reads in this form, or update the extractor in lock-step.
 AmountSnapshot resolve_amount_(const Plugin& plug) {
     float sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
-    float eon=0.f;                                        // harmonics on/off (switch)
-    float esolo=0.f;                                      // momentary "listen" (solo wet)
-    float ewarm=0.f, epres=0.f;                           // warmth / presence levels (0..1)
     float rm=0.f,rs=0.30f,rw=0.80f,rd=7000.f,rlc=250.f;  // reverb params
     float won=0.f;                                        // widener on/off (switch)
     float wa=1.f,wf=250.f,war=0.f;                        // widener params
@@ -1422,10 +1416,6 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="MLG") mlg=v; else if(c.id=="MLS") mls=v;
         else if(c.id=="MLA") mla=v;
         else if(c.id=="BMI") bmi=v; else if(c.id=="BMF") bmf=v;
-        else if(c.id=="EXC_ON") eon=v;
-        else if(c.id=="EXC_WARM") ewarm=v;
-        else if(c.id=="EXC_PRES") epres=v;
-        else if(c.id=="EXC_SOLO") esolo=v;
         else if(c.id=="RVB_MIX") rm=v; else if(c.id=="RVB_SIZE") rs=v;
         else if(c.id=="RVB_WIDTH") rw=v; else if(c.id=="RVB_DAMP") rd=v;
         else if(c.id=="RVB_LOWCUT") rlc=v;
@@ -1468,10 +1458,6 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.ml_adaptive_brickwall = (mla >= 0.5f);
     s.bm_wet  = bmi;
     s.bm_freq = bmf;
-    s.exc_on   = (eon >= 0.5f);  // stage on/off toggle
-    s.exc_solo = (esolo >= 0.5f);// momentary: solo the added harmonics
-    s.exc_warm = ewarm;          // 0..1 warmth (low-mid 2nd) level
-    s.exc_pres = epres;          // 0..1 presence (high 2nd+3rd) level
     s.rvb_mix      = rm;     // 0..1 parallel wet blend (0 = bypass)
     s.rvb_size     = rs;     // 0..1 room size → RT60 + delay scaling
     s.rvb_width    = rw;     // 0..1 tail stereo width
@@ -1521,11 +1507,6 @@ void flush_chain_block_(Plugin& plug,
                         const AmountSnapshot& amt) {
 
     std::array<float,kBlockSize> dry{}, wet_a{}, wet_b{};
-    // HARMONICS "Listen": when held, we capture the added-harmonics wet at the
-    // Harmonics stage and substitute it for the output AFTER the chain runs, so
-    // the audition isn't re-gained by the downstream limiter/ceiling.
-    std::array<float,kBlockSize> solo_buf{};
-    bool solo_captured = false;
 
     // Meter the raw plugin input (pre-chain).
 #if AXON_STAGE_TIMING
@@ -1605,7 +1586,7 @@ void flush_chain_block_(Plugin& plug,
             // Per-channel [0,1] band params. The adaptive engine solves ONE
             // linked curve (both channels point at the left slot); the neural
             // LSTM solves both channels in one batched ORT call.
-            std::array<float, 64> eq_params_l_storage{}, eq_params_r_storage{};
+            std::array<float, kEqParamsStorage> eq_params_l_storage{}, eq_params_r_storage{};
             float* eq_params_by_ch[2] = {eq_params_l_storage.data(),
                                          eq_params_l_storage.data()};
             float* ch_buf[2] = {work_l, work_r};
@@ -2081,42 +2062,6 @@ void flush_chain_block_(Plugin& plug,
             break;
         }
 
-        case StageID::Exciter: {
-            // HARMONICS — two CLEAN (polynomial) parallel exciters in series.
-            // Warmth excites the low-mids (100 Hz–1 kHz, pure even/2nd → body);
-            // Presence excites the highs (3.5 kHz–16.5 kHz, even+odd → air). Each
-            // knob is the added-harmonic LEVEL for its band (drive/band/character
-            // fixed); both at 0 → bit-identical bypass.
-            if (!amt.exc_on || (amt.exc_warm <= 0.f && amt.exc_pres <= 0.f)) {
-                plug.exc_spec_active = false;
-                plug.exc_warm_spectrum.reset();
-                plug.exc_pres_spectrum.reset();
-                break;
-            }
-            float* wr = (n_ch >= 2 ? work_r : nullptr);
-            // Voicing (band range / character / drive) is fixed in activate via
-            // configure(); the knob is just the added-harmonic LEVEL.
-            plug.exc_warm.set_amount(amt.exc_warm);
-            plug.exc_warm.process(work_l, wr, kBlockSize, wet_a.data());
-            plug.exc_pres.set_amount(amt.exc_pres);
-            plug.exc_pres.process(work_l, wr, kBlockSize, wet_b.data());
-            // "Listen" (momentary): capture ONLY the added harmonics (warm +
-            // presence wet). The chain keeps running normally (so stage state
-            // stays continuous); the capture is substituted for the output after
-            // the loop, below — so the audition isn't re-gained by the limiter.
-            if (amt.exc_solo) {
-                for (int i = 0; i < kBlockSize; ++i) solo_buf[i] = wet_a[i] + wet_b[i];
-                solo_captured = true;
-            }
-            // Per-band wet-spectrum overlays (mono wet contribution of each band).
-            plug.exc_warm_spectrum.push(wet_a.data(), kBlockSize);
-            plug.exc_pres_spectrum.push(wet_b.data(), kBlockSize);
-            plug.exc_warm_spectrum.copy_spectrum(plug.exc_warm_db.data());
-            plug.exc_pres_spectrum.copy_spectrum(plug.exc_pres_db.data());
-            plug.exc_spec_active = true;
-            break;
-        }
-
         case StageID::Reverb: {
             // Transparent mastering room reverb (8-line FDN). The dry path is
             // passed at unity and untouched; the module sums in `mix` of the
@@ -2162,15 +2107,6 @@ void flush_chain_block_(Plugin& plug,
     // When a full 2048-sample frame has accumulated, hand off to the main thread.
     if (plug.spectrum.advance_and_transfer())
         plug.host->request_callback(plug.host);
-
-    // HARMONICS "Listen": substitute the captured added-harmonics for the output
-    // (mono → both channels), bypassing the downstream chain's gain so the user
-    // hears exactly what's being added at its true level. Still passes through the
-    // ceiling below as a safety cap (harmonics are quiet → it won't engage).
-    if (solo_captured) {
-        std::copy_n(solo_buf.data(), kBlockSize, work_l);
-        if (n_ch >= 2) std::copy_n(solo_buf.data(), kBlockSize, work_r);
-    }
 
     // Trim + TruePeakCeiling — always last, not user-reorderable. This is the
     // REAL master; the OUT meter reads it (so driving the limiter shows the
@@ -2224,19 +2160,10 @@ void flush_chain_block_(Plugin& plug,
     // LUFS loop catches up.
     const float drive_db = 20.f * std::log10(std::max(1e-6f, amt.ml_drive_lin));
     const float ff_db    = drive_db * amt.ml_wet;
-    float ag;
-    if (amt.exc_solo) {
-        // HARMONICS "Listen" is an audition: the output drops to the (quiet) wet,
-        // so we FREEZE Auto Gain (hold its current makeup) instead of letting it
-        // chase the audition — otherwise it slowly swells up during the press and
-        // leaves the makeup cranked on release (a loud spike when the mix returns).
-        ag = std::pow(10.f, plug.auto_gain.gain_db() / 20.f);
-    } else {
-        ag = plug.auto_gain.process(amt.auto_gain_on,
-                                    plug.meter_in.readout().lufs_s,
-                                    plug.meter_out.readout().lufs_s,
-                                    ff_db);
-    }
+    const float ag = plug.auto_gain.process(amt.auto_gain_on,
+                                            plug.meter_in.readout().lufs_s,
+                                            plug.meter_out.readout().lufs_s,
+                                            ff_db);
     if (ag != 1.f) {
         for (uint32_t ch=0;ch<n_ch;++ch) {
             float* ob = plug.chains[ch].out_buf.data();
@@ -2287,14 +2214,12 @@ static void solve_ssl_coupling_(Plugin& plug, bool /*spec_ready*/) {
     if (reset_edge) {
         static const char* kId[4] = { "SEQ_LF_G", "SEQ_LMF_G", "SEQ_HMF_G", "SEQ_HF_G" };
         for (int b = 0; b < 4; ++b) set_visible_param_(plug, kId[b], 0.f);
-        plug.ssl_asg_accum.fill(0.f);
         const uint64_t gen = plug.ssl_asg_gen.load(std::memory_order_relaxed);
         plug.ssl_asg_gen.store(gen + 1, std::memory_order_release);
         std::atomic_thread_fence(std::memory_order_release);
         plug.ssl_asg_published.fill(0.f);
         plug.ssl_asg_gen.store(gen + 2, std::memory_order_release);
         for (auto& ch : plug.chains) ch.ssl_asg_smooth.fill(0.f);
-        plug.ssl_solve_timer = 0;
     }
 
     if (amt.ssl_auto <= 0.f || !amt.ssl_eq_on) { plug.ssl_recal_prev = amt.ssl_recal; return; }
@@ -2775,32 +2700,6 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
         axon_gui_eval_js(plug->gui_state, bjs);
     }
 
-    // Push the HARMONICS two-zone overlay: per-band wet-spectrum dBFS magnitudes
-    // ("warm" = low-mid 2nd, "pres" = high 2nd+3rd), each kNumBins log-spaced at
-    //   f_i = 20 * (20000/20)^(i/(kNumBins-1)) Hz  (20 Hz .. 20 kHz inclusive),
-    // which the UI reconstructs with the identical log formula. Empty/floored
-    // bins draw nothing, so each zone's glow is exactly what that knob adds.
-    {
-        constexpr int NEB = nablafx::ExciterSpectrum::kNumBins;
-        std::string ejs;
-        ejs.reserve(96 + NEB * 14);
-        ejs = "axonExciter({\"active\":";
-        ejs += (plug->exc_spec_active ? "true" : "false");
-        char eb[16];
-        auto append_arr = [&](const char* key, const float* db) {
-            ejs += key;
-            for (int i = 0; i < NEB; ++i) {
-                if (i) ejs += ',';
-                std::snprintf(eb, sizeof(eb), "%.1f", db[i]);
-                ejs += eb;
-            }
-            ejs += "]";
-        };
-        append_arr(",\"warm\":[", plug->exc_warm_db.data());
-        append_arr(",\"pres\":[", plug->exc_pres_db.data());
-        ejs += "})";
-        axon_gui_eval_js(plug->gui_state, ejs.c_str());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2872,24 +2771,15 @@ static bool entry_init(const char* /*plugin_path*/) {
             }
         }
 
-        // Aphex-style exciter controls. Injected at load time (like SSC_IN) so
-        // existing bundles that don't declare them still get the stage with safe
-        // defaults; a bundle that declares an id keeps its own ranges. Defaults
-        // make the stage a no-op (EXC_AMT = 0 → bit-identical bypass).
+        // Native-stage controls. Injected at load time (like SSC_IN) so existing
+        // bundles that don't declare them still get the stages with safe
+        // defaults; a bundle that declares an id keeps its own ranges.
         {
             auto inject = [&](const ControlSpec& spec) {
                 for (const auto& c : st->axon_meta.controls)
                     if (c.id == spec.id) return;        // bundle's ranges win
                 st->axon_meta.controls.push_back(spec);
             };
-            // HARMONICS: two-knob clean exciter (Warmth = low-mid 2nd, Presence =
-            // high 2nd+3rd). Defaults make the stage a no-op (both knobs 0 →
-            // bit-identical bypass).
-            //                  id            name         min      max     def    skew unit
-            inject(ControlSpec{"EXC_ON",    "Harmonics",   0.0f,    1.0f,   1.0f,  1.0f, "switch"});
-            inject(ControlSpec{"EXC_WARM",  "Warmth",      0.0f,    1.0f,   0.0f,  1.0f, ""});
-            inject(ControlSpec{"EXC_PRES",  "Presence",    0.0f,    1.0f,   0.0f,  1.0f, ""});
-            inject(ControlSpec{"EXC_SOLO",  "Listen",      0.0f,    1.0f,   0.0f,  1.0f, "switch"});
             // Transparent mastering room reverb. Defaults make the stage a no-op
             // (RVB_MIX = 0 → bit-identical bypass) so existing bundles that don't
             // declare these still get the controls with safe defaults.
@@ -2978,14 +2868,80 @@ static bool entry_init(const char* /*plugin_path*/) {
         for (const auto& m : st->autoeq_metas) {
             st->autoeq_dsp_per_class.push_back(m.dsp_blocks[0]);
         }
+
+        // Enforce the cross-bundle contract the comments above rely on:
+        // every auto-EQ class must (a) run at the plugin's fixed kBlockSize
+        // (the smoother time constants in spectral_mask_eq and the reported
+        // latency are derived from it) and (b) share identical band geometry,
+        // because a class change swaps ONLY the controller ONNX while the
+        // downstream renderers are configured once. composite.py checks this
+        // at export time, but a hand-assembled or partially-updated bundle
+        // would otherwise load fine and silently misprocess. Throwing here is
+        // caught by entry_init's catch, so a bad bundle fails to enumerate.
+        {
+            const auto& classes = st->axon_meta.auto_eq.class_order;
+            const auto* p0 = std::get_if<SpectralMaskEqParams>(
+                &st->autoeq_dsp_per_class[0].params);
+            for (size_t i = 0; i < st->autoeq_dsp_per_class.size(); ++i) {
+                const auto& blk = st->autoeq_dsp_per_class[i];
+                const auto* p = std::get_if<SpectralMaskEqParams>(&blk.params);
+                if (blk.kind != "spectral_mask_eq" || !p) {
+                    throw std::runtime_error(
+                        "auto_eq class '" + classes[i] +
+                        "': dsp_blocks[0] is not spectral_mask_eq");
+                }
+                if (p->block_size != kBlockSize) {
+                    throw std::runtime_error(
+                        "auto_eq class '" + classes[i] + "' declares block_size=" +
+                        std::to_string(p->block_size) + " but the plugin runs fixed " +
+                        std::to_string(kBlockSize) + "-sample blocks; re-export the "
+                        "bundle at the plugin block size.");
+                }
+                if (p->sample_rate != p0->sample_rate || p->n_fft != p0->n_fft ||
+                    p->hop != p0->hop || p->n_bands != p0->n_bands ||
+                    p->num_control_params != p0->num_control_params ||
+                    p->min_gain_db != p0->min_gain_db ||
+                    p->max_gain_db != p0->max_gain_db ||
+                    p->f_min != p0->f_min || p->f_max != p0->f_max) {
+                    throw std::runtime_error(
+                        "auto_eq class '" + classes[i] + "' geometry differs from "
+                        "class '" + classes[0] + "'; all classes must share "
+                        "identical spectral_mask_eq geometry (re-export the bundle).");
+                }
+            }
+        }
+
         st->autoeq_default_idx = static_cast<int>(
             st->autoeq_class_index.at(st->axon_meta.auto_eq.default_class));
+
+        // CLAP param ids are FNV-1a hashes of "<effect_name>:<control_id>"
+        // (param_id.cpp) with no collision handling: if two control ids ever
+        // hashed to the same param id, params_get_info would expose two params
+        // with one id and host automation for both would silently route to
+        // whichever control matches first. Fail loudly at load instead.
+        {
+            std::set<uint32_t> param_ids;
+            for (const auto& c : st->axon_meta.controls) {
+                const uint32_t pid = param_id_for(st->axon_meta.effect_name, c.id);
+                if (!param_ids.insert(pid).second) {
+                    throw std::runtime_error(
+                        "param id hash collision on control '" + c.id +
+                        "' (FNV-1a of effect:control); rename the control id.");
+                }
+            }
+        }
 
         st->ort_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "nablafx-tone");
         populate_descriptor_(*st);
         g_state = st.release();
         return true;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        // Without a diagnostic, every load failure (missing/corrupt
+        // axon_meta.json, unsupported schema, bad sub-bundle) is
+        // indistinguishable from "not installed" — the plugin just never
+        // appears in the DAW's list. stderr reaches the host's console /
+        // Console.app.
+        std::fprintf(stderr, "[axon] entry_init failed: %s\n", e.what());
         return false;
     }
 }

@@ -4,18 +4,19 @@
 //       && tests/test_spectral_mask_eq
 //
 // Headline regression target: the OLA output ring overflow. run_frame_() used
-// to do an UNCONDITIONAL `out_avail_ += hop_`. If process() ever falls behind
-// frame generation, out_avail_ grows past the ring capacity (n_fft + hop) and
-// out_read_ chases out_write_ into cells the OLA vDSP_vadd is still writing —
-// corrupting output. The fix clamps:
-//     if (out_avail_ + hop_ <= ring_sz) out_avail_ += hop_;
-//     else                              out_avail_ = ring_sz;
+// to do an UNCONDITIONAL `avail += hop`. If process() ever falls behind frame
+// generation, avail grows past the ring capacity (n_fft + hop) and the read
+// pointer chases the write pointer into cells the OLA vDSP_vadd is still
+// writing — corrupting output. The fix clamps (now the clamp_avail=true path
+// of OlaAccumulator::add_frame in stft_common.hpp):
+//     if (avail + hop <= ring_sz) avail += hop;
+//     else                        avail = ring_sz;
 // test_out_avail_never_overflows_ring() exercises exactly that expression.
 
 // White-box: the ring-overflow regression test must observe the module's
-// private out_avail_ counter and drive its private run_frame_() under a stall
+// private ola_ accumulator and drive its private run_frame_() under a stall
 // (frames generated while no process() read drains). The public process() API
-// is strictly 1:1 (one output pulled per input pushed) so out_avail_ can never
+// is strictly 1:1 (one output pulled per input pushed) so ola_.avail can never
 // reach the clamp through it — the only way to exercise the fixed line is to
 // generate frames without draining. `#define private public` is the standard
 // header-only-test idiom for poking at internal invariants.
@@ -95,8 +96,8 @@ void test_flat_mask_reconstruction() {
 
 // ---------------------------------------------------------------------------
 // Test 2: BOUNDED + FINITE under a long, varied-block-size run. This is the
-//         behavioral guard for the ring-overflow bug: if out_read_ ever chased
-//         out_write_ into actively-written OLA cells, the output would show
+//         behavioral guard for the ring-overflow bug: if the OLA read pointer
+//         ever chased the writer into actively-written cells, the output would show
 //         non-finite values / blow-ups / a corrupted (drifting) reconstruction.
 //         Block sizes deliberately mix tiny (1), non-multiples of hop, and
 //         large (>n_fft) so samples_since_ carries and the read/write pointers
@@ -149,11 +150,11 @@ void test_long_varblock_run_is_bounded() {
 // Test 3: RING-OVERFLOW (the bug, white-box on the REAL module). Drive the
 //         module's actual private run_frame_() under the exact stall the fix
 //         targets — frames generated while NO process() read drains the output
-//         — and assert the module's own out_avail_ counter never exceeds ring
-//         capacity. This exercises the literal changed line in run_frame_():
-//             if (out_avail_ + hop_ <= ring_sz) out_avail_ += hop_;
-//             else                              out_avail_ = ring_sz;
-//         Against the OLD code (unconditional `out_avail_ += hop_`) out_avail_
+//         — and assert the module's own ola_.avail counter never exceeds ring
+//         capacity. This exercises the clamp_avail branch of add_frame():
+//             if (avail + hop <= ring_sz) avail += hop;
+//             else                        avail = ring_sz;
+//         Against the OLD code (unconditional `avail += hop`) avail
 //         grows without bound (hop * frames), so this assertion FAILS — i.e.
 //         the test genuinely catches the regression. After the stall we also
 //         drain via process() and confirm the read pointer never walks into
@@ -165,7 +166,7 @@ void test_out_avail_never_overflows_ring() {
     std::vector<float> flat(p.n_bands, 0.5f);
     eq.set_params(flat.data(), p.n_bands);
 
-    const int ring_sz = static_cast<int>(eq.out_ring_.size());  // n_fft + hop
+    const int ring_sz = static_cast<int>(eq.ola_.out_ring.size());  // n_fft + hop
     assert(ring_sz == p.n_fft + p.hop);
 
     // Prime the analysis ring with real content so each frame produces audio.
@@ -173,22 +174,22 @@ void test_out_avail_never_overflows_ring() {
         eq.in_ring_[i] = (float)(0.3 * std::sin(2.0 * kPi * 1000.0 * i / kSR));
     eq.in_fill_ = 0;
 
-    // STALL: generate 1000 frames with no read draining out_avail_.
+    // STALL: generate 1000 frames with no read draining ola_.avail.
     int max_avail = 0;
     for (int f = 0; f < 1000; ++f) {
         eq.run_frame_();
-        max_avail = std::max(max_avail, eq.out_avail_);
+        max_avail = std::max(max_avail, eq.ola_.avail);
         // The invariant the fix guarantees, checked every frame.
-        assert(eq.out_avail_ <= ring_sz);
+        assert(eq.ola_.avail <= ring_sz);
     }
-    std::fprintf(stderr, "[ovf]   ring_sz=%d  max out_avail_=%d (must be <= ring)\n",
+    std::fprintf(stderr, "[ovf]   ring_sz=%d  max ola_.avail=%d (must be <= ring)\n",
                  ring_sz, max_avail);
     assert(max_avail == ring_sz);          // clamp engaged, never exceeded
-    assert(eq.out_avail_ == ring_sz);
+    assert(eq.ola_.avail == ring_sz);
 
-    // out_read_/out_write_ must remain valid ring indices after the stall.
-    assert(eq.out_read_  >= 0 && eq.out_read_  < ring_sz);
-    assert(eq.out_write_ >= 0 && eq.out_write_ < ring_sz);
+    // read/write must remain valid ring indices after the stall.
+    assert(eq.ola_.read  >= 0 && eq.ola_.read  < ring_sz);
+    assert(eq.ola_.write >= 0 && eq.ola_.write < ring_sz);
 
     // Now drain through the public read path: output must stay finite/bounded —
     // a counter that had been allowed to exceed capacity would let out_read_

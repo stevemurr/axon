@@ -13,8 +13,12 @@ set(ORT_URL
     "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_ARCHIVE}.tgz"
 )
 
-# Known-good hash for 1.20.1. Replace on version bump.
-set(ORT_SHA256 "" CACHE STRING "sha256 of the ORT tarball; empty = trust the URL")
+# Known-good hash for 1.20.1 (verified against the GitHub release asset).
+# Replace on version bump. NEVER leave this empty: an empty hash means any
+# cache-clean rebuild downloads and links the tarball with zero integrity
+# verification.
+set(ORT_SHA256 "b678fc3c2354c771fea4fba420edeccfba205140088334df801e7fc40e83a57a"
+    CACHE STRING "sha256 of the ORT tarball; empty = trust the URL")
 
 if(ORT_SHA256)
     FetchContent_Declare(onnxruntime URL ${ORT_URL} URL_HASH SHA256=${ORT_SHA256})

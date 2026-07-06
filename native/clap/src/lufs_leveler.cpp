@@ -3,84 +3,27 @@
 #include <algorithm>
 #include <cmath>
 
+#include "k_weighting.hpp"
+
 namespace nablafx {
 
 namespace {
-
-// K-weighting filter coefficients from ITU-R BS.1770-4 Annex 1, bilinear-
-// transformed to 48 kHz (reference) and 44.1 kHz. Values match the
-// libebur128 reference implementation.
-struct KCoeffs {
-    double pre_b0, pre_b1, pre_b2;
-    double pre_a1, pre_a2;
-    double rlb_b0, rlb_b1, rlb_b2;
-    double rlb_a1, rlb_a2;
-};
-
-static constexpr KCoeffs kCoeff_48000{
-    1.53512485958697,   -2.69169618940638,   1.19839281085285,
-    -1.69065929318241,   0.73248077421585,
-    1.0,                 -2.0,                1.0,
-    -1.99004745483398,   0.99007225036621,
-};
-
-static constexpr KCoeffs kCoeff_44100{
-    1.5308412300503478, -2.6509799000031379, 1.1690790340624427,
-    -1.6636551132560902, 0.7125954280732254,
-    1.0,                 -2.0,                1.0,
-    -1.9891696736297957, 0.9891959257876969,
-};
-
-// Bilinear-transform a reference (48 kHz) biquad to an arbitrary rate.
-// Not exact per the BS.1770 spec (which designs in continuous time) but
-// close enough for rates far from 48 kHz when we lack tabulated coeffs.
-// Only used as a fallback — 44.1 and 48 kHz have exact constants above.
-inline void warp_biquad_to_sr(double src_sr, double dst_sr,
-                              double b0, double b1, double b2,
-                              double a1, double a2,
-                              double& nb0, double& nb1, double& nb2,
-                              double& na1, double& na2) {
-    // Simple proportional warp of the z-plane pole/zero angles. Degrades
-    // accuracy at extreme rate differences — acceptable here because the
-    // LUFS short-term window is integrated over 3 s, smoothing errors.
-    double scale = src_sr / dst_sr;
-    nb0 = b0;
-    nb1 = b1 * scale;
-    nb2 = b2 * scale * scale;
-    na1 = a1 * scale;
-    na2 = a2 * scale * scale;
-}
 
 constexpr std::size_t kSubBlockMs = 100;
 
 }  // namespace
 
 void LufsLeveler::set_k_weighting_coeffs_(double sr) {
-    const KCoeffs* c = nullptr;
-    if (std::abs(sr - 44100.0) < 0.5) {
-        c = &kCoeff_44100;
-    } else if (std::abs(sr - 48000.0) < 0.5) {
-        c = &kCoeff_48000;
-    }
-
-    if (c != nullptr) {
-        pre_.b0 = c->pre_b0; pre_.b1 = c->pre_b1; pre_.b2 = c->pre_b2;
-        pre_.a1 = c->pre_a1; pre_.a2 = c->pre_a2;
-        rlb_.b0 = c->rlb_b0; rlb_.b1 = c->rlb_b1; rlb_.b2 = c->rlb_b2;
-        rlb_.a1 = c->rlb_a1; rlb_.a2 = c->rlb_a2;
-    } else {
-        // Fallback warp from 48 kHz.
-        warp_biquad_to_sr(48000.0, sr,
-                          kCoeff_48000.pre_b0, kCoeff_48000.pre_b1, kCoeff_48000.pre_b2,
-                          kCoeff_48000.pre_a1, kCoeff_48000.pre_a2,
-                          pre_.b0, pre_.b1, pre_.b2, pre_.a1, pre_.a2);
-        warp_biquad_to_sr(48000.0, sr,
-                          kCoeff_48000.rlb_b0, kCoeff_48000.rlb_b1, kCoeff_48000.rlb_b2,
-                          kCoeff_48000.rlb_a1, kCoeff_48000.rlb_a2,
-                          rlb_.b0, rlb_.b1, rlb_.b2, rlb_.a1, rlb_.a2);
-    }
-    pre_.reset();
-    rlb_.reset();
+    // BS.1770-4 constants + rate selection shared with LoudnessMeter
+    // (k_weighting.hpp) — exact tables for 44.1/48 kHz, proportional z-plane
+    // warp from the 48 kHz reference otherwise.
+    const KCoeffs c = k_weighting_coeffs(sr);
+    pre_.b0 = c.pre_b0; pre_.b1 = c.pre_b1; pre_.b2 = c.pre_b2;
+    pre_.a1 = c.pre_a1; pre_.a2 = c.pre_a2;
+    rlb_.b0 = c.rlb_b0; rlb_.b1 = c.rlb_b1; rlb_.b2 = c.rlb_b2;
+    rlb_.a1 = c.rlb_a1; rlb_.a2 = c.rlb_a2;
+    pre_.clear();
+    rlb_.clear();
 }
 
 void LufsLeveler::reset(double sample_rate, double target_lufs) {
@@ -124,12 +67,6 @@ void LufsLeveler::reset(double sample_rate, double target_lufs) {
 double LufsLeveler::current_gain_db() const {
     if (smooth_gain_lin_ <= 0.0) return cfg_.min_gain_db;
     return 20.0 * std::log10(smooth_gain_lin_);
-}
-
-static inline double lufs_from_ms(double ms) {
-    // BS.1770: L_k = -0.691 + 10 log10(ms)
-    if (ms <= 0.0) return -120.0;
-    return -0.691 + 10.0 * std::log10(ms);
 }
 
 void LufsLeveler::process(const float* in, float* out, std::size_t n) {

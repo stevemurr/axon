@@ -20,7 +20,7 @@ CLAP = os.path.join(REPO, "build", "Axon.clap")
 BENCH = os.path.join(HERE, "..", "build", "axon_bench")
 
 # Isolate the SSL EQ: every other orderable/parallel stage off.
-COMMON = "MLI=0,EXC_ON=0,RVB_MIX=0,WID_ON=0,BMI=0,AGN=0,SSC=0,EQ=0"
+COMMON = "MLI=0,RVB_MIX=0,WID_ON=0,BMI=0,AGN=0,SSC=0,EQ=0"
 
 
 def skip(msg):

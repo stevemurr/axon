@@ -19,6 +19,8 @@
 #pragma once
 #include <cmath>
 
+#include "biquad.hpp"
+
 namespace nablafx {
 
 class BassMono {
@@ -51,37 +53,14 @@ public:
     }
 
 private:
-    struct Biquad {
-        double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-        double z1 = 0, z2 = 0;
-        double process(double x) {
-            double y = b0 * x + z1;
-            z1 = b1 * x - a1 * y + z2;
-            z2 = b2 * x - a2 * y;
-            return y;
-        }
-        void clear() { z1 = z2 = 0; }
-        void set(double nb0, double nb1, double nb2, double na1, double na2) {
-            b0 = nb0; b1 = nb1; b2 = nb2; a1 = na1; a2 = na2;
-        }
-    };
+    using Biquad = BiquadTDF2;
 
     // 2nd-order Butterworth high-pass (RBJ cookbook), Q = 1/√2.
     void design_() {
         const double fc = (cutoff_ > 1.0 && cutoff_ < 0.49 * sr_) ? cutoff_ : 250.0;
-        const double w0 = 2.0 * M_PI * fc / sr_;
-        const double cw = std::cos(w0), sw = std::sin(w0);
-        const double Q  = 0.70710678;
-        const double alpha = sw / (2.0 * Q);
-        const double a0 = 1.0 + alpha;
-        const double b0 = (1.0 + cw) / 2.0 / a0;
-        const double b1 = -(1.0 + cw)     / a0;
-        const double b2 = (1.0 + cw) / 2.0 / a0;
-        const double a1 = -2.0 * cw       / a0;
-        const double a2 = (1.0 - alpha)   / a0;
         // LR4 = two identical Butterworth sections cascaded (24 dB/oct).
-        hp1_.set(b0, b1, b2, a1, a2);
-        hp2_.set(b0, b1, b2, a1, a2);
+        rbj_butterworth_hpf(fc, sr_, hp1_);
+        rbj_butterworth_hpf(fc, sr_, hp2_);
     }
 
     double sr_     = 44100.0;

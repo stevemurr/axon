@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <vector>
 
+#include "biquad.hpp"
+
 namespace nablafx {
 
 class LufsLeveler {
@@ -59,26 +61,7 @@ public:
     double current_gain_db()    const;
 
 private:
-    struct Biquad {
-        double b0 = 1.0, b1 = 0.0, b2 = 0.0;
-        double a1 = 0.0, a2 = 0.0;
-        double z1_l = 0.0, z2_l = 0.0;
-        double z1_r = 0.0, z2_r = 0.0;
-
-        double step_l(double x) {
-            double y = b0 * x + z1_l;
-            z1_l = b1 * x - a1 * y + z2_l;
-            z2_l = b2 * x - a2 * y;
-            return y;
-        }
-        double step_r(double x) {
-            double y = b0 * x + z1_r;
-            z1_r = b1 * x - a1 * y + z2_r;
-            z2_r = b2 * x - a2 * y;
-            return y;
-        }
-        void reset() { z1_l = z2_l = z1_r = z2_r = 0.0; }
-    };
+    using Biquad = BiquadTDF2Stereo;
 
     void set_k_weighting_coeffs_(double sr);
 

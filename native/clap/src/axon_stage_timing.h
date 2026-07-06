@@ -73,7 +73,7 @@ enum {
     AXON_ST_SSL_COMP        = 4,   // StageID::SslComp
     AXON_ST_MEL_LIMITER     = 5,   // StageID::MelLimiter
     AXON_ST_BASS_MONO       = 6,   // StageID::BassMono
-    AXON_ST_EXCITER         = 7,   // StageID::Exciter (dormant)
+    AXON_ST_RETIRED_7       = 7,   // retired StageID 7 (was Exciter; removed 2026-07)
     AXON_ST_REVERB          = 8,   // StageID::Reverb
     AXON_ST_WIDENER         = 9,   // StageID::Widener
     // Pseudo-stages (fixed plumbing inside flush_chain_block_):
@@ -91,7 +91,7 @@ enum {
 static const char* const axon_stage_timing_slot_names[AXON_ST_SLOT_COUNT] = {
     "Unused",
     "AutoEQ", "Saturator", "SslEq", "SslComp", "MelLimiter",
-    "BassMono", "Exciter", "Reverb", "Widener",
+    "BassMono", "Retired7", "Reverb", "Widener",
     "MeterIn", "SpectrumPush", "TrimCeiling", "MeterOut", "AutoGain",
     "SslOrtForward", "AutoEqOrtCtrl",
 };

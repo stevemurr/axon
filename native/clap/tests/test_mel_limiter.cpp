@@ -683,6 +683,312 @@ void test_bin_gain_scratch_init_state() {
     std::fprintf(stderr, "[scratch2]   PASS\n");
 }
 
+// ---------------------------------------------------------------------------
+// Test 16: num_bands() accessor + copy_display() band centres are the HTK-mel
+// grid (known-answer, independent oracle)
+//
+// num_bands() is the public sizing contract for the display API: a UI client
+// allocates num_bands() floats per array and calls copy_display(). Verify the
+// accessor both at compile time and at runtime, then verify the centres it
+// sizes are exactly the 26-point HTK-mel grid over [20, 20000] Hz. The oracle
+// re-derives the grid from the published HTK formula (mel = 2595·log10(1+f/700))
+// in double — an independent copy on purpose (repo convention: tests keep
+// their own oracles rather than including src/mel_scale.hpp).
+//
+// Tolerance derivation (not tuned): the implementation runs the same formula
+// in float (log10f/powf ≤ 2 ulp ≈ 2.4e-7 rel each), the mel→hz step's
+// (10^x − 1) amplifies relative error by x/(x−1) ≤ 7.1 (worst at band 0,
+// ~115 Hz), and the hz→bin→hz quantisation roundtrip adds 2 ulp (no Nyquist
+// clamp bites: max bin ≈ 464 @ 44.1k / 427 @ 48k, both < 512). Worst-case
+// bound ≈ 4e-6 relative; assert < 2e-5 (5× headroom, still far below the
+// half-band spacing that any formula/off-by-one regression would cause).
+// ---------------------------------------------------------------------------
+static_assert(nablafx::MelLimiter::num_bands() == nablafx::MelLimiter::kNumBands,
+              "num_bands() must expose kNumBands");
+static_assert(nablafx::MelLimiter::num_bands() == 26,
+              "display contract: 26 mel bands");
+
+void test_num_bands_and_mel_centers() {
+    // Runtime accessor call, used the way a display client uses it: to size
+    // the copy_display() arrays.
+    const int nb = nablafx::MelLimiter::num_bands();
+    assert(nb == 26);
+
+    for (int sr : {44100, 48000}) {
+        nablafx::MelLimiter ml;
+        ml.init(sr);
+
+        std::vector<float> lev(nb, -1.f), gn(nb, -1.f), ctr(nb, -1.f);
+        ml.copy_display(lev.data(), gn.data(), ctr.data());
+
+        // Independent double-precision HTK-mel oracle.
+        const double mmin = 2595.0 * std::log10(1.0 + 20.0    / 700.0);
+        const double mmax = 2595.0 * std::log10(1.0 + 20000.0 / 700.0);
+        double max_rel = 0.0;
+        for (int b = 0; b < nb; ++b) {
+            const double mel = mmin + (mmax - mmin) * (b + 1) / (nb + 1);
+            const double hz  = 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
+            const double rel = std::abs(static_cast<double>(ctr[b]) - hz) / hz;
+            max_rel = std::max(max_rel, rel);
+
+            assert(std::isfinite(ctr[b]));
+            assert(ctr[b] > 20.f);                                // above f_min
+            assert(ctr[b] < static_cast<float>(sr) / 2.f);        // below Nyquist
+            if (b > 0) assert(ctr[b] > ctr[b - 1]);               // strictly ascending
+        }
+        std::fprintf(stderr,
+            "[bands]      sr=%d  centers[0]=%.2f Hz  centers[%d]=%.2f Hz  "
+            "max_rel_err=%.2e (want < 2e-5)\n",
+            sr, ctr[0], nb - 1, ctr[nb - 1], max_rel);
+        assert(max_rel < 2e-5);
+    }
+    std::fprintf(stderr, "[bands]      PASS\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: brickwall_gain() accessor tracks the true-peak gain envelope
+//
+// Same isolated-brickwall signal as tests 11/12: a 0.35-amp tone (spectral
+// solver stays inert: window total < ceiling) with one 32-sample amp-1.0
+// burst whose PEAK alone exceeds the 0.5 ceiling. Process in 64-sample blocks
+// and sample brickwall_gain() after each block:
+//   (a) always in (0, 1];
+//   (b) EXACTLY 1.0f for every block that ends before the burst enters the
+//       input — below the ceiling g_req = 1 and the one-pole update
+//       g = c·g + (1−c)·1 stays exactly 1.0f in float (c ∈ [0.5,1) ⇒ 1−c is
+//       exact by Sterbenz, and c + (1−c) sums to exactly 1.0);
+//   (c) ducked near ceiling/peak around the burst: target g_req = 0.5/wmax
+//       with wmax = wet burst peak ∈ [0.97, 1.03] (≤3% WOLA recon error,
+//       test 7) ⇒ gain never drops below 0.45; the attack (τ = kBrickLA/4 =
+//       64 samples) holds while the burst sits in the 256-sample lookahead
+//       window (~288 steps ≈ 4.5τ), converging to ≈0.505, so the sampled
+//       minimum must be < 0.6;
+//   (d) recovered to ≈1 by the end (release τ = 50 ms ⇒ ~29τ of quiet tone
+//       remain after the burst ⇒ > 0.999);
+//   (e) deterministic: a second identical run yields a bitwise-identical
+//       gain trace;
+//   (f) linked stereo: a burst on R only must duck the (shared) gain too.
+// ---------------------------------------------------------------------------
+void test_brickwall_gain_accessor() {
+    const float ceiling = 0.5f;
+    const int   sec     = kSR;
+    const int   N       = 2 * sec;
+    const int   bstart  = sec / 2;
+    const int   blen    = 32;
+    const int   blk     = 64;
+
+    std::vector<float> src = make_sine(1000.0, 0.35, N);
+    {
+        auto burst = make_sine(1000.0, 1.0, blen);
+        std::copy(burst.begin(), burst.end(), src.begin() + bstart);
+    }
+
+    auto trace_gains = [&](const std::vector<float>& in) {
+        nablafx::MelLimiter ml;
+        ml.init(kSR);
+        assert(ml.brickwall_gain() == 1.0f);        // exact after init
+        std::vector<float> buf(in);
+        std::vector<float> g;
+        for (int pos = 0; pos < N; pos += blk) {
+            const int n = std::min(blk, N - pos);
+            ml.process(buf.data() + pos, nullptr, 1, n, default_params(ceiling));
+            g.push_back(ml.brickwall_gain());
+        }
+        assert(all_finite(buf.data(), N));
+        return g;
+    };
+
+    const auto g = trace_gains(src);
+
+    float gmin = 1.f;
+    for (size_t i = 0; i < g.size(); ++i) {
+        assert(g[i] > 0.f && g[i] <= 1.f);                     // (a) bounds
+        if (static_cast<int>(i + 1) * blk <= bstart)
+            assert(g[i] == 1.0f);                              // (b) exact unity
+        gmin = std::min(gmin, g[i]);
+    }
+    std::fprintf(stderr,
+        "[bw-gain]    min=%.4f (want 0.45 < min < 0.6)  final=%.6f (want > 0.999)\n",
+        gmin, g.back());
+    assert(gmin < 0.6f && gmin > 0.45f);                       // (c) ducked, bounded
+    assert(g.back() > 0.999f);                                 // (d) recovered
+
+    // (e) determinism: identical fresh run ⇒ bitwise-identical trace.
+    const auto g2 = trace_gains(src);
+    assert(g2.size() == g.size());
+    for (size_t i = 0; i < g.size(); ++i) assert(g2[i] == g[i]);
+
+    // (f) linked stereo: burst on R only still ducks the shared gain.
+    {
+        nablafx::MelLimiter ml;
+        ml.init(kSR);
+        std::vector<float> lb = make_sine(1000.0, 0.35, N);    // no burst on L
+        std::vector<float> rb(src);                            // burst on R
+        float smin = 1.f;
+        for (int pos = 0; pos < N; pos += blk) {
+            const int n = std::min(blk, N - pos);
+            ml.process(lb.data() + pos, rb.data() + pos, 2, n,
+                       default_params(ceiling));
+            smin = std::min(smin, ml.brickwall_gain());
+        }
+        assert(all_finite(lb.data(), N));
+        assert(all_finite(rb.data(), N));
+        std::fprintf(stderr,
+            "[bw-gain]    stereo-linked min=%.4f (want < 0.6, burst on R only)\n",
+            smin);
+        assert(smin < 0.6f && smin > 0.45f);
+    }
+    std::fprintf(stderr, "[bw-gain]    PASS\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: reset() restores brickwall_gain() to exactly 1 and makes the
+// instance bitwise-equivalent to a freshly init()'d one
+//
+// Duck the gain (stop mid-attack right after the burst reaches the brickwall:
+// at that point g ≈ 0.5 + 0.5·e^(−~85/64) ≈ 0.64, so 0.4 < g < 0.9), then
+// reset() and require:
+//   - brickwall_gain() == 1.0f exactly (reset writes 1.f);
+//   - it STAYS exactly 1.0f through silence and a below-ceiling tone
+//     (same exact-unity argument as test 17b);
+//   - reprocessing the full signal after reset() matches a fresh instance
+//     bitwise — reset clears every piece of process()-visible state.
+// ---------------------------------------------------------------------------
+void test_brickwall_gain_reset() {
+    const float ceiling = 0.5f;
+    const int   sec     = kSR;
+    const int   N       = 2 * sec;
+    const int   bstart  = sec / 2;
+    const int   blen    = 32;
+
+    std::vector<float> src = make_sine(1000.0, 0.35, N);
+    {
+        auto burst = make_sine(1000.0, 1.0, blen);
+        std::copy(burst.begin(), burst.end(), src.begin() + bstart);
+    }
+
+    nablafx::MelLimiter ml;
+    ml.init(kSR);
+    const auto p = default_params(ceiling);
+
+    // Stop mid-attack: the burst reaches the brickwall input kFFTSize+1
+    // samples after bstart (WOLA group delay + z1); give it ~64 more samples.
+    const int upto = bstart + blen + nablafx::MelLimiter::kFFTSize + 64;
+    std::vector<float> head(src.begin(), src.begin() + upto);
+    ml.process(head.data(), nullptr, 1, upto, p);
+    const float ducked = ml.brickwall_gain();
+    std::fprintf(stderr,
+        "[bw-reset]   mid-attack gain=%.4f (want 0.4 < g < 0.9)\n", ducked);
+    assert(ducked > 0.4f && ducked < 0.9f);
+
+    ml.reset();
+    assert(ml.brickwall_gain() == 1.0f);                       // exact
+
+    // Silence keeps it pinned at exactly 1.
+    std::vector<float> zeros(4096, 0.f);
+    ml.process(zeros.data(), nullptr, 1, 4096, p);
+    assert(ml.brickwall_gain() == 1.0f);
+
+    // A below-ceiling tone keeps it pinned at exactly 1 as well.
+    ml.reset();
+    auto quiet = make_sine(1000.0, 0.2, 8192);
+    ml.process(quiet.data(), nullptr, 1, 8192, p);
+    assert(ml.brickwall_gain() == 1.0f);
+
+    // reset() ≡ fresh instance: reprocess the whole signal on the reset
+    // limiter and on a brand-new one — outputs must be bitwise identical.
+    ml.reset();
+    std::vector<float> out_reset(src);
+    ml.process(out_reset.data(), nullptr, 1, N, p);
+
+    nablafx::MelLimiter fresh;
+    fresh.init(kSR);
+    std::vector<float> out_fresh(src);
+    fresh.process(out_fresh.data(), nullptr, 1, N, p);
+
+    double max_err = 0.0;
+    for (int i = 0; i < N; ++i)
+        max_err = std::max(max_err,
+            std::abs(static_cast<double>(out_reset[i]) -
+                     static_cast<double>(out_fresh[i])));
+    std::fprintf(stderr,
+        "[bw-reset]   max |reset - fresh| = %.3e (want exactly 0)\n", max_err);
+    assert(max_err == 0.0);
+    assert(ml.brickwall_gain() == fresh.brickwall_gain());
+    std::fprintf(stderr, "[bw-reset]   PASS\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: copy_display() taps follow the limiter's state machine
+//
+//   init      → gains exactly 1.0f, levels exactly 0.0f;
+//   hot pink  → limiting engaged: measured total level exceeds the ceiling
+//               AND smoothed gains dropped (min < 0.9), all gains ∈ [0,1];
+//   2 s quiet → gains release back to ≈1 (τ = 30+0.5·370 ≈ 215 ms ⇒ ~9τ);
+//   reset     → gains exactly 1.0f again;
+//   centres   → bitwise-static through all of the above (built once in init).
+// ---------------------------------------------------------------------------
+void test_copy_display_state_machine() {
+    const int nb = nablafx::MelLimiter::num_bands();
+    const float ceiling = 0.5f;
+
+    nablafx::MelLimiter ml;
+    ml.init(kSR);
+
+    std::vector<float> lev(nb, -1.f), gn(nb, -1.f), ctr(nb, -1.f);
+    ml.copy_display(lev.data(), gn.data(), ctr.data());
+    const std::vector<float> ctr0(ctr);          // snapshot: static centres
+    for (int b = 0; b < nb; ++b) {
+        assert(gn[b]  == 1.0f);                  // no limiting yet — exact
+        assert(lev[b] == 0.0f);                  // nothing measured yet — exact
+    }
+
+    // Hot pink noise well above the ceiling ⇒ solver active every hop.
+    auto p = default_params(ceiling);
+    p.drive_lin = std::pow(10.f, 6.f / 20.f);
+    auto loud = make_pink(2 * kSR, 4.0 * ceiling, 11);
+    ml.process(loud.data(), nullptr, 1, 2 * kSR, p);
+
+    ml.copy_display(lev.data(), gn.data(), ctr.data());
+    float gmin = 1.f;
+    double sum_sq = 0.0;
+    for (int b = 0; b < nb; ++b) {
+        assert(std::isfinite(lev[b]) && lev[b] >= 0.f);
+        assert(std::isfinite(gn[b]) && gn[b] >= 0.f && gn[b] <= 1.f);
+        assert(ctr[b] == ctr0[b]);               // centres bitwise-static
+        gmin   = std::min(gmin, gn[b]);
+        sum_sq += static_cast<double>(lev[b]) * lev[b];
+    }
+    const double total = std::sqrt(sum_sq);
+    std::fprintf(stderr,
+        "[display]    loud: total_level=%.3f (want > ceiling %.2f)  "
+        "min_gain=%.3f (want < 0.9)\n", total, (double)ceiling, gmin);
+    assert(total > ceiling);                     // over ceiling ⇒ limiting…
+    assert(gmin < 0.9f);                         // …and gains actually dropped
+
+    // 2 s of near-silence: release (τ ≈ 215 ms at speed 0.5) ⇒ gains ≈ 1.
+    auto tiny = make_sine(1000.0, 1e-4, 2 * kSR);
+    ml.process(tiny.data(), nullptr, 1, 2 * kSR, p);
+    ml.copy_display(lev.data(), gn.data(), ctr.data());
+    float gmin_rel = 1.f;
+    for (int b = 0; b < nb; ++b) {
+        gmin_rel = std::min(gmin_rel, gn[b]);
+        assert(ctr[b] == ctr0[b]);
+    }
+    std::fprintf(stderr,
+        "[display]    after 2s quiet: min_gain=%.5f (want > 0.99)\n", gmin_rel);
+    assert(gmin_rel > 0.99f);
+
+    // reset(): per-band gains snap back to exactly 1; centres untouched.
+    ml.reset();
+    ml.copy_display(lev.data(), gn.data(), ctr.data());
+    for (int b = 0; b < nb; ++b) {
+        assert(gn[b] == 1.0f);
+        assert(ctr[b] == ctr0[b]);
+    }
+    std::fprintf(stderr, "[display]    PASS\n");
+}
+
 } // namespace
 
 int main() {
@@ -701,6 +1007,10 @@ int main() {
     test_lookahead_low_distortion();
     test_bin_gain_scratch_reuse_block_invariance();
     test_bin_gain_scratch_init_state();
+    test_num_bands_and_mel_centers();
+    test_brickwall_gain_accessor();
+    test_brickwall_gain_reset();
+    test_copy_display_state_machine();
     std::fprintf(stderr, "ALL TESTS PASSED\n");
     return 0;
 }

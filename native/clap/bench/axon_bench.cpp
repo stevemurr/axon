@@ -106,7 +106,14 @@ static void usage(const char* prog) {
         "  --channels <1|2>         plugin channel layout (default: 2)\n"
         "  --params 'ID=v,ID=v,...' set short-id params before processing\n"
         "  --json                   emit JSON stats to stdout\n"
-        "  -h, --help               this help\n",
+        "  -h, --help               this help\n"
+        "\n"
+        "STATE CARRY: the plugin is NOT reset between passes — warmup iters and\n"
+        "timed iters run back-to-back with carried state (LSTM state, limiter\n"
+        "envelopes, meter integrators), and --out captures the LAST pass only\n"
+        "(pass number warmup+iters; note the defaults process the file twice).\n"
+        "Null tests comparing two builds MUST use identical --iters/--warmup on\n"
+        "both sides or every stateful stage produces phantom diffs.\n",
         prog);
 }
 
@@ -528,6 +535,10 @@ int main(int argc, char** argv) {
         std::printf("  \"channels\": %d,\n", n_ch);
         std::printf("  \"iters\": %d,\n", a.iters);
         std::printf("  \"warmup\": %d,\n", a.warmup);
+        // Plugin state persists across ALL warmup+iters passes (no reset
+        // between iterations); --out holds the output of the LAST pass.
+        std::printf("  \"state_carry\": true,\n");
+        std::printf("  \"out_is_iter\": %d,\n", a.warmup + a.iters);
         std::printf("  \"frames_per_iter\": %lld,\n", static_cast<long long>(total));
         std::printf("  \"audio_seconds_per_iter\": %.6f,\n", audio_per_iter_s);
         std::printf("  \"per_block_us\": {\"min\": %.3f, \"p50\": %.3f, \"p95\": %.3f, \"p99\": %.3f, \"max\": %.3f, \"mean\": %.3f, \"count\": %zu},\n",

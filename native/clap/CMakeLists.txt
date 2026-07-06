@@ -126,49 +126,61 @@ if(NOT _have_sndfile)
     endforeach()
 endif()
 
+# -----------------------------------------------------------------------------
+# Test targets. axon_add_test() enforces two suite-wide invariants that used to
+# be hand-repeated per target:
+#   - -UNDEBUG on every test: the tests are assert-based, and Release's
+#     -DNDEBUG would silently turn a target added without the flag into a
+#     vacuous no-op.
+#   - CTest registration: the canonical suite command is
+#         ctest --test-dir native/clap/build --output-on-failure
+#     which only runs registered, freshly-built targets (a raw `for t in
+#     test_*` glob over the build dir happily keeps running a stale binary
+#     whose target was deleted or renamed).
+# -----------------------------------------------------------------------------
+enable_testing()
+
+function(axon_add_test name)
+    add_executable(${name} ${ARGN})
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_options(${name} PRIVATE -UNDEBUG)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
 # test_mel_limiter — unit tests for the MelLimiter DSP (no external deps).
-# -UNDEBUG keeps assert() live even in Release builds (these are assert-based).
-add_executable(test_mel_limiter
-    tests/test_mel_limiter.cpp
-    src/mel_limiter.cpp
-)
-target_include_directories(test_mel_limiter PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_mel_limiter PRIVATE -UNDEBUG)
+axon_add_test(test_mel_limiter tests/test_mel_limiter.cpp src/mel_limiter.cpp)
 target_link_libraries(test_mel_limiter PRIVATE "-framework Accelerate")
 
 # test_meter — unit tests for the LoudnessMeter (cross-checked vs LufsLeveler).
-add_executable(test_meter
-    tests/test_meter.cpp
-    src/meter.cpp
-    src/lufs_leveler.cpp
-)
-target_include_directories(test_meter PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_meter PRIVATE -UNDEBUG)
+axon_add_test(test_meter tests/test_meter.cpp src/meter.cpp src/lufs_leveler.cpp)
 
 # test_bass_mono — unit tests for the BassMono mono-maker (header-only DSP).
-add_executable(test_bass_mono tests/test_bass_mono.cpp)
-target_include_directories(test_bass_mono PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_bass_mono PRIVATE -UNDEBUG)
+axon_add_test(test_bass_mono tests/test_bass_mono.cpp)
 
 # test_auto_gain — unit tests for the AutoGain level-match integrator.
-add_executable(test_auto_gain tests/test_auto_gain.cpp)
-target_include_directories(test_auto_gain PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_auto_gain PRIVATE -UNDEBUG)
-
-# test_exciter — unit tests for the Aphex-style Exciter (header-only DSP).
-add_executable(test_exciter tests/test_exciter.cpp)
-target_include_directories(test_exciter PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_exciter PRIVATE -UNDEBUG)
+axon_add_test(test_auto_gain tests/test_auto_gain.cpp)
 
 # test_reverb — unit tests for the transparent room Reverb (header-only DSP).
-add_executable(test_reverb tests/test_reverb.cpp)
-target_include_directories(test_reverb PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_reverb PRIVATE -UNDEBUG)
+axon_add_test(test_reverb tests/test_reverb.cpp)
 
 # test_widener — unit tests for the transparent M/S stereo Widener (header-only).
-add_executable(test_widener tests/test_widener.cpp)
-target_include_directories(test_widener PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_widener PRIVATE -UNDEBUG)
+axon_add_test(test_widener tests/test_widener.cpp)
+
+# test_dsp — LufsLeveler + TruePeakCeiling transparency/limit tests (the only
+# LufsLeveler-focused coverage).
+axon_add_test(test_dsp tests/test_dsp.cpp src/lufs_leveler.cpp src/true_peak_ceiling.cpp)
+
+# test_grey_dsp — RationalA grey-box DSP eval + meta plumbing.
+axon_add_test(test_grey_dsp tests/test_grey_dsp.cpp src/meta.cpp)
+target_include_directories(test_grey_dsp PRIVATE ${JSON_INCLUDE_DIR})
+
+# test_composite_meta — composite axon_meta.json loader sanity, run against the
+# committed weights/axon_bundle (DEFAULT_META_PATH; argv/env can override).
+axon_add_test(test_composite_meta
+    tests/test_composite_meta.cpp src/composite_meta.cpp src/meta.cpp)
+target_include_directories(test_composite_meta PRIVATE ${JSON_INCLUDE_DIR})
+target_compile_definitions(test_composite_meta PRIVATE
+    DEFAULT_META_PATH="${CMAKE_SOURCE_DIR}/../../weights/axon_bundle/axon_meta.json")
 
 # -----------------------------------------------------------------------------
 # Regression tests added by the bug-hunt workflow. Each guards a confirmed,
@@ -176,85 +188,86 @@ target_compile_options(test_widener PRIVATE -UNDEBUG)
 # -----------------------------------------------------------------------------
 
 # test_meta — load_meta/parse_dsp_block input-validation guards (needs nlohmann).
-add_executable(test_meta tests/test_meta.cpp src/meta.cpp)
-target_include_directories(test_meta PRIVATE ${CMAKE_SOURCE_DIR}/src ${JSON_INCLUDE_DIR})
-target_compile_options(test_meta PRIVATE -UNDEBUG)
+axon_add_test(test_meta tests/test_meta.cpp src/meta.cpp)
+target_include_directories(test_meta PRIVATE ${JSON_INCLUDE_DIR})
 
 # test_composite_meta_validate — axon_meta.json loader guards (lookahead_ms>=0).
-add_executable(test_composite_meta_validate
-    tests/test_composite_meta_validate.cpp
-    src/composite_meta.cpp
-    src/meta.cpp
-)
-target_include_directories(test_composite_meta_validate PRIVATE ${CMAKE_SOURCE_DIR}/src ${JSON_INCLUDE_DIR})
-target_compile_options(test_composite_meta_validate PRIVATE -UNDEBUG)
+axon_add_test(test_composite_meta_validate
+    tests/test_composite_meta_validate.cpp src/composite_meta.cpp src/meta.cpp)
+target_include_directories(test_composite_meta_validate PRIVATE ${JSON_INCLUDE_DIR})
 
 # test_control_contract — the shipped axon_meta.json control set must equal the
 # set of controls axon_plugin.cpp actually reads (guards composite.py drift), and
-# the SSL EQ port's 21 SEQ_* controls must be present with sane specs.
-add_executable(test_control_contract tests/test_control_contract.cpp)
-target_include_directories(test_control_contract PRIVATE ${CMAKE_SOURCE_DIR}/src ${JSON_INCLUDE_DIR})
-target_compile_options(test_control_contract PRIVATE -UNDEBUG)
+# the SSL EQ port's 22 SEQ_* controls must be present with sane specs.
+axon_add_test(test_control_contract tests/test_control_contract.cpp)
+target_include_directories(test_control_contract PRIVATE ${JSON_INCLUDE_DIR})
 target_compile_definitions(test_control_contract PRIVATE
     SRC_PATH="${CMAKE_SOURCE_DIR}/src/axon_plugin.cpp"
     META_PATH="${CMAKE_SOURCE_DIR}/../../weights/axon_bundle/axon_meta.json")
 
+# test_ssl_hop_contract — kSslHop (axon_limits.hpp) must satisfy
+# kSslHop <= trace_len - receptive_field against the SHIPPED ssl_comp bundle
+# (margin is exactly 0 today; a re-export that shrinks it fails here, not in
+# the DAW at activate).
+axon_add_test(test_ssl_hop_contract tests/test_ssl_hop_contract.cpp src/meta.cpp)
+target_include_directories(test_ssl_hop_contract PRIVATE ${JSON_INCLUDE_DIR})
+target_compile_definitions(test_ssl_hop_contract PRIVATE
+    SSL_META_PATH="${CMAKE_SOURCE_DIR}/../../weights/axon_bundle/ssl_comp/plugin_meta.json")
+
 # test_nablafx_plugin — control-snapshot bounds + clamped normalization logic.
-add_executable(test_nablafx_plugin tests/test_nablafx_plugin.cpp src/param_id.cpp)
-target_include_directories(test_nablafx_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_nablafx_plugin PRIVATE -UNDEBUG)
+axon_add_test(test_nablafx_plugin tests/test_nablafx_plugin.cpp src/param_id.cpp)
 
-# test_ort_session — run() input-length precondition (mirrors run()'s arithmetic).
-add_executable(test_ort_session tests/test_ort_session.cpp)
-target_include_directories(test_ort_session PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_ort_session PRIVATE -UNDEBUG)
+# test_ort_session — run() input-length precondition (calls the real
+# ort_run_out_len from src/ort_run_guard.hpp, the function run() itself uses)
+# + the REAL OrtSession (src/ort_session.cpp) run against tiny deterministic
+# ONNX graphs embedded in the test, so it links the actual onnxruntime dylib.
+axon_add_test(test_ort_session tests/test_ort_session.cpp src/ort_session.cpp)
+target_include_directories(test_ort_session PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+target_link_libraries(test_ort_session PRIVATE ${ONNXRUNTIME_LIBRARY})
+# The prebuilt dylib's install name is @rpath/libonnxruntime.<ver>.dylib; the
+# test runs from the build dir, so point rpath at the FetchContent lib dir.
+set_target_properties(test_ort_session PROPERTIES
+    BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib")
 
-# test_autoeq_param_guard — num_control_params <= 64 stack-buffer guard.
-add_executable(test_autoeq_param_guard tests/test_autoeq_param_guard.cpp)
-target_include_directories(test_autoeq_param_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_autoeq_param_guard PRIVATE -UNDEBUG)
+# test_autoeq_param_guard — num_control_params <= kEqParamsStorage stack-buffer
+# guard (constant shared with the plugin via src/axon_limits.hpp).
+axon_add_test(test_autoeq_param_guard tests/test_autoeq_param_guard.cpp)
 target_link_libraries(test_autoeq_param_guard PRIVATE "-framework Accelerate")
 
 # test_true_peak — TruePeakCeiling: ceiling-never-exceeded invariant + KAT.
-add_executable(test_true_peak tests/test_true_peak.cpp src/true_peak_ceiling.cpp)
-target_include_directories(test_true_peak PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_true_peak PRIVATE -UNDEBUG)
+axon_add_test(test_true_peak tests/test_true_peak.cpp src/true_peak_ceiling.cpp)
 
 # test_iir_filterbank_eq — min-phase IIR filterbank Auto-EQ renderer
 # (flat=unity, magnitude-match, stability). Header-only DSP.
-add_executable(test_iir_filterbank_eq tests/test_iir_filterbank_eq.cpp)
-target_include_directories(test_iir_filterbank_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_iir_filterbank_eq PRIVATE -UNDEBUG)
-
-# test_multiband_exciter — narrowband HARMONICS engine: bypass, harmonics, the
-# IMD-reduction property (narrow bands << one wide band), stability.
-add_executable(test_multiband_exciter tests/test_multiband_exciter.cpp)
-target_include_directories(test_multiband_exciter PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_multiband_exciter PRIVATE -UNDEBUG)
+axon_add_test(test_iir_filterbank_eq tests/test_iir_filterbank_eq.cpp)
 
 # test_axon_gui_js — WKWebView JS-bridge string builders (no fixed-buffer overflow).
-add_executable(test_axon_gui_js tests/test_axon_gui_js.cpp)
-target_include_directories(test_axon_gui_js PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_axon_gui_js PRIVATE -UNDEBUG)
+axon_add_test(test_axon_gui_js tests/test_axon_gui_js.cpp)
 
 # test_spectral_mask_eq — STFT mask EQ OLA output-ring overflow clamp.
-add_executable(test_spectral_mask_eq tests/test_spectral_mask_eq.cpp)
-target_include_directories(test_spectral_mask_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_spectral_mask_eq PRIVATE -UNDEBUG)
+axon_add_test(test_spectral_mask_eq tests/test_spectral_mask_eq.cpp)
 target_link_libraries(test_spectral_mask_eq PRIVATE "-framework Accelerate")
 
 # test_ssl_channel_eq — SSL 9000 J channel EQ engine + coupling solver
 # (header-only, plain biquads — no Accelerate).
-add_executable(test_ssl_channel_eq tests/test_ssl_channel_eq.cpp)
-target_include_directories(test_ssl_channel_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_ssl_channel_eq PRIVATE -UNDEBUG)
+axon_add_test(test_ssl_channel_eq tests/test_ssl_channel_eq.cpp)
 
 # test_adaptive_eq — AdaptiveEqController (productionized C1→C2 cascade auto-EQ):
 # stability, adaptivity (no mode collapse), tonal direction, determinism, bypass.
-add_executable(test_adaptive_eq tests/test_adaptive_eq.cpp)
-target_include_directories(test_adaptive_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(test_adaptive_eq PRIVATE -UNDEBUG)
+axon_add_test(test_adaptive_eq tests/test_adaptive_eq.cpp)
 target_link_libraries(test_adaptive_eq PRIVATE "-framework Accelerate")
+
+# test_coherence_distortion — phase-invariant distortion meter via
+# magnitude-squared coherence (header-only, vDSP FFT).
+axon_add_test(test_coherence_distortion tests/test_coherence_distortion.cpp)
+target_link_libraries(test_coherence_distortion PRIVATE "-framework Accelerate")
+
+# test_ssl_integration.py — plugin-level SSL EQ integration through axon_bench
+# against a built build/Axon.clap. Self-skips (rc 77) when the plugin or bench
+# isn't built, so ctest reports it as SKIPPED rather than failing.
+add_test(NAME test_ssl_integration
+         COMMAND /usr/bin/env python3 ${CMAKE_SOURCE_DIR}/tests/test_ssl_integration.py)
+set_tests_properties(test_ssl_integration PROPERTIES SKIP_RETURN_CODE 77)
 
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
@@ -271,4 +284,27 @@ if(_have_sndfile)
     message(STATUS "axon_bench: enabled (sndfile in ${SNDFILE_INCLUDE_DIRS})")
 else()
     message(STATUS "axon_bench: SKIPPED (libsndfile not found; brew install libsndfile)")
+endif()
+
+# -----------------------------------------------------------------------------
+# AXON_COVERAGE — LLVM source-based coverage for the unit tests ONLY.
+# Instruments every test_* executable (compile AND link) with
+# -fprofile-instr-generate -fcoverage-mapping. The plugin modules
+# (nablafx_clap/axon_clap) and axon_bench are deliberately NOT instrumented:
+# shipped dylibs must stay bit-identical to uninstrumented builds.
+# Intended to be used in a separate build dir via bench/run_coverage.sh so the
+# normal Release build dir is never polluted with an instrumented cache.
+# -----------------------------------------------------------------------------
+option(AXON_COVERAGE "Coverage instrumentation for test_* executables (use bench/run_coverage.sh; do NOT enable in the normal build dir)" OFF)
+if(AXON_COVERAGE)
+    get_property(_axon_all_targets DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY BUILDSYSTEM_TARGETS)
+    set(_axon_cov_targets "")
+    foreach(_t IN LISTS _axon_all_targets)
+        if(_t MATCHES "^test_")
+            target_compile_options(${_t} PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+            target_link_options(${_t} PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+            list(APPEND _axon_cov_targets ${_t})
+        endif()
+    endforeach()
+    message(STATUS "AXON_COVERAGE=ON: instrumented test targets: ${_axon_cov_targets}")
 endif()

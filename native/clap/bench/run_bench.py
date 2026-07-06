@@ -59,8 +59,8 @@ BYPASS = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
 # Everything-on: FULL_CHAIN leaves several gated stages off (SslEq via SEQ_ON,
 # BassMono via BMI, Reverb via RVB_MIX, Widener via WID_ON all default 0).
 # This scenario enables every stage that is wired into processor_order —
-# SslEq gets non-flat band gains so its biquads do real work. (Saturator and
-# Exciter are dormant: not in processor_order, so they cannot be enabled.)
+# SslEq gets non-flat band gains so its biquads do real work. (The Saturator
+# is dormant: not in processor_order, so it cannot be enabled.)
 FULL_CHAIN_ALL = (
     FULL_CHAIN
     + ",SEQ_ON=1,SEQ_LF_G=3,SEQ_HMF_G=-2.5,SEQ_HF_G=2,SEQ_HPF_ON=1"

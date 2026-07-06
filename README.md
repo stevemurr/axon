@@ -74,9 +74,9 @@ Default order (drag to reorder; the True-Peak Ceiling is always final):
 | 7 | **Limiter** | Mel-band maximizer + true-peak lookahead brickwall | `Drive`, `Ceiling`, `Attack/Adaptive Gain`, `Release/Adaptive Speed`, `Dynamic` |
 | — | **True-Peak Ceiling** | Always-last 4× oversampled brickwall, guarantees the dBTP ceiling | (fixed) |
 
-🧠 = neural (ONNX Runtime); the rest is native DSP. A neural **Saturator** and a
-multiband **Harmonics** stage remain in the codebase but are not in the current
-default chain (re-enable by putting their id back in the order).
+🧠 = neural (ONNX Runtime); the rest is native DSP. A neural **Saturator**
+remains in the codebase but is not in the current default chain (re-enable by
+putting its id back in the order).
 
 ## 🚀 Quick start (macOS, Apple Silicon)
 
@@ -128,9 +128,15 @@ Standalone, dependency-free unit tests cover the DSP and the plugin contract:
 
 ```sh
 cd native/clap
-cmake --build build           # builds all test_* targets
-for t in build/test_*; do "$t" || break; done
+cmake --build build                        # builds all test_* targets
+ctest --test-dir build --output-on-failure # canonical suite (registered targets only)
 ```
+
+CTest only runs registered, freshly-built targets — unlike a `for t in
+build/test_*` glob, it can't silently keep running a stale binary whose target
+was deleted or renamed. It also runs `tests/test_ssl_integration.py` (skipped
+automatically unless `build/Axon.clap` + `axon_bench` are built), and
+`build.sh` re-runs the two fast meta↔plugin contract guards on every build.
 
 They cover the limiter (WOLA reconstruction, ceiling, drive, lookahead THD), the
 meter (LUFS cross-checked against a reference BS.1770 meter), bass mono, the EQ

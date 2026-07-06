@@ -322,16 +322,6 @@
     background: #0d0d0d;
   }
   #bc-crunch-canvas { display: block; }
-  #exc-band-wrap {
-    display: none;
-    margin-top: 10px;
-    flex-shrink: 0;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    overflow: hidden;
-    background: #0d0d0d;
-  }
-  #exc-band-canvas { display: block; }
 
   /* ── Layout shell ────────────────────────────────────────── */
   #app {
@@ -462,9 +452,6 @@
     <div id="lim-viz-wrap">
       <canvas id="lim-viz-canvas" width="660" height="108"></canvas>
     </div>
-    <div id="exc-band-wrap">
-      <canvas id="exc-band-canvas" width="660" height="194"></canvas>
-    </div>
     </div>
    </div><!-- /main-col -->
    <div id="meter-panel">
@@ -508,16 +495,11 @@ const PROCESSORS = [
       'SEQ_DRIVE',
       'SEQ_AUTO', 'SEQ_SPLIT', 'SEQ_CAL', 'SEQ_RESET',
     ], wetParams: ['SEQ_ON'] },
-  { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ_ENGINE', 'EQ_RENDER', 'EQ_FREEZE', 'EQ0','EQ1','EQ2','EQ3','EQ4'], wetParams: ['EQ'] },
+  { id: 1, name: 'AUTO EQ',   params: ['CLS', 'EQ', 'EQR', 'EQB', 'EQS', 'EQ_ENGINE', 'EQ_RENDER', 'EQ_FREEZE'], wetParams: ['EQ'] },
   // SATURATOR (id 2) removed from the chain for now — kept in the DSP/code,
   // just not exposed here. Re-add this entry + put 2 back in the order to restore.
   { id: 4, name: 'BUS COMP',  params: ['SSC', 'SSC_IN'],          wetParams: ['SSC'] },
   { id: 6, name: 'BASS MONO', params: ['BMI', 'BMF'],                   wetParams: ['BMI'] },
-  // HARMONICS (id 7) removed from the chain for now — kept in the DSP/code
-  // (MultibandExciter, the stage case, drawExcBand/buildListenButton, EXC_*
-  // params), just not exposed here. Re-add this entry + put 7 back in the order
-  // (and bump kNumStages) to restore.
-  // { id: 7, name: 'HARMONICS', params: ['EXC_ON','EXC_WARM','EXC_PRES'], wetParams: ['EXC_ON'] },
   { id: 8, name: 'REVERB',    params: ['RVB_MIX','RVB_SIZE','RVB_WIDTH','RVB_DAMP','RVB_LOWCUT'], wetParams: ['RVB_MIX'] },
   { id: 9, name: 'WIDENER',   params: ['WID_ON','WID_AMT','WID_FREQ','WID_AIR'], wetParams: ['WID_ON'] },
   { id: 5, name: 'LIMITER',   params: ['MLD', 'MLC', 'MLG', 'MLS', 'MLA'], wetParams: ['MLI'] },
@@ -855,35 +837,6 @@ function buildControl(id) {
 // RENDER CONTROL SURFACE
 // ============================================================
 
-// HARMONICS "LISTEN": press-and-hold to solo the added harmonics (EXC_SOLO is a
-// momentary switch). Held while the mouse is down; released on any window mouseup
-// (so dragging off the button still releases). The window listener is wired once.
-let _excSoloBtn = null;
-function _excSoloSet(on) {
-  if (!_excSoloBtn) return;
-  paramValues['EXC_SOLO'] = on ? 1 : 0;
-  sendParam('EXC_SOLO', on ? 1 : 0);
-  _excSoloBtn.classList.toggle('on', on);
-  const v = _excSoloBtn.parentElement && _excSoloBtn.parentElement.querySelector('.toggle-value');
-  if (v) v.textContent = on ? 'SOLO' : 'hold';
-}
-function buildListenButton() {
-  const wrap = document.createElement('div');
-  wrap.className = 'toggle-wrap';
-  wrap.innerHTML = `
-    <div class="toggle-btn">LISTEN</div>
-    <div class="toggle-label">Solo Harmonics</div>
-    <div class="toggle-value">hold</div>`;
-  _excSoloBtn = wrap.querySelector('.toggle-btn');
-  _excSoloBtn.addEventListener('mousedown', e => { e.preventDefault(); _excSoloSet(true); });
-  if (!window._excSoloWired) {
-    window._excSoloWired = true;
-    window.addEventListener('mouseup', () => _excSoloSet(false));
-    window.addEventListener('blur',    () => _excSoloSet(false));
-  }
-  return wrap;
-}
-
 function renderSurface() {
   const proc = PROCESSORS.find(p => p.id === selectedProc);
   const title = document.getElementById('surface-title');
@@ -904,9 +857,6 @@ function renderSurface() {
     if (ctrl) controls.appendChild(ctrl);
   }
 
-  // HARMONICS: press-and-hold "LISTEN" — momentary solo of the added harmonics.
-  if (proc.id === 7) controls.appendChild(buildListenButton());
-
   const showFilter = selectedProc === 2;
   satWrap.style.display = showFilter ? 'block' : 'none';
   if (showFilter) drawSatFilter();
@@ -922,11 +872,6 @@ function renderSurface() {
   const showBc = selectedProc === 4;   // Bus Comp = StageID 4
   if (bcWrap) bcWrap.style.display = showBc ? 'block' : 'none';
   if (showBc) drawBusCompCrunch();
-
-  const excWrap = document.getElementById('exc-band-wrap');
-  const showExc = selectedProc === 7;
-  excWrap.style.display = showExc ? 'block' : 'none';
-  if (showExc) drawExcBand();
 }
 
 // ============================================================
@@ -1142,130 +1087,12 @@ function drawSatFilter() {
 })();
 
 // ============================================================
-// EXCITER BAND DISPLAY
+// SPECTRUM FRAME CACHE
 // ============================================================
-// Shows the excited band (drag the Frequency / Tame edges) on a log axis, plus
-// a LIVE overlay of what the exciter is actually adding — computed as the
-// per-stage spectrum delta (after-exciter minus before-exciter), so you can see
-// which region is being excited the most and how the band edges shape it.
-
-// Latest spectrum frame, cached by drawSpectrum so the band display can draw
-// across frames and on band-edge drags.
-let excLastSpec = null;
-
-// Latest DIRECT exciter wet-spectrum frame (window.axonExciter): the magnitude
-// (dBFS) of exactly what the exciter ADDS, at log-spaced 20 Hz–20 kHz points.
-// This is what drawExcBand's amber overlay plots.
-let excWetSpec = null;
-
-// ── Crossover comb-transfer helpers (analytic, see drawExcBand) ──────────
-// 2nd-order Butterworth biquads matching exciter.hpp's design_hpf_/design_lpf_
-// (RBJ, Q=1/√2), and the complex frequency response of a normalized biquad.
-function excBiquadHPF(fc, sr) {
-  const w0 = 2 * Math.PI * fc / sr, cw = Math.cos(w0), sw = Math.sin(w0);
-  const alpha = sw / (2 * 0.70710678), a0 = 1 + alpha;
-  return { b0: (1 + cw) / 2 / a0, b1: -(1 + cw) / a0, b2: (1 + cw) / 2 / a0,
-           a1: -2 * cw / a0, a2: (1 - alpha) / a0 };
-}
-function excBiquadLPF(fc, sr) {
-  const w0 = 2 * Math.PI * fc / sr, cw = Math.cos(w0), sw = Math.sin(w0);
-  const alpha = sw / (2 * 0.70710678), a0 = 1 + alpha;
-  return { b0: (1 - cw) / 2 / a0, b1: (1 - cw) / a0, b2: (1 - cw) / 2 / a0,
-           a1: -2 * cw / a0, a2: (1 - alpha) / a0 };
-}
-function excBiquadResp(c, w) {  // complex H(e^{jw}) of a normalized biquad
-  const c1 = Math.cos(w), s1 = Math.sin(w), c2 = Math.cos(2 * w), s2 = Math.sin(2 * w);
-  const nr = c.b0 + c.b1 * c1 + c.b2 * c2, ni = -(c.b1 * s1 + c.b2 * s2);
-  const dr = 1 + c.a1 * c1 + c.a2 * c2, di = -(c.a1 * s1 + c.a2 * s2);
-  const dd = dr * dr + di * di;
-  return { re: (nr * dr + ni * di) / dd, im: (ni * dr - nr * di) / dd };
-}
-
-function drawExcBand() {
-  const canvas = document.getElementById('exc-band-canvas');
-  if (!canvas) return;
-  const W = canvas.width, H = canvas.height;
-  const ctx = canvas.getContext('2d');
-  const freqToX = f => satFreqToX(f, W);   // shared 20 Hz–20 kHz log mapping
-
-  ctx.fillStyle = '#0a0a0a';
-  ctx.fillRect(0, 0, W, H);
-
-  // Frequency grid + labels.
-  ctx.strokeStyle = '#1c1c1c';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([]);
-  [50, 100, 200, 500, 1000, 2000, 5000, 10000].forEach(f => {
-    const x = Math.round(freqToX(f)) + 0.5;
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-  });
-  ctx.font = '8px -apple-system, sans-serif';
-  ctx.fillStyle = '#2e2e2e';
-  ctx.textAlign = 'center';
-  [[100,'100'],[1000,'1k'],[10000,'10k']].forEach(([f, lbl]) => {
-    ctx.fillText(lbl, freqToX(f), H - 3);
-  });
-
-  // ── Fixed HARMONICS zones ──────────────────────────────────────────────
-  // Warmth excites the low-mids (even/2nd → body); Presence the highs
-  // (even+odd → air). The 1–3.5 kHz mid gap is left untouched by design.
-  const WARM_LO = 100, WARM_HI = 1000, PRES_LO = 3500, PRES_HI = 16500;
-  const AMBER = 'rgba(249,199,79,', CYAN = 'rgba(120,200,255,';
-  const warmX0 = freqToX(WARM_LO), warmX1 = freqToX(WARM_HI);
-  const presX0 = freqToX(PRES_LO), presX1 = freqToX(PRES_HI);
-  const warm = paramValues['EXC_WARM'] ?? (paramMeta['EXC_WARM']?.def ?? 0);
-  const pres = paramValues['EXC_PRES'] ?? (paramMeta['EXC_PRES']?.def ?? 0);
-  // Zone tint brightens with its knob, so engagement is visible even on dark/
-  // quiet material where the live excitation is faint (presence on a dark master
-  // can sit near −70 dBFS).
-  ctx.fillStyle = AMBER + (0.04 + 0.16 * warm) + ')'; ctx.fillRect(warmX0, 0, warmX1 - warmX0, H);
-  ctx.fillStyle = CYAN  + (0.04 + 0.16 * pres) + ')'; ctx.fillRect(presX0, 0, presX1 - presX0, H);
-
-  // ── Live added-harmonic overlay per band (DIRECT wet-spectrum) ──────────
-  // The DSP taps each band's actual WET contribution, FFT + EMA-smooths it, and
-  // streams a log-spaced dBFS array (warm / pres) via window.axonExciter. We draw
-  // THAT directly: the glow in each zone is exactly what that knob adds NOW, so
-  // it breathes with the program. Below/above each band the wet is ~0 → floor.
-  const EXC_FLO = 20, EXC_FHI = 20000;
-  const FLOOR = -90, CEIL = -30;   // wide/low window so faint presence shows
-  const yFor = db => { const h = Math.max(0, Math.min(1, (db - FLOOR) / (CEIL - FLOOR))); return H - h * H; };
-  const drawFill = (arr, rgb) => {
-    if (!Array.isArray(arr) || arr.length < 2) return false;
-    const N = arr.length; let any = false;
-    ctx.beginPath(); ctx.moveTo(0, H);
-    for (let i = 0; i < N; i++) {
-      const f = EXC_FLO * Math.pow(EXC_FHI / EXC_FLO, i / (N - 1));
-      const db = arr[i] ?? -120; if (db > FLOOR + 0.5) any = true;
-      ctx.lineTo(freqToX(f), yFor(db));
-    }
-    ctx.lineTo(W, H); ctx.closePath();
-    ctx.save(); ctx.shadowBlur = 8; ctx.shadowColor = rgb + '1)';
-    ctx.fillStyle = rgb + '0.28)'; ctx.fill();
-    ctx.strokeStyle = rgb + '0.85)'; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.restore();
-    return any;
-  };
-  let drew = false;
-  if (excWetSpec && excWetSpec.active) {
-    if (warm > 0) drew = drawFill(excWetSpec.warm, AMBER) || drew;
-    if (pres > 0) drew = drawFill(excWetSpec.pres, CYAN) || drew;
-  }
-  if (!drew) {
-    ctx.font = '8px -apple-system, sans-serif';
-    ctx.fillStyle = '#3a3a3a'; ctx.textAlign = 'center';
-    ctx.fillText((warm > 0 || pres > 0) ? 'play audio to see harmonics'
-                                        : 'raise Warmth or Presence', W / 2, H / 2);
-  }
-
-  // ── Zone labels ─────────────────────────────────────────────────────────
-  ctx.font = '8px -apple-system, sans-serif';
-  ctx.fillStyle = AMBER + '0.8)'; ctx.textAlign = 'center';
-  ctx.fillText('WARMTH', (warmX0 + warmX1) / 2, 12);
-  ctx.fillStyle = CYAN + '0.8)';
-  ctx.fillText('PRESENCE', (presX0 + presX1) / 2, 12);
-}
-
-// (HARMONICS has fixed Warmth/Presence zones — no draggable band edges.)
+// Latest spectrum frame, cached by drawSpectrum. Read by the Auto-EQ overlay
+// (eq_bins), window.axonSslCurve, and window.axonRenderSpectrum so they can
+// repaint across frames without waiting for the next analyzer push.
+let lastSpec = null;
 
 // ============================================================
 // CHAIN STRIP
@@ -1419,11 +1246,11 @@ window.axonInit = function(state) {
     '#bb86fc',  // 4 SslComp (BUS COMP)
     '#e76f51',  // 5 MelLimiter
     '#90be6d',  // 6 BassMono
-    '#f9c74f',  // 7 Exciter
+    '#f9c74f',  // 7 (retired — was Exciter; keep the slot, array is StageID-indexed)
     '#4ea8de',  // 8 Reverb
     '#c792ea',  // 9 Widener (lavender)
   ];
-  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', 'EQ', 'BUS COMP', 'LIMITER', 'BASS MONO', 'EXCITER', 'REVERB', 'WIDENER'];
+  const STAGE_NAMES = ['—', 'AUTO EQ', 'SAT', 'EQ', 'BUS COMP', 'LIMITER', 'BASS MONO', '—', 'REVERB', 'WIDENER'];
 
   const DB_MIN = -90, DB_MAX = 0;
 
@@ -1435,10 +1262,8 @@ window.axonInit = function(state) {
   }
 
   function drawSpectrum(data) {
-    // Cache the frame so the exciter band display can draw its live
-    // "what's being excited" overlay (post−pre spectrum delta).
-    excLastSpec = data;
-    if (selectedProc === 7) drawExcBand();
+    // Cache the frame so overlays (Auto-EQ bins, SSL curve) can repaint later.
+    lastSpec = data;
 
     const canvas = document.getElementById('spectrum-canvas');
     if (!canvas) return;
@@ -1710,7 +1535,7 @@ window.axonInit = function(state) {
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height, CY = H / 2, DB_RANGE = 12;
     const d2y = db => CY - Math.max(-1, Math.min(1, db / DB_RANGE)) * CY;
-    const autoBins = (excLastSpec && excLastSpec.eq_bins) ? excLastSpec.eq_bins : null;
+    const autoBins = (lastSpec && lastSpec.eq_bins) ? lastSpec.eq_bins : null;
     const sslBins  = sslCurveBins;
     const bx = binFreqs.map(f => freqToX(f, W));
     const line = (vals, color, width, dash, glow) => {
@@ -1752,9 +1577,9 @@ window.axonInit = function(state) {
 
   window.axonSpectrum = function(data) { paint(data); };
   // SSL total curve (manual bands + assist) pushed from C++ each ~21fps tick.
-  window.axonSslCurve = function(d) { sslCurveBins = (d && d.on) ? d.bins : null; paint(excLastSpec); };
+  window.axonSslCurve = function(d) { sslCurveBins = (d && d.on) ? d.bins : null; paint(lastSpec); };
   // Lets SSL knob/toggle edits repaint immediately (curve refreshes next C++ tick).
-  window.axonRenderSpectrum = function() { paint(excLastSpec); };
+  window.axonRenderSpectrum = function() { paint(lastSpec); };
 })();
 
 // ============================================================
@@ -2212,15 +2037,6 @@ window.axonBusComp = function(d) {
   if (selectedProc === 4) drawBusCompCrunch();
 };
 
-// DIRECT exciter wet-spectrum (the added contribution). Stores the latest frame
-// and redraws the band display when the exciter page (proc 7) is selected. It's
-// a live spectrum (already EMA-smoothed on the DSP side), so just the current
-// frame — no scrolling history needed.
-window.axonExciter = function(d) {
-  excWetSpec = d || null;
-  if (selectedProc === 7) drawExcBand();
-};
-
 // ============================================================
 // Meter-panel toggles (Auto Gain, Bypass) — meta switches, custom placement
 // ============================================================
@@ -2257,7 +2073,6 @@ window.axonSetParam = function(id, value) {
   }
 
   if ((id === 'SHF' || id === 'SLF') && selectedProc === 2) drawSatFilter();
-  if ((id === 'EXC_WARM' || id === 'EXC_PRES' || id === 'EXC_ON') && selectedProc === 7) drawExcBand();
   // Dynamic toggle (e.g. host automation) relabels Attack/Release knobs.
   if (id === 'MLA' && selectedProc === 5) renderSurface();
   if (id === 'AGN' || id === 'BYP') refreshPanelToggles();

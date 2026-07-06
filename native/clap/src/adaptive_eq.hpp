@@ -30,7 +30,9 @@
 #include <utility>
 #include <vector>
 
+#include "mel_scale.hpp"    // shared HTK hz↔mel + band-center helpers
 #include "meta.hpp"   // SpectralMaskEqParams (shared config with the renderer)
+#include "stft_common.hpp"  // shared Hann / ring-windowing / forward-FFT helpers
 #include "adaptive_eq_targets.hpp"   // GENERATED empirical tonal-balance curves
 
 namespace nablafx {
@@ -41,16 +43,9 @@ namespace adaptive_eq_detail {
 inline double erb_hz(double f) { return 24.7 * (4.37e-3 * f + 1.0); }
 
 // HTK-mel band centers — matches SpectralMaskEq::build_mel_ so the controller's
-// bands line up with the renderer's.
+// bands line up with the renderer's. (Shared implementation: mel_scale.hpp.)
 inline std::vector<double> mel_centers(const SpectralMaskEqParams& c) {
-    const double mmin = 2595.0 * std::log10(1.0 + c.f_min / 700.0);
-    const double mmax = 2595.0 * std::log10(1.0 + c.f_max / 700.0);
-    std::vector<double> out(c.n_bands);
-    for (int b = 0; b < c.n_bands; ++b) {
-        const double mel = mmin + (mmax - mmin) * (b + 1) / (c.n_bands + 1);
-        out[b] = std::min(700.0 * (std::pow(10.0, mel / 2595.0) - 1.0), 0.49 * c.sample_rate);
-    }
-    return out;
+    return mel_band_centers_htk(c.n_bands, c.f_min, c.f_max, 0.49 * c.sample_rate);
 }
 
 // Empirical tonal-balance target (relative dB): ~flat below 100 Hz, ~5 dB/oct
@@ -126,8 +121,7 @@ public:
         fft_ = vDSP_create_fftsetup(log2_, kFFTRadix2);
 
         window_.assign(n_fft_, 0.0f);
-        for (int n = 0; n < n_fft_; ++n)
-            window_[n] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * n / n_fft_));
+        make_hann(window_.data(), n_fft_);
         in_ring_.assign(n_fft_, 0.0f); in_fill_ = 0; since_ = 0;
         windowed_.assign(n_fft_, 0.0f);
         re_.assign(n_fft_ / 2, 0.0f); im_.assign(n_fft_ / 2, 0.0f);
@@ -179,13 +173,10 @@ private:
         band_wsum_.swap(o.band_wsum_); mel_db_.swap(o.mel_db_); centers_.swap(o.centers_);
     }
     void frame_() {
-        const int tail = n_fft_ - in_fill_;
-        vDSP_vmul(in_ring_.data() + in_fill_, 1, window_.data(), 1, windowed_.data(), 1, tail);
-        if (in_fill_ > 0)
-            vDSP_vmul(in_ring_.data(), 1, window_.data() + tail, 1, windowed_.data() + tail, 1, in_fill_);
+        window_ring_oldest_first(in_ring_.data(), in_fill_, n_fft_,
+                                 window_.data(), windowed_.data());
         DSPSplitComplex sc{re_.data(), im_.data()};
-        vDSP_ctoz(reinterpret_cast<DSPComplex*>(windowed_.data()), 2, &sc, 1, n_fft_ / 2);
-        vDSP_fft_zrip(fft_, &sc, 1, log2_, kFFTDirection_Forward);
+        forward_zrip(fft_, log2_, n_fft_, windowed_.data(), &sc);
         power_[0] = re_[0] * re_[0];
         power_[n_freq_ - 1] = im_[0] * im_[0];
         for (int k = 1; k < n_fft_ / 2; ++k) power_[k] = re_[k] * re_[k] + im_[k] * im_[k];
@@ -206,13 +197,13 @@ private:
         ++frames_;
     }
     void build_mel_() {
-        const double mel_min = 2595.0 * std::log10(1.0 + cfg_.f_min / 700.0);
-        const double mel_max = 2595.0 * std::log10(1.0 + cfg_.f_max / 700.0);
+        const double mel_min = hz_to_mel<double>(cfg_.f_min);
+        const double mel_max = hz_to_mel<double>(cfg_.f_max);
         std::vector<double> binpts(cfg_.n_bands + 2);
         centers_.assign(cfg_.n_bands, 0.0);
         for (int i = 0; i < cfg_.n_bands + 2; ++i) {
             const double mel = mel_min + (mel_max - mel_min) * i / (cfg_.n_bands + 1);
-            const double hz  = 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
+            const double hz  = mel_to_hz(mel);
             binpts[i] = std::min(std::max(hz * n_fft_ / cfg_.sample_rate, 0.0), (double)(n_freq_ - 1));
             if (i >= 1 && i <= cfg_.n_bands) centers_[i - 1] = hz;
         }

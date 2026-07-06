@@ -138,6 +138,7 @@ def _from_bundles(args) -> int:
         out_dir=Path(args.out),
         effect_name=args.effect_name,
         default_class=args.default_class,
+        allow_control_set_change=args.allow_control_set_change,
     )
     _print_summary(args, meta)
     return 0
@@ -175,6 +176,7 @@ def _from_runs(args) -> int:
             out_dir=Path(args.out),
             effect_name=args.effect_name,
             default_class=args.default_class,
+            allow_control_set_change=args.allow_control_set_change,
         )
         _print_summary(args, meta)
         return 0
@@ -242,6 +244,7 @@ def _from_class_dir(args) -> int:
             out_dir=Path(args.out),
             effect_name=args.effect_name,
             default_class=args.default_class,
+            allow_control_set_change=args.allow_control_set_change,
         )
         _print_summary(args, meta)
         return 0
@@ -268,6 +271,12 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--default-class", default=DEFAULT_ACTIVE_CLASS,
                         help=f"Class loaded by default in the plugin "
                              f"(one of {','.join(DEFAULT_CLASS_ORDER)}).")
+    parser.add_argument("--allow-control-set-change", action="store_true",
+                        help="Permit overwriting an existing axon_meta.json "
+                             "with a DIFFERENT control set (guard against "
+                             "composite.py drifting from the C++ read-set). "
+                             "Only pass this for an intentional control-set "
+                             "change made in lock-step with the C++.")
 
 
 def main(argv: list[str] | None = None) -> int:

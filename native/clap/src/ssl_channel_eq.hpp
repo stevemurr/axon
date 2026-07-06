@@ -22,7 +22,7 @@
 // fit of the SSL band gains (fixed centres) to a target dB curve.
 //
 // Pure DSP — no CLAP/ORT/Accelerate deps, unit-testable standalone (cf.
-// exciter.hpp, bass_mono.hpp, rational_a.hpp).
+// bass_mono.hpp, rational_a.hpp).
 
 #pragma once
 
@@ -32,27 +32,18 @@
 #include <cstddef>
 #include <vector>
 
+#include "biquad.hpp"
 #include "rational_a.hpp"
 
 namespace nablafx {
 
 // ---------------------------------------------------------------------------
-// Direct-form-I biquad (double state). set() takes already-a0-normalized coeffs.
+// Cascade section: the shared TDF2 biquad (set() takes already-a0-normalized
+// coeffs) + a complex-based magnitude probe. mag() stays HERE (deliberately
+// different evaluation from IirFilterbankEq's trig-based mag_db() — do not
+// merge).
 // ---------------------------------------------------------------------------
-struct SslBiquad {
-    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-    double z1 = 0, z2 = 0;
-
-    double process(double x) {
-        double y = b0 * x + z1;
-        z1 = b1 * x - a1 * y + z2;
-        z2 = b2 * x - a2 * y;
-        return y;
-    }
-    void clear() { z1 = z2 = 0; }
-    void set(double nb0, double nb1, double nb2, double na1, double na2) {
-        b0 = nb0; b1 = nb1; b2 = nb2; a1 = na1; a2 = na2;
-    }
+struct SslBiquad : BiquadTDF2 {
     // |H(e^{jw})| for w = 2*pi*f/fs.
     double mag(double w) const {
         std::complex<double> z1c = std::polar(1.0, -w);
@@ -164,7 +155,7 @@ public:
     void reset() {
         for (auto& ch : ch_)
             for (auto& b : ch) b.clear();
-        // force redesign on next set_params (cf. exciter.hpp reset())
+        // force redesign on next set_params
         have_last_ = false;
         dirty_ = true;
     }
@@ -175,7 +166,7 @@ public:
     }
 
     void set_params(const SslEqParamsRT& p) {
-        if (have_last_ && p == last_) return;   // change-guard (cf. exciter sat_hpf)
+        if (have_last_ && p == last_) return;   // change-guard
         last_ = p; have_last_ = true;
         design_(p);
     }

@@ -84,6 +84,12 @@ DEFAULT_CLASS_ORDER: Tuple[str, ...] = ("bass", "drums", "vocals", "other", "ful
 DEFAULT_ACTIVE_CLASS: str = "full_mix"
 
 
+def _ctl(cid: str, name: str, mn: float, mx: float, default: float,
+         unit: str = "", skew: float = 1.0) -> Dict[str, Any]:
+    return {"id": cid, "name": name, "min": mn, "max": mx,
+            "default": default, "skew": skew, "unit": unit}
+
+
 def _build_default_meta(
     model_id: str,
     sample_rate: int,
@@ -101,82 +107,101 @@ def _build_default_meta(
         # Stable ordering — the CLS control's integer value indexes into this.
         "class_order":   list(classes),
     }
-    controls = {
-        "LVL": {"id": "LVL", "name": "Leveler",     "min": 0.0,   "max": 1.0,
-                "default": 0.0, "skew": 1.0, "unit": ""},
-        "LVT": {"id": "LVT", "name": "Lev Target",  "min": -36.0, "max": -6.0,
-                "default": -14.0, "skew": 1.0, "unit": "LUFS"},
-        "SDR": {"id": "SDR", "name": "Sat Drive",   "min": 0.0,   "max": 24.0,
-                "default": 0.0, "skew": 1.0, "unit": "dB"},
-        "SVO": {"id": "SVO", "name": "Sat Output",  "min": -24.0, "max": 12.0,
-                "default": 0.0, "skew": 1.0, "unit": "dB"},
-        "SMX": {"id": "SMX", "name": "Sat Mix",     "min": 0.0,   "max": 1.0,
-                "default": 0.0, "skew": 1.0, "unit": ""},
-        "SHF": {"id": "SHF", "name": "Sat HPF",    "min": 20.0,  "max": 500.0,
-                "default": 20.0, "skew": 1.0, "unit": "Hz"},
-        "STH": {"id": "STH", "name": "Sat Thresh", "min": -24.0, "max": 0.0,
-                "default": 0.0, "skew": 1.0, "unit": "dB"},
-        "SBS": {"id": "SBS", "name": "Sat Bias",   "min": -0.5,  "max": 0.5,
-                "default": 0.0, "skew": 1.0, "unit": ""},
-        "SSC": {"id": "SSC", "name": "Bus Comp",       "min": 0.0,   "max": 1.0,
-                "default": 0.0, "skew": 1.0, "unit": ""},
-        # Input trim feeding the fixed-curve bus-comp model (sets its operating
-        # point). The reciprocal make-up is applied to the wet output in the
-        # plugin so a static trim is level-neutral.
-        "SSC_IN": {"id": "SSC_IN", "name": "Input",    "min": -24.0, "max": 12.0,
-                "default": 0.0, "skew": 1.0, "unit": "dB"},
-        # Aphex-style aural exciter (band-limited parallel harmonic sheen).
-        # EXC_ON is the stage on/off toggle; EXC_AMT the wet/parallel blend.
-        "EXC_ON":    {"id": "EXC_ON",    "name": "Exciter",   "min": 0.0,    "max": 1.0,
-                      "default": 1.0,     "skew": 1.0, "unit": "switch"},
-        "EXC_AMT":   {"id": "EXC_AMT",   "name": "Amount",    "min": 0.0,    "max": 1.0,
-                      "default": 1.0,    "skew": 1.0, "unit": ""},
-        "EXC_FREQ":  {"id": "EXC_FREQ",  "name": "Frequency", "min": 1000.0, "max": 12000.0,
-                      "default": 3000.0, "skew": 1.0, "unit": "Hz"},
-        "EXC_DRIVE": {"id": "EXC_DRIVE", "name": "Intensity", "min": 0.0,    "max": 24.0,
-                      "default": 16.1,    "skew": 1.0, "unit": "dB"},
-        "EXC_CHAR":  {"id": "EXC_CHAR",  "name": "Warm ◐ Bright", "min": 0.0, "max": 1.0,
-                      "default": 0.5,   "skew": 1.0, "unit": ""},
-        "EXC_LPF":   {"id": "EXC_LPF",   "name": "Tame",      "min": 5000.0, "max": 20000.0,
-                      "default": 18000.0,"skew": 1.0, "unit": "Hz"},
+    # CONTRACT: this list must equal, exactly, the set of controls the C++
+    # plugin reads (the `c.id == "..."` compares in
+    # native/clap/src/axon_plugin.cpp — resolve_amount_ et al.). Two guards
+    # pin it:
+    #   - native/clap/tests/test_control_contract.cpp diffs the SHIPPED
+    #     weights/axon_bundle/axon_meta.json against the C++ read-set (and
+    #     native/clap/build.sh runs it on every build);
+    #   - axon/export/test_composite_contract.py diffs THIS function's output
+    #     against the shipped json, so a re-export can never silently drop or
+    #     resurrect controls (this drifted badly once: 9 dead controls
+    #     emitted, 40 live ones missing).
+    # export_composite_bundle() additionally refuses to overwrite an existing
+    # axon_meta.json with a different control set unless explicitly allowed.
+    control_list: List[Dict[str, Any]] = [
+        # Saturator (RationalA + drive/trim/mix/filters).
+        _ctl("SDR", "Sat Drive",   0.0,   24.0,  0.0, "dB"),
+        _ctl("SVO", "Sat Output", -24.0,  12.0,  0.0, "dB"),
+        _ctl("SMX", "Sat Mix",     0.0,    1.0,  0.0),
+        _ctl("SHF", "Sat HPF",    20.0,  500.0, 20.0, "Hz"),
+        _ctl("SLF", "Sat LPF",  1000.0, 20000.0, 20000.0, "Hz"),
+        _ctl("STH", "Sat Thresh", -24.0,   0.0,  0.0, "dB"),
+        _ctl("SBS", "Sat Bias",   -0.5,    0.5,  0.0),
+        # SSL bus comp: wet mix + input trim feeding the fixed-curve model
+        # (sets its operating point; the reciprocal make-up is applied to the
+        # wet output in the plugin so a static trim is level-neutral).
+        _ctl("SSC",    "Bus Comp",  0.0,  1.0, 1.0, "switch"),
+        _ctl("SSC_IN", "Input",   -24.0, 12.0, 0.0, "dB"),
+        # Auto-EQ: class select, wet mix, range/boost/speed shaping, engine
+        # (neural LSTM vs deterministic cascade), renderer (STFT mask vs
+        # zero-latency IIR bank), freeze (hold last live-solved curve).
+        _ctl("CLS", "EQ Class", 0.0, float(max(0, n_classes - 1)),
+             float(default_idx), "enum"),
+        _ctl("EQ",        "Auto EQ",        0.0,   1.0,   1.0),
+        _ctl("EQR",       "EQ Range",       0.0,   1.0,   1.0),
+        _ctl("EQB",       "EQ Boost",       0.0,   1.0,   1.0),
+        _ctl("EQS",       "EQ Speed",      10.0, 500.0, 100.0, "ms"),
+        _ctl("EQ_ENGINE", "AutoEQ Engine",  0.0,   1.0,   0.0, "switch"),
+        _ctl("EQ_RENDER", "AutoEQ Renderer",0.0,   1.0,   1.0, "switch"),
+        _ctl("EQ_FREEZE", "AutoEQ Freeze",  0.0,   1.0,   0.0, "switch"),
+        # Output trim.
+        _ctl("TRM", "Output Trim", -12.0, 12.0, 0.0, "dB"),
+        # Mel limiter.
+        _ctl("MLI", "Limiter",         0.0,  1.0, 1.0),
+        _ctl("MLC", "Ceiling",       -12.0,  0.0, 0.0, "dBFS"),
+        _ctl("MLD", "Drive",           0.0, 24.0, 2.0, "dB"),
+        _ctl("MLG", "Adaptive Gain",   0.0,  1.0, 0.5),
+        _ctl("MLS", "Adaptive Speed",  0.0,  1.0, 0.5),
+        _ctl("MLA", "Dynamic",         0.0,  1.0, 1.0, "switch"),
+        # Bass mono (mono-below-cutoff).
+        _ctl("BMI", "Bass Mono",  0.0,   1.0,   1.0, "switch"),
+        _ctl("BMF", "Frequency", 20.0, 500.0, 225.0, "Hz"),
         # Transparent mastering room reverb (8-line FDN).
         # RVB_MIX is the parallel wet blend (0 = bypass, bit-identical).
-        "RVB_MIX":    {"id": "RVB_MIX",    "name": "Mix",     "min": 0.0,    "max": 1.0,
-                       "default": 1.0,     "skew": 1.0, "unit": ""},
-        "RVB_SIZE":   {"id": "RVB_SIZE",   "name": "Size",    "min": 0.0,    "max": 1.0,
-                       "default": 0.30,    "skew": 1.0, "unit": ""},
-        "RVB_WIDTH":  {"id": "RVB_WIDTH",  "name": "Width",   "min": 0.0,    "max": 1.0,
-                       "default": 1.0,    "skew": 1.0, "unit": ""},
-        "RVB_DAMP":   {"id": "RVB_DAMP",   "name": "Damp",    "min": 2000.0, "max": 18000.0,
-                       "default": 7000.0,  "skew": 1.0, "unit": "Hz"},
-        "RVB_LOWCUT": {"id": "RVB_LOWCUT", "name": "Low Cut", "min": 20.0,   "max": 1000.0,
-                       "default": 250.0,   "skew": 1.0, "unit": "Hz"},
-        # Transparent M/S stereo widener (frequency-dependent side gain; mono-safe).
-        # WID_ON is the stage on/off toggle; WID_AMT the side width gain (1=neutral).
-        "WID_ON":   {"id": "WID_ON",   "name": "Width",  "min": 0.0,    "max": 1.0,
-                     "default": 1.0,    "skew": 1.0, "unit": "switch"},
-        "WID_AMT":  {"id": "WID_AMT",  "name": "Amount", "min": 0.0,    "max": 2.0,
-                     "default": 1.38,   "skew": 1.0, "unit": ""},
-        "WID_FREQ": {"id": "WID_FREQ", "name": "Low",    "min": 50.0,   "max": 1000.0,
-                     "default": 250.0,  "skew": 1.0, "unit": "Hz"},
-        "WID_AIR":  {"id": "WID_AIR",  "name": "Air",    "min": 0.0,    "max": 1.0,
-                     "default": 1.0,    "skew": 1.0, "unit": ""},
-        "CLS": {"id": "CLS", "name": "EQ Class",
-                "min": 0.0, "max": float(max(0, n_classes - 1)),
-                "default": float(default_idx), "skew": 1.0, "unit": "enum"},
-        "EQ":  {"id": "EQ",  "name": "Auto EQ",     "min": 0.0,   "max": 1.0,
-                "default": 0.0, "skew": 1.0, "unit": ""},
-        "EQR": {"id": "EQR", "name": "EQ Range",    "min": 0.0,   "max": 1.0,
-                "default": 1.0, "skew": 1.0, "unit": ""},
-        "EQS": {"id": "EQS", "name": "EQ Speed",    "min": 10.0,  "max": 500.0,
-                "default": 100.0, "skew": 1.0, "unit": "ms"},
-        "OLV": {"id": "OLV", "name": "Out Leveler",  "min": 0.0,   "max": 1.0,
-                "default": 0.0, "skew": 1.0, "unit": ""},
-        "OLT": {"id": "OLT", "name": "Out Lev Target", "min": -36.0, "max": -6.0,
-                "default": -14.0, "skew": 1.0, "unit": "LUFS"},
-        "TRM": {"id": "TRM", "name": "Output Trim", "min": -12.0, "max": 12.0,
-                "default": 0.0, "skew": 1.0, "unit": "dB"},
-    }
+        _ctl("RVB_MIX",    "Mix",       0.0,     1.0,    1.0),
+        _ctl("RVB_SIZE",   "Size",      0.0,     1.0,    0.30),
+        _ctl("RVB_WIDTH",  "Width",     0.0,     1.0,    1.0),
+        _ctl("RVB_DAMP",   "Damp",   2000.0, 18000.0, 7000.0, "Hz"),
+        _ctl("RVB_LOWCUT", "Low Cut",  20.0,  1000.0,  250.0, "Hz"),
+        # Transparent M/S stereo widener (frequency-dependent side gain;
+        # mono-safe). WID_ON toggles the stage; WID_AMT is the side width
+        # gain (1 = neutral).
+        _ctl("WID_ON",   "Width",   0.0,    1.0,   1.0, "switch"),
+        _ctl("WID_AMT",  "Amount",  0.0,    2.0,   1.38),
+        _ctl("WID_FREQ", "Low",    50.0, 1000.0, 250.0, "Hz"),
+        _ctl("WID_AIR",  "Air",     0.0,    1.0,   1.0),
+        # Auto gain (level match) + master bypass.
+        _ctl("AGN", "Auto Gain", 0.0, 1.0, 1.0, "switch"),
+        _ctl("BYP", "Bypass",    0.0, 1.0, 0.0, "switch"),
+        # SSL 9000 J channel EQ (SEQ_*). SEQ_ON defaults OFF so the stage is
+        # a bit-identical bypass out of the box. SEQ_AUTO/SPLIT/CAL/RESET are
+        # the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
+        _ctl("SEQ_ON",      "EQ",            0.0,     1.0,     0.0, "switch"),
+        _ctl("SEQ_LF_G",    "LF Gain",     -18.0,    18.0,     0.0, "dB"),
+        _ctl("SEQ_LF_F",    "LF Freq",      30.0,   600.0,   100.0, "Hz"),
+        _ctl("SEQ_LF_BELL", "LF Bell",       0.0,     1.0,     0.0, "switch"),
+        _ctl("SEQ_LMF_G",   "LMF Gain",    -18.0,    18.0,     0.0, "dB"),
+        _ctl("SEQ_LMF_F",   "LMF Freq",     60.0,  3000.0,   500.0, "Hz"),
+        _ctl("SEQ_LMF_Q",   "LMF Q",         0.1,     4.0,     1.0),
+        _ctl("SEQ_HMF_G",   "HMF Gain",    -18.0,    18.0,     0.0, "dB"),
+        _ctl("SEQ_HMF_F",   "HMF Freq",    400.0, 20000.0,  3000.0, "Hz"),
+        _ctl("SEQ_HMF_Q",   "HMF Q",         0.1,     4.0,     1.0),
+        _ctl("SEQ_HF_G",    "HF Gain",     -18.0,    18.0,     0.0, "dB"),
+        _ctl("SEQ_HF_F",    "HF Freq",    1500.0, 20000.0, 10000.0, "Hz"),
+        _ctl("SEQ_HF_BELL", "HF Bell",       0.0,     1.0,     0.0, "switch"),
+        _ctl("SEQ_HPF_ON",  "HPF",           0.0,     1.0,     0.0, "switch"),
+        _ctl("SEQ_HPF_F",   "HPF Freq",     20.0,   500.0,    80.0, "Hz"),
+        _ctl("SEQ_LPF_ON",  "LPF",           0.0,     1.0,     0.0, "switch"),
+        _ctl("SEQ_LPF_F",   "LPF Freq",   3000.0, 22000.0, 20000.0, "Hz"),
+        _ctl("SEQ_DRIVE",   "Colour",        0.0,     1.0,     0.0),
+        _ctl("SEQ_AUTO",    "Auto Assist",   0.0,     1.0,     0.0),
+        _ctl("SEQ_SPLIT",   "Split",         0.0,     1.0,     0.6),
+        _ctl("SEQ_CAL",     "Recalibrate",   0.0,     1.0,     0.0, "switch"),
+        _ctl("SEQ_RESET",   "Reset",         0.0,     1.0,     0.0, "switch"),
+    ]
+    controls = {c["id"]: c for c in control_list}
     return CompositePluginMeta(
         model_id=model_id,
         sample_rate=sample_rate,
@@ -227,6 +252,7 @@ def export_composite_bundle(
     effect_name: str = "Axon",
     default_class: str = DEFAULT_ACTIVE_CLASS,
     class_order: Optional[List[str]] = None,
+    allow_control_set_change: bool = False,
 ) -> CompositePluginMeta:
     """Validate sub-bundles, copy them under ``out_dir``, and write
     ``axon_meta.json``.
@@ -234,6 +260,14 @@ def export_composite_bundle(
     ``auto_eq_bundles`` is a mapping of class name → directory holding a
     ``nablafx-export`` bundle for that class's controller+DSP. All classes must
     share the same SpectralMaskEQ geometry.
+
+    If ``out_dir`` already holds an ``axon_meta.json`` (the normal case: the
+    canonical flow re-exports over ``weights/axon_bundle``), the new control
+    set must equal the existing one — this module has silently drifted from
+    the C++ read-set before, and a drifted re-export builds and installs
+    cleanly while stages stall at their defaults. Pass
+    ``allow_control_set_change=True`` for an intentional control-set change
+    (and update the C++ + run native/clap tests in lock-step).
     """
     if not auto_eq_bundles:
         raise ValueError("auto_eq_bundles must contain at least one class")
@@ -329,5 +363,31 @@ def export_composite_bundle(
     meta = CompositePluginMeta(
         **{**asdict(meta), "effect_name": effect_name},
     )
-    (out_dir / "axon_meta.json").write_text(json.dumps(asdict(meta), indent=2) + "\n")
+
+    # Drift guard: never silently regenerate a different control set over an
+    # existing bundle (see docstring). Key-set comparison only — ranges and
+    # defaults may be tuned freely; adding/dropping a control id is what
+    # breaks the meta<->C++ contract.
+    meta_path = out_dir / "axon_meta.json"
+    if meta_path.is_file() and not allow_control_set_change:
+        try:
+            old_controls = set(json.loads(meta_path.read_text())
+                               .get("controls", {}).keys())
+        except (OSError, ValueError):
+            old_controls = None
+        if old_controls is not None:
+            new_controls = set(meta.controls.keys())
+            if new_controls != old_controls:
+                missing = sorted(old_controls - new_controls)
+                added = sorted(new_controls - old_controls)
+                raise ValueError(
+                    "export would change the control set of the existing "
+                    f"{meta_path} (would drop {missing}, would add {added}). "
+                    "This usually means _build_default_meta drifted from the "
+                    "C++ read-set. If the change is intentional, pass "
+                    "allow_control_set_change=True and update "
+                    "native/clap/src/axon_plugin.cpp + tests in lock-step."
+                )
+
+    meta_path.write_text(json.dumps(asdict(meta), indent=2) + "\n")
     return meta

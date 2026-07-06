@@ -155,6 +155,14 @@ if [ "$NEED_CONFIGURE" -eq 1 ]; then
 fi
 cmake --build "$BUILD_DIR" -j
 
+# Fast contract guards (<1s total). The meta<->C++ control contract and the
+# composite-meta loader guards must hold BEFORE anything is packaged: a
+# re-exported bundle with a drifted control set would otherwise build,
+# codesign and install cleanly, and only fail if someone remembers to run the
+# test suite by hand. set -eu aborts the build on any failure.
+"$BUILD_DIR/test_control_contract"
+"$BUILD_DIR/test_composite_meta_validate"
+
 # shellcheck disable=SC1091
 . "$BUILD_DIR/build_config.sh"
 
@@ -200,18 +208,15 @@ cp "$NABLAFX_CLAP_ORT_DYLIB" "$OUT/Contents/Frameworks/"
 # obvious diagnostic).
 COPIED_DYLIB="$OUT/Contents/MacOS/$EXECUTABLE"
 EXPECTED_META=$([ "$MODE" = "axon" ] && echo "axon_meta.json" || echo "plugin_meta.json")
-WRONG_META=$(  [ "$MODE" = "axon" ] && echo "plugin_meta.json" || echo "axon_meta.json")
 if ! /usr/bin/strings "$COPIED_DYLIB" | grep -q "$EXPECTED_META"; then
     echo "error: $COPIED_DYLIB is missing expected meta-string '$EXPECTED_META'." >&2
     echo "       This means the wrong dylib was copied for MODE=$MODE." >&2
     echo "       (Likely a stale build/; try: rm -rf $BUILD_DIR && retry)" >&2
     exit 1
 fi
-if /usr/bin/strings "$COPIED_DYLIB" | grep -q "$WRONG_META" \
-   && ! /usr/bin/strings "$COPIED_DYLIB" | grep -q "$EXPECTED_META"; then
-    echo "error: $COPIED_DYLIB looks like the wrong-mode binary." >&2
-    exit 1
-fi
+# NOTE: no "wrong-mode string present" check — axon_clap.so legitimately
+# contains BOTH meta-filename strings (it loads sub-bundle plugin_meta.json
+# files), so only the positive check above carries signal.
 ln -sf "$(basename "$NABLAFX_CLAP_ORT_DYLIB")" \
        "$OUT/Contents/Frameworks/libonnxruntime.dylib"
 

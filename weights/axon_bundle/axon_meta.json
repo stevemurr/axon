@@ -233,15 +233,6 @@
       "skew": 1.0,
       "unit": "Hz"
     },
-    "EXC_ON": {
-      "id": "EXC_ON",
-      "name": "Harmonics",
-      "min": 0.0,
-      "max": 1.0,
-      "default": 1.0,
-      "skew": 1.0,
-      "unit": "switch"
-    },
     "EQ_ENGINE": {
       "id": "EQ_ENGINE",
       "name": "AutoEQ Engine",
@@ -263,33 +254,6 @@
     "EQ_FREEZE": {
       "id": "EQ_FREEZE",
       "name": "AutoEQ Freeze",
-      "min": 0.0,
-      "max": 1.0,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": "switch"
-    },
-    "EXC_WARM": {
-      "id": "EXC_WARM",
-      "name": "Warmth",
-      "min": 0.0,
-      "max": 1.0,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": ""
-    },
-    "EXC_PRES": {
-      "id": "EXC_PRES",
-      "name": "Presence",
-      "min": 0.0,
-      "max": 1.0,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": ""
-    },
-    "EXC_SOLO": {
-      "id": "EXC_SOLO",
-      "name": "Listen",
       "min": 0.0,
       "max": 1.0,
       "default": 0.0,

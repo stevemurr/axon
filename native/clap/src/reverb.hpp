@@ -33,7 +33,7 @@
 //     Damp. At mix == 0 the output is BIT-IDENTICAL to the input (early return).
 //
 // Header-only, pure DSP in namespace nablafx, NO CLAP/ORT/std deps beyond the
-// standard library — unit-testable standalone (cf. exciter.hpp, bass_mono.hpp).
+// standard library — unit-testable standalone (cf. bass_mono.hpp).
 //
 //   Reverb rv;
 //   rv.prepare(44100.0);
@@ -49,6 +49,8 @@
 #include <array>
 #include <cmath>
 #include <vector>
+
+#include "biquad.hpp"
 
 namespace nablafx {
 
@@ -194,20 +196,7 @@ public:
 
 private:
     // One-pole / biquad helpers ------------------------------------------------
-    struct Biquad {
-        double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-        double z1 = 0, z2 = 0;
-        double process(double x) {
-            double y = b0 * x + z1;
-            z1 = b1 * x - a1 * y + z2;
-            z2 = b2 * x - a2 * y;
-            return y;
-        }
-        void clear() { z1 = z2 = 0; }
-        void set(double nb0, double nb1, double nb2, double na1, double na2) {
-            b0 = nb0; b1 = nb1; b2 = nb2; a1 = na1; a2 = na2;
-        }
-    };
+    using Biquad = BiquadTDF2;
 
     struct Line {
         std::vector<double> buf;   // delay ring (sized in prepare to max length)
@@ -264,17 +253,8 @@ private:
         double lc = lowcut_hz_;
         if (lc < 20.0) lc = 20.0;
         if (lc > 0.49 * sr_) lc = 0.49 * sr_;
-        const double w0 = 2.0 * M_PI * lc / sr_;
-        const double cw = std::cos(w0), sw = std::sin(w0);
-        const double Q  = 0.70710678;
-        const double alpha = sw / (2.0 * Q);
-        const double a0 = 1.0 + alpha;
-        const double hb0 = (1.0 + cw) / 2.0 / a0;
-        const double hb1 = -(1.0 + cw) / a0;
-        const double ha1 = -2.0 * cw / a0;
-        const double ha2 = (1.0 - alpha) / a0;
-        send_hpf_[0].set(hb0, hb1, hb0, ha1, ha2);
-        send_hpf_[1].set(hb0, hb1, hb0, ha1, ha2);
+        rbj_butterworth_hpf(lc, sr_, send_hpf_[0]);
+        rbj_butterworth_hpf(lc, sr_, send_hpf_[1]);
 
         // --- Wet normalisation (approx energy) -------------------------------
         // Bigger/darker rooms ring louder for the same Mix. Scale the wet so a

@@ -3,9 +3,9 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace nablafx {
+#include "mel_scale.hpp"
 
-static constexpr float kPi = static_cast<float>(M_PI);
+namespace nablafx {
 
 // ---------------------------------------------------------------------------
 // Construction / init
@@ -37,8 +37,7 @@ void MelLimiter::init(int sample_rate) {
 
     // Hann window.
     window_.resize(kFFTSize);
-    for (int n = 0; n < kFFTSize; ++n)
-        window_[n] = 0.5f * (1.f - std::cos(2.f * kPi * n / kFFTSize));
+    make_hann(window_.data(), kFFTSize);
     window_sq_.resize(kFFTSize);
     vDSP_vmul(window_.data(), 1, window_.data(), 1, window_sq_.data(), 1, kFFTSize);
 
@@ -53,8 +52,7 @@ void MelLimiter::init(int sample_rate) {
     const int dry_sz  = kLatency + kHopSize;
     for (auto& ch : ch_) {
         ch.in_ring.assign(kFFTSize, 0.f);
-        ch.out_ring.assign(ola_sz, 0.f);
-        ch.norm_ring.assign(ola_sz, 0.f);
+        ch.ola.assign(ola_sz);
         ch.dry_ring.assign(dry_sz, 0.f);
         ch.windowed.resize(kFFTSize, 0.f);
         ch.sp_re.resize(kFFTSize / 2, 0.f);
@@ -75,16 +73,14 @@ void MelLimiter::init(int sample_rate) {
 void MelLimiter::reset() {
     for (auto& ch : ch_) {
         std::fill(ch.in_ring.begin(),    ch.in_ring.end(),    0.f);
-        std::fill(ch.out_ring.begin(),   ch.out_ring.end(),   0.f);
-        std::fill(ch.norm_ring.begin(),  ch.norm_ring.end(),  0.f);
         std::fill(ch.dry_ring.begin(),   ch.dry_ring.end(),   0.f);
         std::fill(ch.windowed.begin(),   ch.windowed.end(),   0.f);
         std::fill(ch.sp_re.begin(),      ch.sp_re.end(),      0.f);
         std::fill(ch.sp_im.begin(),      ch.sp_im.end(),      0.f);
         std::fill(ch.time_out.begin(),   ch.time_out.end(),   0.f);
         std::fill(ch.la_ring.begin(),    ch.la_ring.end(),    0.f);
+        ch.ola.clear();
         ch.in_fill = ch.samples_since = 0;
-        ch.out_write = ch.out_read = ch.out_avail = 0;
         ch.dry_write = 0;
         ch.wet_z1 = 0.f;
     }
@@ -101,13 +97,13 @@ void MelLimiter::reset() {
 
 void MelLimiter::build_mel_() {
     constexpr float f_min = 20.f, f_max = 20000.f;
-    const float mel_min = 2595.f * std::log10(1.f + f_min / 700.f);
-    const float mel_max = 2595.f * std::log10(1.f + f_max / 700.f);
+    const float mel_min = hz_to_mel<float>(f_min);
+    const float mel_max = hz_to_mel<float>(f_max);
 
     std::vector<float> bin_pts(kNumBands + 2);
     for (int i = 0; i < kNumBands + 2; ++i) {
         float mel  = mel_min + (mel_max - mel_min) * i / (kNumBands + 1);
-        float hz   = 700.f * (std::pow(10.f, mel / 2595.f) - 1.f);
+        float hz   = mel_to_hz<float>(mel);
         bin_pts[i] = std::clamp(hz * kFFTSize / static_cast<float>(sr_),
                                 0.f, static_cast<float>(n_freq_ - 1));
     }
@@ -342,19 +338,14 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
         if (ch_[0].samples_since >= kHopSize) {
             for (int c = 0; c < n_ch; ++c) ch_[c].samples_since = 0;
 
-            // ── Forward FFT for each channel so solve_gains_ can read spectra.
+            // ── Forward FFT for each channel so solve_gains_ can read spectra
+            //    (shared two-segment vmul / ctoz+zrip helpers — stft_common.hpp).
             for (int c = 0; c < n_ch; ++c) {
                 auto& ch = ch_[c];
-                const int tail = kFFTSize - ch.in_fill;
-                vDSP_vmul(ch.in_ring.data() + ch.in_fill, 1, window_.data(),      1,
-                          ch.windowed.data(),              1, static_cast<vDSP_Length>(tail));
-                if (ch.in_fill > 0)
-                    vDSP_vmul(ch.in_ring.data(), 1, window_.data() + tail, 1,
-                              ch.windowed.data() + tail, 1, static_cast<vDSP_Length>(ch.in_fill));
+                window_ring_oldest_first(ch.in_ring.data(), ch.in_fill, kFFTSize,
+                                         window_.data(), ch.windowed.data());
                 DSPSplitComplex sp{ch.sp_re.data(), ch.sp_im.data()};
-                vDSP_ctoz(reinterpret_cast<DSPComplex*>(ch.windowed.data()), 2,
-                          &sp, 1, kFFTSize / 2);
-                vDSP_fft_zrip(fft_setup_, &sp, 1, log2n_, kFFTDirection_Forward);
+                forward_zrip(fft_setup_, log2n_, kFFTSize, ch.windowed.data(), &sp);
             }
 
             // ── Solve per-band target gains.
@@ -411,27 +402,15 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
                 vDSP_ztoc(&sp, 1,
                           reinterpret_cast<DSPComplex*>(ch.time_out.data()), 2, kFFTSize / 2);
 
-                // Synthesis window + OLA.
+                // Synthesis window + OLA (shared OlaAccumulator; MelLimiter
+                // keeps its historical unclamped avail policy — see
+                // stft_common.hpp).
                 vDSP_vmul(ch.time_out.data(), 1, window_.data(), 1,
                           ch.windowed.data(), 1, kFFTSize);
                 vDSP_vsmul(ch.windowed.data(), 1, &ola_scale_,
                            ch.windowed.data(), 1, kFFTSize);
-
-                const int ola_sz = static_cast<int>(ch.out_ring.size());
-                const int seg1   = std::min(kFFTSize, ola_sz - ch.out_write);
-                const int seg2   = kFFTSize - seg1;
-                vDSP_vadd(ch.windowed.data(),    1, ch.out_ring.data()  + ch.out_write, 1,
-                          ch.out_ring.data()  + ch.out_write, 1, static_cast<vDSP_Length>(seg1));
-                vDSP_vadd(window_sq_.data(),     1, ch.norm_ring.data() + ch.out_write, 1,
-                          ch.norm_ring.data() + ch.out_write, 1, static_cast<vDSP_Length>(seg1));
-                if (seg2 > 0) {
-                    vDSP_vadd(ch.windowed.data()  + seg1, 1, ch.out_ring.data(),  1,
-                              ch.out_ring.data(),  1, static_cast<vDSP_Length>(seg2));
-                    vDSP_vadd(window_sq_.data() + seg1,   1, ch.norm_ring.data(), 1,
-                              ch.norm_ring.data(), 1, static_cast<vDSP_Length>(seg2));
-                }
-                ch.out_write = (ch.out_write + kHopSize) % ola_sz;
-                ch.out_avail += kHopSize;
+                ch.ola.add_frame(ch.windowed.data(), window_sq_.data(),
+                                 kFFTSize, kHopSize, /*clamp_avail=*/false);
             }
 
         }
@@ -441,16 +420,7 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
         for (int c = 0; c < n_ch; ++c) {
             auto& ch = ch_[c];
 
-            float wet = 0.f;
-            if (ch.out_avail > 0) {
-                const int   rd   = ch.out_read;
-                const float norm = ch.norm_ring[rd];
-                wet              = (norm > 1e-8f) ? ch.out_ring[rd] / norm : 0.f;
-                ch.out_ring[rd]  = 0.f;
-                ch.norm_ring[rd] = 0.f;
-                ch.out_read      = (rd + 1) % static_cast<int>(ch.out_ring.size());
-                --ch.out_avail;
-            }
+            float wet = ch.ola.pull_sample();
 
             // Delay wet by one sample so the STFT path's group delay is exactly
             // kFFTSize (the brickwall below adds the remaining kBrickLA).

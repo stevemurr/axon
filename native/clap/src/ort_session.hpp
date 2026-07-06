@@ -7,6 +7,7 @@
 #include <onnxruntime_cxx_api.h>
 
 #include "meta.hpp"
+#include "ort_run_guard.hpp"
 
 namespace nablafx {
 

@@ -8,7 +8,11 @@
 //   - meta declares a control C++ ignores -> a dead automation knob.
 //
 // This test extracts BOTH sets and asserts they are identical, and separately
-// asserts the 21 SEQ_* (SSL EQ) controls are present — the port that added them.
+// asserts the 22 SEQ_* (SSL EQ) controls are present — the port that added them.
+//
+// NOTE the extractor contract: axon_plugin.cpp must spell every control read
+// as a literal `c.id == "..."` compare (see the comment above resolve_amount_
+// there). Reads in any other form are invisible to this test.
 //
 // Paths are injected by CMake (SRC_PATH = axon_plugin.cpp, META_PATH = the
 // committed axon_meta.json) so the test runs against the real, shipped artifacts.
@@ -75,12 +79,12 @@ int main() {
 
     std::fprintf(stderr, "[contract] meta == C++ read-set (no missing, no dead) PASS\n");
 
-    // 3) The SSL EQ port's 21 SEQ_* controls are present with sane specs.
+    // 3) The SSL EQ port's 22 SEQ_* controls are present with sane specs.
     static const char* kSeq[] = {
         "SEQ_ON","SEQ_LF_G","SEQ_LF_F","SEQ_LF_BELL","SEQ_LMF_G","SEQ_LMF_F","SEQ_LMF_Q",
         "SEQ_HMF_G","SEQ_HMF_F","SEQ_HMF_Q","SEQ_HF_G","SEQ_HF_F","SEQ_HF_BELL",
         "SEQ_HPF_ON","SEQ_HPF_F","SEQ_LPF_ON","SEQ_LPF_F","SEQ_DRIVE",
-        "SEQ_AUTO","SEQ_SPLIT","SEQ_CAL",
+        "SEQ_AUTO","SEQ_SPLIT","SEQ_CAL","SEQ_RESET",
     };
     const auto& controls = meta.at("controls");
     for (const char* id : kSeq) {
@@ -94,7 +98,7 @@ int main() {
     assert(double(controls.at("SEQ_ON").at("default")) == 0.0 && "SEQ_ON must default off");
     // SEQ_SPLIT (coupling alpha) default = 0.6.
     assert(double(controls.at("SEQ_SPLIT").at("default")) == 0.6 && "SEQ_SPLIT default drifted");
-    std::fprintf(stderr, "[contract] 21 SEQ_* controls present + specs sane PASS\n");
+    std::fprintf(stderr, "[contract] 22 SEQ_* controls present + specs sane PASS\n");
 
     std::fprintf(stderr, "ALL CONTROL-CONTRACT TESTS PASSED\n");
     return 0;

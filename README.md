@@ -83,13 +83,38 @@ putting its id back in the order).
 ```sh
 git clone https://github.com/stevemurr/axon
 cd axon
-bash scripts/install_axon_mac.sh
+uv run axon install --mac
 # Restart your DAW (or rescan plugins) → load "Axon" from the CLAP list.
 ```
 
-The installer builds the `.clap` from the committed model bundle
-(`weights/axon_bundle/`), ad-hoc code-signs it, and installs to
-`~/Library/Audio/Plug-Ins/CLAP/Axon.clap`.
+This builds the `.clap` from the committed model bundle (`weights/axon_bundle/`),
+ad-hoc code-signs it, and installs to `~/Library/Audio/Plug-Ins/CLAP/Axon.clap`
+(under the hood: `scripts/install_axon_mac.sh`). No Python dependencies are
+pulled — the CLI is a thin, dependency-free router.
+
+## 🧰 One CLI for everything
+
+Every dev flow has a single entrypoint via [uv](https://docs.astral.sh/uv/) —
+each subcommand is a thin wrapper that delegates to the canonical script it
+names (documented in the sections below), so there is exactly one
+implementation of each flow:
+
+```sh
+uv run axon build                 # build the .clap (Release-guarded)
+uv run axon build --instrumented  # bench-only per-stage-timing build (never installable)
+uv run axon install --mac         # build + install into ~/Library/Audio/Plug-Ins/CLAP
+uv run axon test                  # build, then ctest (full suite)
+uv run axon bench                 # scenario × buffer matrix (bench/run_bench.py args pass through)
+uv run axon coverage              # llvm-cov over the test suite
+uv run axon eval null             # A/B null: current tree vs the installed plugin
+uv run axon eval ssl-comp         # ssl_comp model sizing invariants
+uv run axon train                 # auto-EQ fan-out (GPU host; needs `uv sync --extra train`)
+```
+
+`eval null` encodes the null-test protocol (data-chunk-only compares — wav
+metadata embeds timestamps — plus the retry rule for the known ORT run-to-run
+nondeterminism; see `native/clap/docs/investigations/`). The local CLI is
+dependency-free; only training pulls torch, behind the `train` extra.
 
 ## 🔬 Inside the limiter
 
@@ -106,31 +131,31 @@ walkthrough with the math:
 ## 🛠️ Building from source
 
 ```sh
-# Build + install the .clap straight from the committed bundle (what the
-# installer does under the hood):
-bash native/clap/build.sh axon "$PWD/weights/axon_bundle" build/Axon.clap
-cp -R build/Axon.clap ~/Library/Audio/Plug-Ins/CLAP/
-
-# Or just configure + build the dylib and the unit tests:
-cd native/clap
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+uv run axon build                 # build the .clap (no install)
+uv run axon build --instrumented  # bench-only per-stage-timing build (never installable)
+uv run axon install --mac         # build + install
 ```
 
 Requires macOS arm64, CMake, and the Xcode command-line tools. ONNX Runtime is
-fetched automatically. The committed `weights/axon_bundle/` is the authoritative
-control set — build directly from it (don't regenerate the meta from the training
-Python).
+fetched automatically (SHA256-pinned). The committed `weights/axon_bundle/` is
+the authoritative control set — build directly from it (don't regenerate the
+meta from the training Python). Under the hood the CLI drives
+`scripts/install_axon_mac.sh` → `native/clap/build.sh`, which carry the safety
+guards (Release-only caches, no instrumented builds in the DAW folder); going
+through the CLI keeps you inside those guards.
 
 ## 🧪 Tests
 
 Standalone, dependency-free unit tests cover the DSP and the plugin contract:
 
 ```sh
-cd native/clap
-cmake --build build                        # builds all test_* targets
-ctest --test-dir build --output-on-failure # canonical suite (registered targets only)
+uv run axon test              # build, then run the full suite
+uv run axon test -- -R meter  # pass ctest args through (filter by name)
+uv run axon coverage          # llvm-cov line coverage over the suite
 ```
+
+(Equivalent underlying commands: `cmake --build native/clap/build` then
+`ctest --test-dir native/clap/build --output-on-failure`.)
 
 CTest only runs registered, freshly-built targets — unlike a `for t in
 build/test_*` glob, it can't silently keep running a stale binary whose target
@@ -148,13 +173,18 @@ host to confirm end-to-end behaviour.
 
 ## 🏋️ Training new Auto-EQ models
 
+Training runs on the GPU host and needs the `train` extra (pulls torch via the
+pinned nablafx fork): `uv sync --extra train`.
+
 ```sh
 # 1. Prep an augmented per-class dataset (e.g. full_mix) from MUSDB:
 uv run python scripts/prepare_auto_eq_data.py --musdb \
     --src /path/to/musdb18 --target-class full_mix --augment-pre-eq \
     --out /path/to/datasets/axon_auto_eq_musdb_full_mix_aug
 
-# 2. Train (spectral-mask 64-band config by default) with nablafx.
+# 2. Train all five classes (spectral-mask 64-band config):
+uv run axon train
+
 # 3. Verify the controller actually adapts:
 uv run python scripts/probe_auto_eq_adaptivity.py --run-dir <hydra_run>
 

@@ -1,7 +1,7 @@
 [project]
-name = "neural-mastering"
+name = "axon"
 version = "0.1.0"
-description = "Adaptive mastering chain — auto-EQ + saturator + LA-2A + leveler + ceiling, packaged as a CLAP plugin. Built on nablafx."
+description = "Axon adaptive mastering chain (CLAP plugin) — build/test/bench/eval tooling and the composite bundle exporter."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = {text = "Apache-2.0"}
@@ -9,15 +9,32 @@ authors = [
     {name = "Steven Murr", email = "codec01_sedan@icloud.com"},
 ]
 
-dependencies = [
-    # nablafx is consumed via our fork — pin a commit SHA so the export pipeline
-    # and runtime model classes stay in sync.
+# The local CLI (uv run axon ...) is dependency-free on purpose: build/test/
+# bench/eval delegate to the repo's canonical scripts. Training/export pulls
+# torch via nablafx, so it lives behind an extra — install it ONLY on the
+# training host:  uv sync --extra train
+dependencies = []
+
+[project.optional-dependencies]
+train = [
+    # nablafx is consumed via our fork — pin a commit SHA so the export
+    # pipeline and runtime model classes stay in sync.
     "nablafx @ git+https://github.com/stevemurr/nablafx.git@1f1f49b951d961ccb64545540d005f6776269f6e",
 ]
+
+[project.scripts]
+axon = "axon.cli:main"
+
+[tool.uv]
+# rational-activations declares torch==1.7.1, but nablafx patches it at import
+# time and itself requires torch>=2.8 — pip tolerates this, uv's resolver does
+# not. Override so the `train` extra resolves the way the training host
+# actually runs. Affects only the train extra (nothing else touches torch).
+override-dependencies = ["torch>=2.8"]
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["neural_mastering*"]
+include = ["axon*"]

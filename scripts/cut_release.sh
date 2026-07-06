@@ -13,8 +13,13 @@ set -euo pipefail
 
 die() { echo "error: $*" >&2; exit 1; }
 
+assume_yes=0
+if [ "${1:-}" = "--yes" ] || [ "${1:-}" = "-y" ]; then
+  assume_yes=1
+  shift
+fi
 ver="${1:-}"
-[ -n "$ver" ] || die "usage: $(basename "$0") <version>   (e.g. 1.2.3)"
+[ -n "$ver" ] || die "usage: $(basename "$0") [--yes] <version>   (e.g. 1.2.3)"
 ver="${ver#v}" # tolerate a leading v
 
 # Semver MAJOR.MINOR.PATCH with an optional -prerelease suffix.
@@ -35,12 +40,14 @@ echo "About to cut release:"
 echo "  tag:    $tag"
 echo "  ref:    $branch @ $sha"
 echo "  remote: $remote"
-printf 'Proceed? [y/N] '
-read -r reply
-case "$reply" in
-  [yY] | [yY][eE][sS]) : ;;
-  *) die "aborted" ;;
-esac
+if [ "$assume_yes" -ne 1 ]; then
+  printf 'Proceed? [y/N] '
+  read -r reply
+  case "$reply" in
+    [yY] | [yY][eE][sS]) : ;;
+    *) die "aborted" ;;
+  esac
+fi
 
 git tag -a "$tag" -m "Axon $tag"
 git push "$remote" "$tag"

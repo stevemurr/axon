@@ -1,11 +1,16 @@
 name: Release
 
-# Cut a release: build the composite Axon .clap from the committed bundle
-# (weights/axon_bundle/ — needs no Python/torch), gate on the unit tests, zip
-# it, and publish a GitHub Release with a checksum.
+# Cut a release for ALL THREE platforms: build the composite Axon plugin from
+# the committed bundle (weights/axon_bundle/ — needs no Python/torch), gate
+# each platform on its full ctest suite, package per-platform, and publish
+# ONE GitHub Release with all artifacts + checksums.
 #
-# Trigger by pushing a semver tag (the `scripts/cut_release.sh` helper does
-# this for you), or manually via the Actions tab (workflow_dispatch).
+# Trigger by pushing a semver tag — `uv run axon release --major|--minor|
+# --patch` computes the next version, runs the local suite, tags and pushes
+# (scripts/cut_release.sh underneath) — or manually via workflow_dispatch.
+#
+# Platform setup steps deliberately mirror ci.yml job-for-job; if a setup
+# step changes there, change it here.
 
 on:
   push:
@@ -24,18 +29,158 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-publish:
-    name: build Axon.clap + publish
-    runs-on: macos-14 # Apple Silicon; the build is arm64-only (see ci.yml).
+  # ---------------------------------------------------------------- macOS
+  build-macos:
+    name: build + gate (macOS arm64)
+    runs-on: macos-14
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache fetched deps
+        uses: actions/cache@v4
+        with:
+          path: native/clap/build/_deps
+          key: deps-${{ runner.os }}-arm64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
+          restore-keys: |
+            deps-${{ runner.os }}-arm64-
+
+      # build.sh configures + builds (plugins + every test target), then
+      # stages + ad-hoc-codesigns the .clap bundle.
+      - name: Build Axon.clap from the committed bundle
+        run: bash native/clap/build.sh axon "$PWD/weights/axon_bundle" "$PWD/dist/Axon.clap"
+
+      - name: Gate on the full test suite
+        run: ctest --test-dir native/clap/build --output-on-failure
+
+      - name: Package (ditto zip — preserves symlink + codesignature)
+        working-directory: dist
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent Axon.clap "Axon-macos-arm64.clap.zip"
+          ls -lh Axon-macos-arm64.clap.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist/Axon-macos-arm64.clap.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Linux
+  build-linux:
+    name: build + gate (Linux x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsndfile1-dev pkg-config libwebkit2gtk-4.1-dev libx11-dev
+
+      - name: Cache fetched deps
+        uses: actions/cache@v4
+        with:
+          path: native/clap/build/_deps
+          key: deps-${{ runner.os }}-x64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
+          restore-keys: |
+            deps-${{ runner.os }}-x64-
+
+      - name: Configure
+        run: >
+          cmake -S native/clap -B native/clap/build
+          -DCMAKE_BUILD_TYPE=Release
+          -DAXON_REQUIRE_GUI=ON
+
+      - name: Build
+        run: cmake --build native/clap/build -j
+
+      - name: Package Axon.clap (directory bundle)
+        run: bash native/clap/package_linux.sh axon "$PWD/weights/axon_bundle" "$PWD/dist/Axon.clap"
+
+      - name: Gate on the full test suite
+        run: ctest --test-dir native/clap/build --output-on-failure
+
+      # tar.gz, not zip: the dir-bundle contains the libonnxruntime SONAME
+      # symlink, which zip on Linux would materialize as a copy.
+      - name: Archive
+        working-directory: dist
+        run: |
+          tar -czf Axon-linux-x64.clap.tar.gz Axon.clap
+          ls -lh Axon-linux-x64.clap.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/Axon-linux-x64.clap.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Windows
+  build-windows:
+    name: build + gate (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MSVC dev environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        run: choco install ninja -y --no-progress
+
+      - name: Cache fetched deps
+        uses: actions/cache@v4
+        with:
+          path: native/clap/build/_deps
+          key: deps-${{ runner.os }}-x64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
+          restore-keys: |
+            deps-${{ runner.os }}-x64-
+
+      - name: Configure (clang-cl + Ninja)
+        run: >
+          cmake -S native/clap -B native/clap/build
+          -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang-cl
+          -DCMAKE_CXX_COMPILER=clang-cl
+          -DAXON_REQUIRE_GUI=ON
+
+      - name: Build
+        run: cmake --build native/clap/build -j
+
+      - name: Package Axon.clap (directory bundle)
+        run: python native/clap/package_windows.py axon weights/axon_bundle dist/Axon.clap
+
+      - name: Gate on the full test suite
+        run: ctest --test-dir native/clap/build --output-on-failure
+
+      - name: Archive
+        working-directory: dist
+        shell: pwsh
+        run: Compress-Archive -Path Axon.clap -DestinationPath Axon-windows-x64.clap.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/Axon-windows-x64.clap.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Publish
+  publish:
+    name: publish GitHub Release
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
       - name: Resolve version
         id: ver
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            v="${GITHUB_REF_NAME}"            # the pushed tag, e.g. v1.2.3
+            v="${GITHUB_REF_NAME}"
           else
             v="${{ inputs.tag }}"
           fi
@@ -44,46 +189,21 @@ jobs:
             *) echo "::error::tag '$v' must look like v1.2.3"; exit 1 ;;
           esac
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Building release $v"
 
-      - name: Cache fetched deps (CLAP / json / ONNX Runtime)
-        uses: actions/cache@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: native/clap/build/_deps
-          key: deps-${{ runner.os }}-arm64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
-          restore-keys: |
-            deps-${{ runner.os }}-arm64-
+          path: dist
+          merge-multiple: true
 
-      # build.sh configures + builds the dylibs (and, as part of `all`, every
-      # test_* target) then stages + ad-hoc-codesigns the .clap bundle.
-      - name: Build Axon .clap from the committed bundle
-        run: bash native/clap/build.sh axon "$PWD/weights/axon_bundle" "$PWD/dist/Axon.clap"
-
-      - name: Gate on unit tests
-        working-directory: native/clap/build
-        run: |
-          set -u
-          ran=0
-          for t in test_*; do
-            [ -x "$t" ] || continue
-            ran=$((ran + 1))
-            ./"$t" || { echo "::error::release blocked: $t failed"; exit 1; }
-          done
-          [ "$ran" -gt 0 ] || { echo "::error::no tests ran"; exit 1; }
-          echo "all $ran unit tests passed"
-
-      - name: Package + checksum
-        id: pkg
+      - name: Version-stamp + checksums
         working-directory: dist
         run: |
-          zip="Axon-${{ steps.ver.outputs.version }}-macos-arm64.clap.zip"
-          # ditto is the macOS-correct archiver: it preserves the bundle's
-          # internal symlink (libonnxruntime.dylib) and the codesignature, which
-          # a plain `zip` mangles.
-          ditto -c -k --sequesterRsrc --keepParent Axon.clap "$zip"
-          shasum -a 256 "$zip" > SHA256SUMS.txt
-          echo "zip=$zip" >> "$GITHUB_OUTPUT"
-          ls -lh "$zip"; cat SHA256SUMS.txt
+          v="${{ steps.ver.outputs.version }}"
+          for f in Axon-macos-arm64.clap.zip Axon-linux-x64.clap.tar.gz Axon-windows-x64.clap.zip; do
+            mv "$f" "${f/Axon-/Axon-$v-}"
+          done
+          sha256sum Axon-* > SHA256SUMS.txt
+          ls -lh; cat SHA256SUMS.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -93,22 +213,23 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/${{ steps.pkg.outputs.zip }}
+            dist/Axon-*
             dist/SHA256SUMS.txt
           body: |
-            **Axon — CLAP plugin for macOS (Apple Silicon / arm64).**
+            **Axon — an adaptive neural mastering chain as a CLAP plugin.**
 
-            Build: composite Axon (auto-EQ + saturator + SSL comp + leveler + true-peak ceiling).
+            Every artifact is gated on that platform's full test suite.
 
-            ### Install
-            1. Unzip and move `Axon.clap` to `~/Library/Audio/Plug-Ins/CLAP/`.
-            2. This build is **ad-hoc codesigned, not notarized**. On first load,
-               clear the Gatekeeper quarantine flag:
-               ```sh
-               xattr -dr com.apple.quarantine "Axon.clap"
-               ```
+            | Platform | Artifact | Install |
+            |---|---|---|
+            | macOS (Apple Silicon) | `Axon-*-macos-arm64.clap.zip` | Unzip into `~/Library/Audio/Plug-Ins/CLAP/`. Ad-hoc codesigned, not notarized — clear quarantine on first load: `xattr -dr com.apple.quarantine Axon.clap` |
+            | Linux (x64) | `Axon-*-linux-x64.clap.tar.gz` | Untar into `~/.clap/` (a directory-bundle: keep `Axon.clap/` intact). GUI needs webkit2gtk 4.1 at runtime; headless hosts get generic params. |
+            | Windows (x64) | `Axon-*-windows-x64.clap.zip` | Unzip into `%COMMONPROGRAMFILES%\CLAP\` (keep the `Axon.clap` folder intact). GUI needs the WebView2 runtime. |
 
-            Verify the download against `SHA256SUMS.txt`:
-            ```sh
-            shasum -a 256 -c SHA256SUMS.txt
-            ```
+            **Status note:** macOS is the reference platform. The Linux and
+            Windows builds are fully test-gated (identical unit + tolerance
+            suites in CI) but their embedded GUIs are newly ported — treat
+            them as beta and expect the generic parameter view to always work.
+
+            Verify downloads: `shasum -a 256 -c SHA256SUMS.txt` (mac) /
+            `sha256sum -c SHA256SUMS.txt` (Linux).

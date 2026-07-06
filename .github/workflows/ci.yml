@@ -28,13 +28,13 @@ name: CI
 
 on:
   push:
-    branches: [master, "feat/**", "fix/**", "chore/**"]
+    branches: [main, "feat/**", "fix/**", "chore/**"]
     paths:
       - "native/clap/**"
       - "weights/axon_bundle/**"
       - ".github/workflows/ci.yml"
   pull_request:
-    branches: [master]
+    branches: [main]
     paths:
       - "native/clap/**"
       - "weights/axon_bundle/**"

@@ -112,6 +112,7 @@ uv run axon eval ssl-comp         # ssl_comp model sizing invariants
 uv run axon autoeq prepare ...    # auto-EQ dataset prep      (GPU host; `uv sync --extra train`)
 uv run axon autoeq train          # train all 5 class models  (GPU host)
 uv run axon autoeq export ...     # trained run -> per-class bundle (GPU host)
+uv run axon release --minor       # bump + tag + push -> 3-platform GitHub Release (also --major/--patch)
 uv run axon report --open         # HTML dashboard over all runs (auto-refreshed by every run)
 ```
 

@@ -15,6 +15,7 @@ before running), so there is exactly one implementation of each flow:
     uv run axon autoeq export --run-dir ... --out ...         (training host)
     uv run axon autoeq probe --run-dir ...                     (training host)
     uv run axon train nablafx <hydra overrides...>             (training host)
+    uv run axon release --major|--minor|--patch [--dry-run]
     uv run axon report [--open]
 
 Output convention (test / bench / coverage / eval): every run writes
@@ -412,6 +413,53 @@ def cmd_autoeq_export(args) -> int:
     return run([exe, *rest_args(args)])
 
 
+def bump_version(latest: str, part: str) -> str:
+    """Next semver from the latest 'vX.Y.Z' tag ('' means no tags yet)."""
+    if not latest:
+        latest = "v0.0.0"
+    core = latest.lstrip("v").split("-")[0]
+    try:
+        major, minor, patch = (int(x) for x in core.split("."))
+    except ValueError:
+        raise SystemExit(f"[axon] error: cannot parse latest tag '{latest}' as semver")
+    if part == "major":
+        return f"v{major + 1}.0.0"
+    if part == "minor":
+        return f"v{major}.{minor + 1}.0"
+    return f"v{major}.{minor}.{patch + 1}"
+
+
+def cmd_release(args) -> int:
+    """Compute the next version, gate on the suite, tag + push (which triggers
+    the multi-platform release workflow)."""
+    part = "major" if args.major else ("minor" if args.minor else "patch")
+    def git(*a):
+        return subprocess.run(["git", "-C", REPO, *a],
+                              capture_output=True, text=True).stdout.strip()
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch != "main":
+        return die(f"releases are cut from main (currently on '{branch}')")
+    if git("status", "--porcelain"):
+        return die("working tree is dirty — commit or stash first")
+    subprocess.run(["git", "-C", REPO, "fetch", "origin", "main", "--quiet"])
+    if git("rev-parse", "HEAD") != git("rev-parse", "origin/main"):
+        return die("main is not in sync with origin/main — pull/push first")
+    tags = [t for t in git("tag", "-l", "v*").splitlines() if t]
+    latest = max(tags, key=lambda t: [int(x) for x in
+                 t.lstrip("v").split("-")[0].split(".")]) if tags else ""
+    nxt = bump_version(latest, part)
+    print(f"[axon] release: {latest or '(no tags yet)'} -> {nxt} ({part} bump)")
+    if args.dry_run:
+        print(f"[axon] dry run — would: run the test suite, then "
+              f"scripts/cut_release.sh --yes {nxt.lstrip('v')} "
+              f"(tag + push -> multi-platform release workflow)")
+        return 0
+    if not args.skip_test:
+        if (rc := cmd_test(argparse.Namespace(no_build=False, as_json=False, rest=[]))):
+            return die("test suite failed — release blocked", rc)
+    return run(["bash", REPO / "scripts" / "cut_release.sh", "--yes", nxt.lstrip("v")])
+
+
 def cmd_report(args) -> int:
     from axon import report
     out = report.generate(REPO)
@@ -487,6 +535,15 @@ def build_parser() -> argparse.ArgumentParser:
                            help="raw nablafx run; hydra overrides pass through verbatim "
                                 "(e.g. data=ssl_comp_musdb_trainval model=tcn/model_bb_tcn_ssl_comp)")
     tnn.set_defaults(fn=cmd_train_nablafx, passthrough="nablafx")
+
+    rl = sub.add_parser("release", help="bump version, gate on the suite, tag + push (triggers the multi-platform release)")
+    grp = rl.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--major", action="store_true")
+    grp.add_argument("--minor", action="store_true")
+    grp.add_argument("--patch", action="store_true")
+    rl.add_argument("--dry-run", action="store_true", help="print the computed version and stop")
+    rl.add_argument("--skip-test", action="store_true", help="skip the local suite gate (CI still gates)")
+    rl.set_defaults(fn=cmd_release)
 
     rp = sub.add_parser("report", help="regenerate the HTML run report from artifacts/")
     rp.add_argument("--open", action="store_true", help="open it in the browser")

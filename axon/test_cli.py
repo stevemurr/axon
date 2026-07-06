@@ -88,6 +88,23 @@ def test_parser_routing() -> None:
     check("unknown args rejected on non-pass-through subcommands")
 
 
+def test_bump_version() -> None:
+    assert cli.bump_version("", "minor") == "v0.1.0"          # no tags yet
+    assert cli.bump_version("v1.2.3", "patch") == "v1.2.4"
+    assert cli.bump_version("v1.2.3", "minor") == "v1.3.0"
+    assert cli.bump_version("v1.2.3", "major") == "v2.0.0"
+    assert cli.bump_version("v1.2.3-rc1", "patch") == "v1.2.4"  # prerelease core
+    check("bump_version semver math")
+
+
+def test_release_routing() -> None:
+    p = cli.build_parser()
+    args, extra = p.parse_known_args(["release", "--minor", "--dry-run"])
+    assert args.fn is cli.cmd_release and args.minor and args.dry_run and not extra
+    assert not getattr(args, "passthrough", None)   # rejects unknown args
+    check("release routes with own flags, not pass-through")
+
+
 def test_rest_args_strips_separator() -> None:
     class A:
         rest = ["--", "-R", "meter"]
@@ -229,6 +246,8 @@ def test_report_collect_and_generate() -> None:
 
 if __name__ == "__main__":
     test_parser_routing()
+    test_bump_version()
+    test_release_routing()
     test_rest_args_strips_separator()
     test_eval_sets_shape()
     test_wav_data_chunk_extraction()

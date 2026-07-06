@@ -48,4 +48,11 @@ add_library(axon_pffft STATIC EXCLUDE_FROM_ALL
     ${pffft_SOURCE_DIR}/src/pffft_common.c
 )
 target_include_directories(axon_pffft PUBLIC ${pffft_SOURCE_DIR}/include/pffft)
+# We build pffft as a STATIC lib, so use upstream's own knob to keep
+# PFFFT_EXPORT empty. Without it, pffft.h on _WIN32 defaults to
+# __declspec(dllimport/dllexport) DLL decoration and the .c files fail to
+# compile under clang-cl ("dllimport cannot be applied to non-inline function
+# definition"). PUBLIC so consumers of pffft.h (accelerate_shim.cpp) agree.
+# No-op on macOS/Linux (the non-Windows fallback is already empty).
+target_compile_definitions(axon_pffft PUBLIC PFFFT_STATIC_DEFINE)
 set_target_properties(axon_pffft PROPERTIES POSITION_INDEPENDENT_CODE ON)

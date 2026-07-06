@@ -9,7 +9,7 @@
 // Latency: kFFTSize samples (1024 ≈ 23 ms at 44 100 Hz).
 
 #pragma once
-#include <Accelerate/Accelerate.h>
+#include "accelerate_shim.hpp"  // vDSP on macOS; portable pffft-backed shim elsewhere
 #include <array>
 #include <cmath>
 #include <vector>

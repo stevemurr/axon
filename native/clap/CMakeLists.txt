@@ -9,8 +9,21 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# ---------------------------------------------------------------------------
+# Platform gate. macOS arm64 is the reference platform and its build below is
+# EXACTLY the historical one (the Windows/Linux port's guardrail is that mac
+# renders stay byte-identical). Non-Apple configures are skeletal until the
+# port's Phase 1 (Linux headless) / Phase 2 (Windows headless) land — today
+# they only prove the portable FFT dependency (pffft) fetches and compiles.
+# See docs/future/active/windows-linux-builds.md.
+# ---------------------------------------------------------------------------
 if(NOT APPLE)
-    message(FATAL_ERROR "v1 targets macOS arm64 only. Cross/universal builds are v2.")
+    include(cmake/FetchPffft.cmake)
+    message(STATUS
+        "nablafx_clap: non-macOS configure is skeletal (Phase 0 of the "
+        "Windows/Linux port). Plugin/test targets for this platform arrive "
+        "with Phase 1+; only the portable shim dependency (pffft) is set up.")
+    return()
 endif()
 
 if(NOT CMAKE_OSX_ARCHITECTURES)
@@ -261,6 +274,17 @@ target_link_libraries(test_adaptive_eq PRIVATE "-framework Accelerate")
 # magnitude-squared coherence (header-only, vDSP FFT).
 axon_add_test(test_coherence_distortion tests/test_coherence_distortion.cpp)
 target_link_libraries(test_coherence_distortion PRIVATE "-framework Accelerate")
+
+# test_accelerate_shim — the regression net for the Windows/Linux port:
+# proves the portable (pffft-backed) nablafx::portable_shim implementation in
+# src/accelerate_shim.{hpp,cpp} reproduces real vDSP zrip packing/scaling and
+# vector-op semantics on this machine. The ONLY mac target that builds/links
+# pffft — the shipped plugins never do.
+include(cmake/FetchPffft.cmake)
+axon_add_test(test_accelerate_shim
+    tests/test_accelerate_shim.cpp src/accelerate_shim.cpp)
+target_link_libraries(test_accelerate_shim PRIVATE
+    axon_pffft "-framework Accelerate")
 
 # test_ssl_integration.py — plugin-level SSL EQ integration through axon_bench
 # against a built build/Axon.clap. Self-skips (rc 77) when the plugin or bench

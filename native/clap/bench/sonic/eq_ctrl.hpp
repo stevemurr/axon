@@ -23,7 +23,7 @@
 // it already (matches spectral_mask_eq.hpp).
 #pragma once
 
-#include <Accelerate/Accelerate.h>
+#include "accelerate_shim.hpp"  // via -I src: vDSP on macOS; portable shim elsewhere
 
 #include <cmath>
 #include <cstddef>

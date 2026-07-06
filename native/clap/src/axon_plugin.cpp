@@ -28,7 +28,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -41,8 +40,6 @@
 #include <nlohmann/json.hpp>
 
 #include "axon_gui.h"
-
-#include <dlfcn.h>
 
 #include <clap/clap.h>
 #include <onnxruntime_cxx_api.h>
@@ -59,6 +56,7 @@
 #include "param_id.hpp"
 #include "mel_limiter.hpp"
 #include "ort_path.hpp"   // ORTCHAR_T-aware Ort::Session path (no-op on POSIX)
+#include "resource_path.hpp"  // cross-platform bundle/resource discovery
 #include "stft_common.hpp"
 #include "rational_a.hpp"
 #include "spectral_mask_eq.hpp"
@@ -75,7 +73,6 @@
 
 namespace nablafx_axon {
 
-namespace fs = std::filesystem;
 using nablafx::CompositeMeta;
 using nablafx::ControlSpec;
 using nablafx::DspBlockSpec;
@@ -319,8 +316,7 @@ struct ModuleState {
                                                        // axon_meta.sub_bundles
                                                        // has "ssl_comp"
     bool                       ssl_comp_loaded{false};
-    std::string                bundle_dir;            // .../Axon.clap/Contents
-    std::string                resources_dir;         // .../Contents/Resources
+    std::string                resources_dir;         // see resource_path.hpp
     std::string                plugin_id_str;         // "com.nablafx.<model_id>"
     clap_plugin_descriptor_t   descriptor{};
     std::vector<const char*>   feature_ptrs;
@@ -336,17 +332,6 @@ struct ModuleState {
 };
 
 static ModuleState* g_state = nullptr;
-
-static std::string find_bundle_contents_() {
-    Dl_info info{};
-    if (dladdr(reinterpret_cast<const void*>(&find_bundle_contents_), &info) == 0
-        || !info.dli_fname) {
-        return {};
-    }
-    fs::path dylib = info.dli_fname;
-    // .clap/Contents/MacOS/<dylib> → .clap/Contents
-    return dylib.parent_path().parent_path().string();
-}
 
 static void populate_descriptor_(ModuleState& st) {
     // Build a short plugin ID from effect_name (model_id can be 300+ chars,
@@ -2750,9 +2735,9 @@ static bool entry_init(const char* /*plugin_path*/) {
     if (g_state) return true;
     try {
         auto st = std::make_unique<ModuleState>();
-        st->bundle_dir   = find_bundle_contents_();
-        if (st->bundle_dir.empty()) return false;
-        st->resources_dir = st->bundle_dir + "/Resources";
+        st->resources_dir = nablafx::find_resources_dir(
+            reinterpret_cast<const void*>(&entry_init), "axon_meta.json");
+        if (st->resources_dir.empty()) return false;
 
         st->axon_meta = load_composite_meta(st->resources_dir + "/axon_meta.json");
 

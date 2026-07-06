@@ -106,3 +106,52 @@ GUIs = **XL** (GUI-dominated). Top risks: (1) the two native WebView
 embeddings, (2) the resource/packaging redesign, (3) no bit-exact acceptance
 oracle across platforms. Descope first: GUIs (ship headless) and
 ARM targets (x64 first) — that converts XL → M.
+
+## Implementation notes
+
+### Phase 1 (2026-07-06, Linux x64 headless) — SHIPPED
+
+**Resource convention (risk #2, decided).** One helper —
+`src/resource_path.hpp` — is the single place that resolves the running
+module's path (`dladdr` on POSIX, `GetModuleFileNameW` path ready for
+Phase 2) and knows the per-platform layout:
+
+- **macOS (unchanged, byte-identical):** resources root is always
+  `<module_dir>/../Resources` (`Axon.clap/Contents/MacOS/<bin>` →
+  `Contents/Resources`). No probing, no existence checks — the historical
+  behavior verbatim.
+- **Linux/Windows — two layouts, one probe rule.** The loader probes, in
+  order: `<module_dir>/Resources/<marker>` (directory bundle), then
+  `<module_dir>/<marker>` (flat side-by-side). The marker is the plugin's
+  meta json (`axon_meta.json` / `plugin_meta.json`), so a stray `Resources/`
+  dir can't shadow the real layout.
+  - **Directory bundle** (what `native/clap/package_linux.sh` stages —
+    the canonical install form):
+    `Axon.clap/` (plain dir) containing `axon.clap` (the ELF .so, rpath
+    `$ORIGIN`), `libonnxruntime.so.<ver>` + SONAME symlink, and
+    `Resources/` (meta + sub-bundles + `ui/`).
+  - **Flat side-by-side**: a bare `.clap` binary with the same resource
+    files next to it — for hosts that only pick up regular `*.clap` files.
+
+**Everything else that landed:** `FetchOnnxRuntime.cmake` grew a SHA-pinned
+`linux-x64` prebuilt (same 1.20.1 pin); `CMakeLists.txt` now builds ALL
+targets on Linux via two platform variables (`AXON_SHIM_SRC` adds
+`accelerate_shim.cpp` to every vDSP consumer, `AXON_DSP_LIBS` swaps
+`-framework Accelerate` ↔ `axon_pffft`+libm); `axon_clap` links a headless
+GUI stub (`axon_gui_stub.cpp`) on non-Apple; `axon_bench`'s bundle-binary
+lookup understands all three layouts; ubuntu-latest CI job builds, packages
+the dir-bundle and runs the full ctest suite.
+
+**The per-platform oracle (acceptance caveat above, now closed):**
+`tests/test_tolerance_stages.cpp` runs MelLimiter, SpectralMaskEq,
+IirFilterbankEq, BassMono, Widener, Reverb and LoudnessMeter on
+deterministic signals (sines at band centers, xorshift pink noise — no
+`std::*_distribution`, which is implementation-defined) and asserts
+magnitude/level invariants with documented tolerances (±0.1–0.75 dB point
+checks, exact for contractual passthroughs, invariant bands for the
+nonlinear stages). It runs on macOS too — verified green against BOTH
+backends (real vDSP, and pffft via the sed-`__APPLE__` probe trick).
+
+**Deliberately NOT ported in Phase 1:** the GUI (stub only; CLAP generic
+param UI is the interface), `install --linux` CLI sugar, and any
+cross-platform render comparison (impossible per the acceptance caveat).

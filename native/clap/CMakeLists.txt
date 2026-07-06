@@ -10,29 +10,44 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
-# Platform gate. macOS arm64 is the reference platform and its build below is
-# EXACTLY the historical one (the Windows/Linux port's guardrail is that mac
-# renders stay byte-identical). Non-Apple configures are skeletal until the
-# port's Phase 1 (Linux headless) / Phase 2 (Windows headless) land — today
-# they only prove the portable FFT dependency (pffft) fetches and compiles.
+# Platform seam. macOS arm64 is the reference platform: its targets get the
+# EXACT historical sources/flags/links (the Windows/Linux port's guardrail is
+# that mac renders stay byte-identical — verified by `uv run axon eval null`).
+# Non-Apple platforms build the same targets over the portable Accelerate
+# shim (src/accelerate_shim.{hpp,cpp} + pffft) and a headless GUI stub.
 # See docs/future/active/windows-linux-builds.md.
+#
+# The two platform variables threaded through the target definitions below:
+#   AXON_SHIM_SRC — extra source for every vDSP-consuming target: empty on
+#                   mac (real Accelerate), src/accelerate_shim.cpp elsewhere
+#                   (the pffft-backed FFT third of the shim).
+#   AXON_DSP_LIBS — what those targets link: -framework Accelerate on mac,
+#                   axon_pffft + libm elsewhere.
 # ---------------------------------------------------------------------------
-if(NOT APPLE)
-    include(cmake/FetchPffft.cmake)
-    message(STATUS
-        "nablafx_clap: non-macOS configure is skeletal (Phase 0 of the "
-        "Windows/Linux port). Plugin/test targets for this platform arrive "
-        "with Phase 1+; only the portable shim dependency (pffft) is set up.")
-    return()
-endif()
-
-if(NOT CMAKE_OSX_ARCHITECTURES)
-    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
+if(APPLE)
+    if(NOT CMAKE_OSX_ARCHITECTURES)
+        set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
+    endif()
+    set(AXON_SHIM_SRC "")
+    set(AXON_DSP_LIBS "-framework Accelerate")
+    set(AXON_PLATFORM_LIBS "-framework CoreFoundation")
+elseif(WIN32)
+    message(FATAL_ERROR
+        "nablafx_clap: Windows is Phase 2 of the port (clang-cl + Ninja) and "
+        "not wired up yet. See docs/future/active/windows-linux-builds.md.")
+else()
+    set(AXON_SHIM_SRC src/accelerate_shim.cpp)
+    set(AXON_DSP_LIBS axon_pffft m)
+    set(AXON_PLATFORM_LIBS ${CMAKE_DL_LIBS})
 endif()
 
 include(cmake/FetchCLAP.cmake)
 include(cmake/FetchOnnxRuntime.cmake)
 include(cmake/FetchJson.cmake)
+# pffft static lib (target axon_pffft, EXCLUDE_FROM_ALL). On mac it is linked
+# ONLY by test_accelerate_shim (the shipped plugins never touch it); on other
+# platforms it is the FFT backend for every shim consumer.
+include(cmake/FetchPffft.cmake)
 
 add_library(nablafx_clap MODULE
     src/nablafx_plugin.cpp
@@ -49,27 +64,40 @@ target_include_directories(nablafx_clap PRIVATE
 
 target_link_libraries(nablafx_clap PRIVATE
     ${ONNXRUNTIME_LIBRARY}
-    "-framework CoreFoundation"
+    ${AXON_PLATFORM_LIBS}
 )
 
 # Composite Axon plugin: separate dylib that bundles auto-EQ + saturator +
 # ssl_comp behind a single AMT/TRM control surface, with the LUFS leveler and
 # true-peak ceiling running in-host. spectral_mask_eq.hpp + rational_a.hpp
 # are header-only so they don't appear in the source list.
+#
+# GUI backend: the Cocoa/WKWebView implementation on mac; a headless no-op
+# stub elsewhere (all params are CLAP params, hosts show their generic UI —
+# webkit2gtk/WebView2 backends are Phase 3 of the port).
+if(APPLE)
+    set(AXON_GUI_SRC src/axon_gui.mm)
+else()
+    set(AXON_GUI_SRC src/axon_gui_stub.cpp)
+endif()
+
 add_library(axon_clap MODULE
     src/axon_plugin.cpp
-    src/axon_gui.mm
+    ${AXON_GUI_SRC}
     src/composite_meta.cpp
     src/meta.cpp
     src/true_peak_ceiling.cpp
     src/mel_limiter.cpp
     src/meter.cpp
     src/param_id.cpp
+    ${AXON_SHIM_SRC}
 )
 
-set_source_files_properties(src/axon_gui.mm PROPERTIES
-    COMPILE_FLAGS "-fobjc-arc"
-)
+if(APPLE)
+    set_source_files_properties(src/axon_gui.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc"
+    )
+endif()
 
 target_include_directories(axon_clap PRIVATE
     ${CLAP_INCLUDE_DIR}
@@ -77,13 +105,21 @@ target_include_directories(axon_clap PRIVATE
     ${JSON_INCLUDE_DIR}
 )
 
-target_link_libraries(axon_clap PRIVATE
-    ${ONNXRUNTIME_LIBRARY}
-    "-framework CoreFoundation"
-    "-framework Cocoa"
-    "-framework WebKit"
-    "-framework Accelerate"   # vDSP_fft for SpectralMaskEq
-)
+if(APPLE)
+    target_link_libraries(axon_clap PRIVATE
+        ${ONNXRUNTIME_LIBRARY}
+        "-framework CoreFoundation"
+        "-framework Cocoa"
+        "-framework WebKit"
+        "-framework Accelerate"   # vDSP_fft for SpectralMaskEq
+    )
+else()
+    target_link_libraries(axon_clap PRIVATE
+        ${ONNXRUNTIME_LIBRARY}
+        ${AXON_DSP_LIBS}
+        ${AXON_PLATFORM_LIBS}
+    )
+endif()
 
 # Per-stage CPU timing instrumentation (src/axon_stage_timing.h). Bench-only:
 # adds two clock reads around every stage in the audio hot path and exposes a
@@ -96,13 +132,20 @@ if(AXON_STAGE_TIMING)
     message(STATUS "axon_clap: AXON_STAGE_TIMING=ON (instrumented; bench-only, do NOT ship)")
 endif()
 
-# Install the onnxruntime dylib next to ours and make each plugin find it
-# via @loader_path/../Frameworks once it's inside its .clap bundle.
+# Install the onnxruntime dylib next to ours and make each plugin find it at
+# load time: @loader_path/../Frameworks inside the mac .clap bundle; $ORIGIN
+# (same directory as the plugin binary) inside the Linux directory bundle
+# (see src/resource_path.hpp + package_linux.sh for the layout).
+if(APPLE)
+    set(AXON_PLUGIN_RPATH "@loader_path/../Frameworks")
+else()
+    set(AXON_PLUGIN_RPATH "$ORIGIN")
+endif()
 foreach(_t nablafx_clap axon_clap)
     set_target_properties(${_t} PROPERTIES
         PREFIX ""
-        SUFFIX ".so"                 # build.sh renames to the bundle executable
-        INSTALL_RPATH "@loader_path/../Frameworks"
+        SUFFIX ".so"                 # packaging renames to the bundle executable
+        INSTALL_RPATH "${AXON_PLUGIN_RPATH}"
         BUILD_WITH_INSTALL_RPATH TRUE
     )
 endforeach()
@@ -161,8 +204,9 @@ function(axon_add_test name)
 endfunction()
 
 # test_mel_limiter — unit tests for the MelLimiter DSP (no external deps).
-axon_add_test(test_mel_limiter tests/test_mel_limiter.cpp src/mel_limiter.cpp)
-target_link_libraries(test_mel_limiter PRIVATE "-framework Accelerate")
+axon_add_test(test_mel_limiter tests/test_mel_limiter.cpp src/mel_limiter.cpp
+    ${AXON_SHIM_SRC})
+target_link_libraries(test_mel_limiter PRIVATE ${AXON_DSP_LIBS})
 
 # test_meter — unit tests for the LoudnessMeter (cross-checked vs LufsLeveler).
 axon_add_test(test_meter tests/test_meter.cpp src/meter.cpp src/lufs_leveler.cpp)
@@ -244,8 +288,9 @@ set_target_properties(test_ort_session PROPERTIES
 
 # test_autoeq_param_guard — num_control_params <= kEqParamsStorage stack-buffer
 # guard (constant shared with the plugin via src/axon_limits.hpp).
-axon_add_test(test_autoeq_param_guard tests/test_autoeq_param_guard.cpp)
-target_link_libraries(test_autoeq_param_guard PRIVATE "-framework Accelerate")
+axon_add_test(test_autoeq_param_guard tests/test_autoeq_param_guard.cpp
+    ${AXON_SHIM_SRC})
+target_link_libraries(test_autoeq_param_guard PRIVATE ${AXON_DSP_LIBS})
 
 # test_true_peak — TruePeakCeiling: ceiling-never-exceeded invariant + KAT.
 axon_add_test(test_true_peak tests/test_true_peak.cpp src/true_peak_ceiling.cpp)
@@ -258,8 +303,9 @@ axon_add_test(test_iir_filterbank_eq tests/test_iir_filterbank_eq.cpp)
 axon_add_test(test_axon_gui_js tests/test_axon_gui_js.cpp)
 
 # test_spectral_mask_eq — STFT mask EQ OLA output-ring overflow clamp.
-axon_add_test(test_spectral_mask_eq tests/test_spectral_mask_eq.cpp)
-target_link_libraries(test_spectral_mask_eq PRIVATE "-framework Accelerate")
+axon_add_test(test_spectral_mask_eq tests/test_spectral_mask_eq.cpp
+    ${AXON_SHIM_SRC})
+target_link_libraries(test_spectral_mask_eq PRIVATE ${AXON_DSP_LIBS})
 
 # test_ssl_channel_eq — SSL 9000 J channel EQ engine + coupling solver
 # (header-only, plain biquads — no Accelerate).
@@ -267,24 +313,36 @@ axon_add_test(test_ssl_channel_eq tests/test_ssl_channel_eq.cpp)
 
 # test_adaptive_eq — AdaptiveEqController (productionized C1→C2 cascade auto-EQ):
 # stability, adaptivity (no mode collapse), tonal direction, determinism, bypass.
-axon_add_test(test_adaptive_eq tests/test_adaptive_eq.cpp)
-target_link_libraries(test_adaptive_eq PRIVATE "-framework Accelerate")
+axon_add_test(test_adaptive_eq tests/test_adaptive_eq.cpp ${AXON_SHIM_SRC})
+target_link_libraries(test_adaptive_eq PRIVATE ${AXON_DSP_LIBS})
 
 # test_coherence_distortion — phase-invariant distortion meter via
 # magnitude-squared coherence (header-only, vDSP FFT).
-axon_add_test(test_coherence_distortion tests/test_coherence_distortion.cpp)
-target_link_libraries(test_coherence_distortion PRIVATE "-framework Accelerate")
+axon_add_test(test_coherence_distortion tests/test_coherence_distortion.cpp
+    ${AXON_SHIM_SRC})
+target_link_libraries(test_coherence_distortion PRIVATE ${AXON_DSP_LIBS})
 
 # test_accelerate_shim — the regression net for the Windows/Linux port:
 # proves the portable (pffft-backed) nablafx::portable_shim implementation in
 # src/accelerate_shim.{hpp,cpp} reproduces real vDSP zrip packing/scaling and
 # vector-op semantics on this machine. The ONLY mac target that builds/links
-# pffft — the shipped plugins never do.
-include(cmake/FetchPffft.cmake)
+# pffft — the shipped plugins never do. On non-Apple platforms the
+# cross-backend sections become self-comparisons; the known-answer packing
+# pins, round-trips and scalar references stay load-bearing.
 axon_add_test(test_accelerate_shim
     tests/test_accelerate_shim.cpp src/accelerate_shim.cpp)
 target_link_libraries(test_accelerate_shim PRIVATE
-    axon_pffft "-framework Accelerate")
+    axon_pffft ${AXON_DSP_LIBS})
+
+# test_tolerance_stages — the per-platform acceptance oracle for the
+# Windows/Linux port (scoping doc: renders CANNOT be null-tested across FFT
+# backends, so each platform must prove the same steady-state physics
+# instead). Runs every DSP stage on deterministic signals and asserts
+# magnitude-response / level invariants within documented tolerances. Runs on
+# macOS too, so a regression shows up locally, not just in platform CI.
+axon_add_test(test_tolerance_stages tests/test_tolerance_stages.cpp
+    src/mel_limiter.cpp src/meter.cpp ${AXON_SHIM_SRC})
+target_link_libraries(test_tolerance_stages PRIVATE ${AXON_DSP_LIBS})
 
 # test_ssl_integration.py — plugin-level SSL EQ integration through axon_bench
 # against a built build/Axon.clap. Self-skips (rc 77) when the plugin or bench
@@ -309,7 +367,7 @@ if(_have_sndfile)
     target_link_directories(axon_bench PRIVATE ${SNDFILE_LIBRARY_DIRS})
     target_link_libraries(axon_bench PRIVATE
         ${SNDFILE_LIBRARIES}
-        "-framework CoreFoundation"
+        ${AXON_PLATFORM_LIBS}
     )
     message(STATUS "axon_bench: enabled (sndfile in ${SNDFILE_INCLUDE_DIRS})")
 else()

@@ -98,6 +98,18 @@ echo "  out:     $OUT"
 bash "$REPO_ROOT/native/clap/build.sh" axon "$BUNDLE" "$OUT"
 
 if [ "$DO_INSTALL" -eq 1 ]; then
+    # Refuse to install a bench-instrumented build (AXON_STAGE_TIMING) into the
+    # DAW plugin folder — the per-stage timing instrumentation is bench-only
+    # tooling. Instrumented builds must use --no-install.
+    EXE_NAME="$(/bin/ls "$OUT/Contents/MacOS/" | head -1)"
+    if /usr/bin/strings "$OUT/Contents/MacOS/$EXE_NAME" | grep -q "axon.stage-timing"; then
+        echo "[install_axon_mac] ERROR: this build is INSTRUMENTED (AXON_STAGE_TIMING)." >&2
+        echo "                   Refusing to install it into the DAW plugin folder." >&2
+        echo "                   Rebuild without AXON_STAGE_TIMING=1, or pass --no-install" >&2
+        echo "                   for bench builds." >&2
+        exit 1
+    fi
+
     INSTALL_DIR="$HOME/Library/Audio/Plug-Ins/CLAP"
     mkdir -p "$INSTALL_DIR"
     INSTALLED="$INSTALL_DIR/$(basename "$OUT")"

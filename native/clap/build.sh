@@ -101,9 +101,57 @@ NEED_CONFIGURE=0
 [ -f "$BUILD_DIR/build_config.sh" ] || NEED_CONFIGURE=1
 [ -f "$BUILD_DIR/nablafx_clap.so" ] || NEED_CONFIGURE=1
 [ -f "$BUILD_DIR/axon_clap.so"    ] || NEED_CONFIGURE=1
+
+# --- AXON_STAGE_TIMING plumbing (bench-only instrumentation; never ship) ----
+# Env var AXON_STAGE_TIMING=1 forces a reconfigure with the timing option ON.
+# Stale-cache guard: configure is normally SKIPPED when build outputs exist,
+# so if a previous instrumented configure left AXON_STAGE_TIMING:BOOL=ON in
+# the cache and the env var is NOT set now, we must force it back OFF — an
+# instrumented plugin must never silently ship from a stale cache.
+TIMING_FLAG=""
+CACHE_TIMING_ON=0
+if [ -f "$BUILD_DIR/CMakeCache.txt" ] \
+   && grep -q '^AXON_STAGE_TIMING:BOOL=ON$' "$BUILD_DIR/CMakeCache.txt"; then
+    CACHE_TIMING_ON=1
+fi
+if [ "${AXON_STAGE_TIMING:-0}" = "1" ]; then
+    NEED_CONFIGURE=1
+    TIMING_FLAG="-DAXON_STAGE_TIMING=ON"
+    echo "build.sh: AXON_STAGE_TIMING=1 — building INSTRUMENTED plugin (bench-only; do NOT ship)" >&2
+elif [ "$CACHE_TIMING_ON" -eq 1 ]; then
+    NEED_CONFIGURE=1
+    TIMING_FLAG="-DAXON_STAGE_TIMING=OFF"
+    cat >&2 <<'EOF'
+############################################################################
+# build.sh: STALE INSTRUMENTED CACHE DETECTED                              #
+#                                                                          #
+# The existing CMake cache has AXON_STAGE_TIMING:BOOL=ON (a previous       #
+# bench-instrumented build) but AXON_STAGE_TIMING=1 is not set in the      #
+# environment for this run. Forcing a reconfigure with the option OFF so   #
+# the per-stage timing instrumentation cannot silently ship.               #
+#                                                                          #
+# To build instrumented on purpose:  AXON_STAGE_TIMING=1 ./build.sh ...    #
+############################################################################
+EOF
+fi
+# ----------------------------------------------------------------------------
+
+# --- Release guard: a stale cache configured without CMAKE_BUILD_TYPE builds
+# with NO optimization and silently ships a ~3x slower plugin (this happened:
+# an -O0 build reached the DAW on 2026-07-05). Configure is skipped when build
+# outputs exist, so check the cache's build type and force a reconfigure (the
+# configure below always passes -DCMAKE_BUILD_TYPE=Release) when it is
+# anything but Release.
+if [ -f "$BUILD_DIR/CMakeCache.txt" ] \
+   && ! grep -q '^CMAKE_BUILD_TYPE:[^=]*=Release$' "$BUILD_DIR/CMakeCache.txt"; then
+    NEED_CONFIGURE=1
+    echo "build.sh: cache CMAKE_BUILD_TYPE is not Release — forcing reconfigure" \
+         "with -DCMAKE_BUILD_TYPE=Release (unoptimized builds must never ship)" >&2
+fi
+
 if [ "$NEED_CONFIGURE" -eq 1 ]; then
     cmake -S "$HERE" -B "$BUILD_DIR" -G "Unix Makefiles" \
-        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_BUILD_TYPE=Release ${TIMING_FLAG:+"$TIMING_FLAG"}
 fi
 cmake --build "$BUILD_DIR" -j
 

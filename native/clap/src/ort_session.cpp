@@ -1,5 +1,7 @@
 #include "ort_session.hpp"
 
+#include "ort_path.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -28,7 +30,11 @@ OrtSession::OrtSession(Ort::Env& env, const std::string& model_path, const Plugi
     session_opts_.EnableMemPattern();
     session_opts_.EnableCpuMemArena();
 
-    session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), session_opts_);
+    // ort_model_path: ORTCHAR_T-aware (wide path on Windows); on POSIX it
+    // returns model_path itself, so this line is behavior-identical to the
+    // old `model_path.c_str()`.
+    session_ = std::make_unique<Ort::Session>(
+        env_, ort_model_path(model_path).c_str(), session_opts_);
 
     // Cache input/output name c-strings. ORT's AllocatedStringPtr frees on
     // destruction so we copy into std::strings we own.

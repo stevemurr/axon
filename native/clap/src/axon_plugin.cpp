@@ -58,6 +58,7 @@
 #include "meter.hpp"
 #include "param_id.hpp"
 #include "mel_limiter.hpp"
+#include "ort_path.hpp"   // ORTCHAR_T-aware Ort::Session path (no-op on POSIX)
 #include "stft_common.hpp"
 #include "rational_a.hpp"
 #include "spectral_mask_eq.hpp"
@@ -397,7 +398,9 @@ public:
         opts.SetInterOpNumThreads(1);
         opts.SetExecutionMode(ORT_SEQUENTIAL);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), opts);
+        // ort_model_path: ORTCHAR_T-aware (wide on Windows; identity on POSIX).
+        session_ = std::make_unique<Ort::Session>(
+            env_, nablafx::ort_model_path(model_path).c_str(), opts);
         for (const auto& nm : meta.input_names)  in_names_owned_.push_back(nm);
         for (const auto& nm : meta.output_names) out_names_owned_.push_back(nm);
         for (auto& s : in_names_owned_)  in_names_.push_back(s.c_str());

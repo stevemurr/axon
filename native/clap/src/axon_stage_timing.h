@@ -18,9 +18,10 @@
 //     path and perturb the very numbers this exists to measure. This is
 //     bench-only tooling, not a shipping surface.
 //
-// Clock: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) — macOS-only (this repo is
-// macOS-arm64-only), monotonic, ~20-40 ns per read, no kernel trap on Apple
-// Silicon.
+// Clock: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) on macOS — monotonic,
+// ~20-40 ns per read, no kernel trap on Apple Silicon. Other platforms fall
+// back to std::chrono::steady_clock (also monotonic; a little more per-read
+// overhead, which is fine for this bench-only tooling).
 //
 // Histogram: log2 buckets — hist[b] counts samples with dt_ns in
 // [2^(b-1), 2^b) (b = min(31, 64 - clz(dt|1))). Percentiles reconstructed
@@ -31,7 +32,12 @@
 
 #include <stdint.h>
 #include <string.h>
-#include <time.h>
+
+#ifdef __APPLE__
+#include <time.h>       // clock_gettime_nsec_np
+#else
+#include <chrono>       // std::chrono::steady_clock fallback
+#endif
 
 #include <clap/clap.h>
 
@@ -96,10 +102,21 @@ static const char* const axon_stage_timing_slot_names[AXON_ST_SLOT_COUNT] = {
     "SslOrtForward", "AutoEqOrtCtrl",
 };
 
-// Nanosecond monotonic clock (macOS; no kernel trap on Apple Silicon).
+// Nanosecond monotonic clock.
+#ifdef __APPLE__
+// macOS: no kernel trap on Apple Silicon.
 static inline uint64_t axon_st_now(void) {
     return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 }
+#else
+// Portable fallback: steady_clock is monotonic on every platform we target
+// (Linux: CLOCK_MONOTONIC; Windows: QueryPerformanceCounter).
+static inline uint64_t axon_st_now(void) {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+#endif
 
 // Writer-side accumulator bank (lives inside the plugin instance; the
 // extension vtable serves entries out of it). Audio thread only — see the
@@ -120,6 +137,9 @@ struct AxonStageTimingBank {
 
     // Record one interval of dt_ns into slot. Hot path: two adds, one
     // compare, one clz-derived histogram bump. No atomics (see contract).
+    // Portability note: __builtin_clzll is available on clang, gcc AND
+    // clang-cl (the port's Windows toolchain). Only an MSVC-frontend build
+    // would need a _BitScanReverse64 alternative — not a supported toolchain.
     void record(int slot, uint64_t dt_ns) {
         axon_stage_timing_entry& e = entries[slot];
         e.calls    += 1;

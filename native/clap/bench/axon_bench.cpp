@@ -33,7 +33,48 @@
 #include <utility>
 #include <vector>
 
+#include "axon_stage_timing.h"   // per-stage timing readout ABI (optional ext)
+
 namespace fs = std::filesystem;
+
+// -----------------------------------------------------------------------------
+// Per-stage timing helpers (axon.stage-timing/1 — instrumented builds only)
+// -----------------------------------------------------------------------------
+
+// Approximate percentile from the log2-bucket histogram: bucket b covers
+// [2^(b-1), 2^b) ns (b=1 also swallows dt=0). Linear interpolation inside the
+// bucket; good to within 2x by construction, which is fine for ranking.
+static double hist_percentile_ns(const axon_stage_timing_entry& e, double p) {
+    if (e.calls == 0) return 0.0;
+    const double target = p * static_cast<double>(e.calls);
+    uint64_t cum = 0;
+    for (int b = 0; b < 32; ++b) {
+        if (e.hist[b] == 0) continue;
+        const uint64_t next = cum + e.hist[b];
+        if (static_cast<double>(next) >= target) {
+            const double lo = (b <= 1) ? 0.0 : std::ldexp(1.0, b - 1);
+            const double hi = std::ldexp(1.0, b);
+            const double frac = (target - static_cast<double>(cum))
+                                / static_cast<double>(e.hist[b]);
+            return lo + frac * (hi - lo);
+        }
+        cum = next;
+    }
+    return static_cast<double>(e.max_ns);
+}
+
+// Calibrate the timer's own cost: 1M back-to-back clock reads -> ns/read.
+// The recorded stage times each include ~1 read of overhead (t1 - t0 spans
+// exactly one trailing read); report it so the analysis can discount it.
+static double calibrate_timer_overhead_ns() {
+    constexpr int kReads = 1000000;
+    volatile uint64_t sink = 0;   // defeat dead-code elimination
+    const uint64_t t0 = axon_st_now();
+    for (int i = 0; i < kReads; ++i) sink = axon_st_now();
+    const uint64_t t1 = axon_st_now();
+    (void)sink;
+    return static_cast<double>(t1 - t0) / static_cast<double>(kReads);
+}
 
 // -----------------------------------------------------------------------------
 // Argument parsing
@@ -199,6 +240,9 @@ int main(int argc, char** argv) {
     Args a;
     if (!parse_args(argc, argv, a)) return 2;
 
+    // Timer-overhead calibration (before any processing so it's unperturbed).
+    const double timer_overhead_ns = calibrate_timer_overhead_ns();
+
     // 1. dlopen the bundle's executable + grab clap_entry.
     std::string dylib = find_clap_dylib(a.plugin_path);
     if (dylib.empty()) {
@@ -233,6 +277,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     plug->start_processing(plug);
+
+    // Per-stage timing extension — present only on AXON_STAGE_TIMING=1 builds;
+    // nullptr on default builds (degrade gracefully: "stage_timing": false).
+    const auto* st_ext = static_cast<const axon_stage_timing*>(
+        plug->get_extension(plug, AXON_EXT_STAGE_TIMING));
 
     // 2. Read input WAV.
     SF_INFO sfi{};
@@ -363,7 +412,21 @@ int main(int argc, char** argv) {
     };
 
     for (int i = 0; i < a.warmup; ++i) run_once(/*record=*/false);
+    // Zero the per-stage counters after warmup so stage stats cover exactly
+    // the timed window below.
+    if (st_ext && st_ext->reset) st_ext->reset(plug);
     for (int i = 0; i < a.iters;  ++i) run_once(/*record=*/true);
+
+    // Snapshot the per-stage entries BEFORE stop/deactivate (deactivate tears
+    // down the chains; readers must only touch the ext while not processing).
+    std::vector<axon_stage_timing_entry> st_entries;
+    if (st_ext && st_ext->count && st_ext->get) {
+        const uint32_t n = st_ext->count(plug);
+        for (uint32_t i = 0; i < n; ++i) {
+            axon_stage_timing_entry e{};
+            if (st_ext->get(plug, i, &e)) st_entries.push_back(e);
+        }
+    }
 
     plug->stop_processing(plug);
     plug->deactivate(plug);
@@ -416,6 +479,47 @@ int main(int argc, char** argv) {
     int    deadline_misses = 0;
     for (double us : block_us) if (us > deadline_us) ++deadline_misses;
 
+    // Per-stage stats (instrumented builds only). Percentages are of the
+    // total recorded process() time across the timed window, so per-stage
+    // totals and the harness' per-block numbers share one denominator.
+    struct StageStat {
+        std::string name;
+        uint64_t calls;
+        double total_us, mean_us, max_us, p50_us, p95_us, p99_us, pct;
+        bool subtimer;
+    };
+    std::vector<StageStat> stage_stats;
+    double accounted_pct = 0.0;
+    const double total_block_us =
+        std::accumulate(block_us.begin(), block_us.end(), 0.0);
+    if (!st_entries.empty()) {
+        double accounted_us = 0.0;
+        for (const auto& e : st_entries) {
+            if (e.calls == 0) continue;                       // never ran
+            if (std::strcmp(e.name, "Unused") == 0) continue; // slot 0
+            StageStat s;
+            s.name     = e.name;
+            s.calls    = e.calls;
+            s.total_us = static_cast<double>(e.total_ns) / 1e3;
+            s.mean_us  = s.total_us / static_cast<double>(e.calls);
+            s.max_us   = static_cast<double>(e.max_ns) / 1e3;
+            s.p50_us   = hist_percentile_ns(e, 0.50) / 1e3;
+            s.p95_us   = hist_percentile_ns(e, 0.95) / 1e3;
+            s.p99_us   = hist_percentile_ns(e, 0.99) / 1e3;
+            s.pct      = (total_block_us > 0.0)
+                       ? 100.0 * s.total_us / total_block_us : 0.0;
+            s.subtimer = (e.is_subtimer != 0);
+            if (!s.subtimer) accounted_us += s.total_us;
+            stage_stats.push_back(std::move(s));
+        }
+        std::sort(stage_stats.begin(), stage_stats.end(),
+                  [](const StageStat& x, const StageStat& y) {
+                      return x.total_us > y.total_us;
+                  });
+        accounted_pct = (total_block_us > 0.0)
+                      ? 100.0 * accounted_us / total_block_us : 0.0;
+    }
+
     if (a.json_stats) {
         std::printf("{\n");
         std::printf("  \"plugin\": \"%s\",\n", effect_name.c_str());
@@ -432,8 +536,32 @@ int main(int argc, char** argv) {
         std::printf("  \"realtime_factor_mean\": %.4f,\n", rtf_mean);
         std::printf("  \"block_deadline_us\": %.3f,\n", deadline_us);
         std::printf("  \"deadline_miss_count\": %d,\n", deadline_misses);
-        std::printf("  \"deadline_miss_pct\": %.4f\n",
+        std::printf("  \"deadline_miss_pct\": %.4f,\n",
                     block_us.empty() ? 0.0 : 100.0 * deadline_misses / block_us.size());
+        std::printf("  \"timer_overhead_ns\": %.2f,\n", timer_overhead_ns);
+        std::printf("  \"stage_timing\": %s", st_ext ? "true" : "false");
+        if (!stage_stats.empty()) {
+            std::printf(",\n  \"per_stage\": [\n");
+            for (size_t i = 0; i < stage_stats.size(); ++i) {
+                const auto& s = stage_stats[i];
+                std::printf("    {\"name\": \"%s\", \"calls\": %llu, "
+                            "\"total_us\": %.3f, \"mean_us\": %.3f, "
+                            "\"max_us\": %.3f, \"p50_us\": %.3f, "
+                            "\"p95_us\": %.3f, \"p99_us\": %.3f, "
+                            "\"pct_of_process_total\": %.3f, "
+                            "\"subtimer\": %s}%s\n",
+                            s.name.c_str(),
+                            static_cast<unsigned long long>(s.calls),
+                            s.total_us, s.mean_us, s.max_us,
+                            s.p50_us, s.p95_us, s.p99_us, s.pct,
+                            s.subtimer ? "true" : "false",
+                            (i + 1 < stage_stats.size()) ? "," : "");
+            }
+            std::printf("  ],\n");
+            std::printf("  \"per_stage_accounted_pct\": %.3f\n", accounted_pct);
+        } else {
+            std::printf("\n");
+        }
         std::printf("}\n");
     } else {
         std::printf("plugin       : %s\n", effect_name.c_str());
@@ -447,6 +575,27 @@ int main(int argc, char** argv) {
                     deadline_us, deadline_misses,
                     block_us.empty() ? 0.0 : 100.0 * deadline_misses / block_us.size());
         std::printf("RTF mean     : %.3fx\n", rtf_mean);
+        if (!stage_stats.empty()) {
+            std::printf("\nper-stage timing (timer overhead ~%.0f ns/read; "
+                        "sub-timers nested in their parent):\n",
+                        timer_overhead_ns);
+            std::printf("  %-16s %10s %10s %10s %10s %12s %8s\n",
+                        "stage", "calls", "mean us", "p95 us", "max us",
+                        "total ms", "%proc");
+            for (const auto& s : stage_stats) {
+                std::printf("  %s%-15s %10llu %10.2f %10.2f %10.2f %12.3f %7.2f%%\n",
+                            s.subtimer ? "+" : " ", s.name.c_str(),
+                            static_cast<unsigned long long>(s.calls),
+                            s.mean_us, s.p95_us, s.max_us,
+                            s.total_us / 1e3, s.pct);
+            }
+            std::printf("  accounted (non-subtimer stage time / process time): %.1f%%\n",
+                        accounted_pct);
+        } else if (st_ext) {
+            std::printf("per-stage    : extension present but no samples recorded\n");
+        } else {
+            std::printf("per-stage    : n/a (plugin built without AXON_STAGE_TIMING)\n");
+        }
     }
 
     return 0;

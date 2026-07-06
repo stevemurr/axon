@@ -56,12 +56,26 @@ BUS_COMP_ONLY = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=1.0,CLS=4,LVL=0,OLV=0,TR
 # Bypass: every stage's amount at 0 to measure plumbing overhead only.
 BYPASS = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
 
+# Everything-on: FULL_CHAIN leaves several gated stages off (SslEq via SEQ_ON,
+# BassMono via BMI, Reverb via RVB_MIX, Widener via WID_ON all default 0).
+# This scenario enables every stage that is wired into processor_order —
+# SslEq gets non-flat band gains so its biquads do real work. (Saturator and
+# Exciter are dormant: not in processor_order, so they cannot be enabled.)
+FULL_CHAIN_ALL = (
+    FULL_CHAIN
+    + ",SEQ_ON=1,SEQ_LF_G=3,SEQ_HMF_G=-2.5,SEQ_HF_G=2,SEQ_HPF_ON=1"
+    + ",BMI=1.0,BMF=120"
+    + ",RVB_MIX=0.25"
+    + ",WID_ON=1,WID_AMT=1.25,WID_AIR=0.3"
+)
+
 SCENARIOS: List[tuple[str, str]] = [
     ("full_chain",    FULL_CHAIN),
     ("eq_only",       EQ_ONLY),
     ("sat_only",      SAT_ONLY),
     ("bus_comp_only", BUS_COMP_ONLY),
     ("bypass",        BYPASS),
+    ("full_chain_all", FULL_CHAIN_ALL),
 ]
 
 BUFFER_SIZES = [64, 128, 256, 512, 1024]
@@ -117,7 +131,17 @@ class CellResult:
 
 def run_cell(bench_bin: Path, bundle: Path, fixture: Path,
              scenario: str, params: str,
-             buffer_size: int, iters: int, warmup: int) -> CellResult:
+             buffer_size: int, iters: int,
+             warmup: int) -> tuple[CellResult, Optional[dict]]:
+    """Run one cell. Returns (CellResult, stage_dict).
+
+    stage_dict is None unless the plugin was built with AXON_STAGE_TIMING=1,
+    in which case it carries the per-stage timing side-channel:
+      {"per_stage": [...], "per_stage_accounted_pct": float,
+       "timer_overhead_ns": float}
+    It is kept OUT of CellResult so the numeric fields keep round-tripping
+    through baseline.json unchanged.
+    """
     cmd = [
         str(bench_bin),
         "--plugin",  str(bundle),
@@ -135,7 +159,7 @@ def run_cell(bench_bin: Path, bundle: Path, fixture: Path,
         sys.exit(1)
     j = json.loads(proc.stdout)
     pb = j["per_block_us"]
-    return CellResult(
+    cell = CellResult(
         scenario=scenario, buffer_size=buffer_size,
         p50_us=pb["p50"], p95_us=pb["p95"], p99_us=pb["p99"],
         max_us=pb["max"], mean_us=pb["mean"], block_count=pb["count"],
@@ -144,6 +168,14 @@ def run_cell(bench_bin: Path, bundle: Path, fixture: Path,
         deadline_misses=j["deadline_miss_count"],
         deadline_miss_pct=j["deadline_miss_pct"],
     )
+    stage: Optional[dict] = None
+    if j.get("per_stage"):
+        stage = {
+            "per_stage": j["per_stage"],
+            "per_stage_accounted_pct": j.get("per_stage_accounted_pct", 0.0),
+            "timer_overhead_ns": j.get("timer_overhead_ns", 0.0),
+        }
+    return cell, stage
 
 
 # ----------------------------------------------------------------------------
@@ -255,6 +287,60 @@ def format_summary(now: List[CellResult],
     return "\n".join(lines) + "\n"
 
 
+# Sub-timer -> parent stage (sub-timers are nested inside the parent's time,
+# so they are indented under it and excluded from the accounted-% sum).
+SUBTIMER_PARENT = {
+    "SslOrtForward": "SslComp",
+    "AutoEqOrtCtrl": "AutoEQ",
+}
+
+
+def format_stage_tables(stage_data: Dict[tuple[str, int], dict]) -> str:
+    """Ranked per-stage timing tables (instrumented builds only).
+
+    One table per (scenario, buffer) cell, ranked by % of total process()
+    time; sub-timers are indented under their parent stage.
+    """
+    lines: List[str] = []
+    lines.append("## Per-stage timing (instrumented build)")
+    lines.append("")
+    lines.append("Plugin built with `AXON_STAGE_TIMING=1` — numbers below are")
+    lines.append("bench-only diagnostics; do NOT compare against or update the")
+    lines.append("committed baseline with an instrumented build.")
+    lines.append("")
+    for (scenario, buf), sd in stage_data.items():
+        per_stage = sd["per_stage"]
+        lines.append(f"### `{scenario}` buf={buf}")
+        lines.append("")
+        lines.append(f"- timer overhead: {sd['timer_overhead_ns']:.0f} ns/read")
+        lines.append(f"- accounted (non-subtimer stage time / process time): "
+                     f"{sd['per_stage_accounted_pct']:.1f}%")
+        lines.append("")
+        lines.append("| stage | calls | mean µs | p95 µs | max µs | total ms | % of process |")
+        lines.append("|:------|------:|--------:|-------:|-------:|---------:|-------------:|")
+        parents = [s for s in per_stage if not s.get("subtimer")]
+        subs    = [s for s in per_stage if s.get("subtimer")]
+        parents.sort(key=lambda s: s["pct_of_process_total"], reverse=True)
+        def row(s: dict, indent: bool) -> str:
+            name = ("&nbsp;&nbsp;↳ " if indent else "") + s["name"]
+            return (f"| {name} | {s['calls']} | {s['mean_us']:.2f} "
+                    f"| {s['p95_us']:.2f} | {s['max_us']:.2f} "
+                    f"| {s['total_us']/1e3:.3f} "
+                    f"| {s['pct_of_process_total']:.2f}% |")
+        for p in parents:
+            lines.append(row(p, indent=False))
+            for s in subs:
+                if SUBTIMER_PARENT.get(s["name"]) == p["name"]:
+                    lines.append(row(s, indent=True))
+        # Orphan sub-timers (parent gated off / zero calls): still show them.
+        parent_names = {p["name"] for p in parents}
+        for s in subs:
+            if SUBTIMER_PARENT.get(s["name"]) not in parent_names:
+                lines.append(row(s, indent=True))
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 # ----------------------------------------------------------------------------
 # Entry point
 # ----------------------------------------------------------------------------
@@ -327,15 +413,31 @@ def main() -> int:
     print()
 
     results: List[CellResult] = []
+    stage_data: Dict[tuple[str, int], dict] = {}   # per-stage timing side-dict
     for name, params in scenarios:
         for buf in buffers:
             print(f"  [{name:<14s}  buf={buf:>4d}] ", end="", flush=True)
-            r = run_cell(bench_bin, bundle, args.fixture, name, params,
-                         buf, args.iters, args.warmup)
+            r, stage = run_cell(bench_bin, bundle, args.fixture, name, params,
+                                buf, args.iters, args.warmup)
             results.append(r)
+            if stage is not None:
+                stage_data[(name, buf)] = stage
             print(f"p99={r.p99_us:7.1f} µs  RTF={r.rtf:5.2f}×  "
                   f"misses={r.deadline_misses:>3d}/{r.block_count}")
     print()
+
+    # Observer-effect guard: an instrumented plugin (AXON_STAGE_TIMING=1)
+    # carries per-stage clock reads in the hot path — its absolute numbers
+    # must never become the committed baseline.
+    if args.update_baseline and stage_data:
+        print("error: refusing --update-baseline: the plugin reports per-stage")
+        print("       timing data, i.e. it was built with AXON_STAGE_TIMING=1.")
+        print("       Instrumented builds pay for the timing probes in the hot")
+        print("       path; committing their numbers would poison the baseline.")
+        print("       Rebuild without AXON_STAGE_TIMING (e.g. bash")
+        print("       scripts/install_axon_mac.sh --no-install) and rerun")
+        print("       --update-baseline.")
+        return 1
 
     meta = {
         "plugin": "Axon",
@@ -347,6 +449,12 @@ def main() -> int:
         "warmup": args.warmup,
     }
     payload = {"meta": meta, "results": [cell_to_dict(r) for r in results]}
+    if stage_data:
+        # Side-channel only: keyed "scenario|buf", never read back by compare()
+        # and never written to baseline.json (see the update-baseline guard).
+        payload["stage_timing"] = {
+            f"{scn}|{buf}": sd for (scn, buf), sd in stage_data.items()
+        }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"wrote {args.out}")
@@ -372,6 +480,8 @@ def main() -> int:
         diffs = compare(results, base_results)
 
     summary = format_summary(results, diffs, meta)
+    if stage_data:
+        summary += "\n" + format_stage_tables(stage_data)
     args.summary.write_text(summary)
     print(f"wrote {args.summary}")
     print()

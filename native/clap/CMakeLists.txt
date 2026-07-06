@@ -72,6 +72,17 @@ target_link_libraries(axon_clap PRIVATE
     "-framework Accelerate"   # vDSP_fft for SpectralMaskEq
 )
 
+# Per-stage CPU timing instrumentation (src/axon_stage_timing.h). Bench-only:
+# adds two clock reads around every stage in the audio hot path and exposes a
+# custom CLAP extension for readout. OFF by default — default builds are
+# bit-identical to uninstrumented ones. build.sh has a stale-cache guard so an
+# instrumented cache can never silently ship.
+option(AXON_STAGE_TIMING "Per-stage timing instrumentation (bench-only; do NOT ship)" OFF)
+if(AXON_STAGE_TIMING)
+    target_compile_definitions(axon_clap PRIVATE AXON_STAGE_TIMING=1)
+    message(STATUS "axon_clap: AXON_STAGE_TIMING=ON (instrumented; bench-only, do NOT ship)")
+endif()
+
 # Install the onnxruntime dylib next to ours and make each plugin find it
 # via @loader_path/../Frameworks once it's inside its .clap bundle.
 foreach(_t nablafx_clap axon_clap)
@@ -250,6 +261,7 @@ if(_have_sndfile)
     target_include_directories(axon_bench PRIVATE
         ${CLAP_INCLUDE_DIR}
         ${SNDFILE_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/src      # axon_stage_timing.h (timing readout ABI)
     )
     target_link_directories(axon_bench PRIVATE ${SNDFILE_LIBRARY_DIRS})
     target_link_libraries(axon_bench PRIVATE

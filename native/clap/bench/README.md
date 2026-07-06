@@ -44,13 +44,14 @@ machine-readable dump with every cell's stats.
 
 ## Scenario × buffer matrix
 
-| scenario        | what's exercised                                        |
-|-----------------|---------------------------------------------------------|
-| `full_chain`    | every stage active at moderate-to-high amounts          |
-| `eq_only`       | just the auto-EQ (controller + SpectralMaskEq)          |
-| `sat_only`      | just the saturator (RationalA)                          |
-| `bus_comp_only` | just the bus comp TCN                               |
-| `bypass`        | every stage's amount at 0 — measures plumbing overhead  |
+| scenario         | what's exercised                                        |
+|------------------|---------------------------------------------------------|
+| `full_chain`     | historical "full" mix: AutoEQ + bus comp + limiter      |
+| `eq_only`        | just the auto-EQ (controller + SpectralMaskEq)          |
+| `sat_only`       | just the saturator (RationalA)                          |
+| `bus_comp_only`  | just the bus comp TCN                               |
+| `bypass`         | every stage's amount at 0 — measures plumbing overhead  |
+| `full_chain_all` | every wired stage on: `full_chain` + SslEq (SEQ_ON=1, non-flat bands) + BassMono + Reverb + Widener |
 
 Buffers: `64, 128, 256, 512, 1024` frames @ 44.1 kHz (deadlines:
 1.45, 2.90, 5.81, 11.61, 23.22 ms).
@@ -67,6 +68,62 @@ Default cell config: 10 timed iters + 2 warmup. Override with
 # Faster iteration: 3 iters, no warmup, no compare
 ./run_bench.py --iters 3 --warmup 0 --no-compare
 ```
+
+## Per-stage timing (instrumented builds — do NOT ship)
+
+The plugin can be compiled with per-stage CPU timing probes
+(`src/axon_stage_timing.h`) that time every chain stage, the fixed
+plumbing (meters / spectrum push / trim+ceiling / auto gain), and the two
+ORT hot spots (bus-comp TCN forward, auto-EQ LSTM controller). The bench
+reads them out through a custom CLAP extension (`axon.stage-timing/1`)
+after the timed loop, so the readout itself never perturbs a measured
+block.
+
+Build instrumented — set the `AXON_STAGE_TIMING=1` env var in front of any
+build entry point that reaches `native/clap/build.sh` (it forces a cmake
+reconfigure with `-DAXON_STAGE_TIMING=ON`):
+
+```bash
+AXON_STAGE_TIMING=1 bash scripts/install_axon_mac.sh --no-install   # canonical (uses weights/axon_bundle)
+# or, driving build.sh directly:
+AXON_STAGE_TIMING=1 native/clap/build.sh axon <staging-dir> build/Axon.clap
+# (scripts/install_axon_mac.sh works too, on checkouts that have artifacts/axon-bundles/)
+```
+
+Then run the bench as usual; `run_bench.py` appends a
+"Per-stage timing" section to `last_run.md` per (scenario, buffer) cell
+and stores the raw data under `stage_timing` in `last_run.json`.
+`axon_bench` (non-`--json`) prints the same ranked table. The
+`full_chain_all` scenario turns on every wired stage (incl. SslEq via
+`SEQ_ON=1` with non-flat band gains) so nothing is hidden by gating.
+
+Reading the table:
+
+- ranked by **% of process** = stage total / total recorded `process()`
+  wall time. The **accounted** line sums the non-subtimer rows — expect
+  roughly 85–98%; the remainder is block plumbing outside
+  `flush_chain_block_` (ring copies, event handling).
+- rows prefixed `↳` are **sub-timers** *nested inside* their parent stage
+  (`SslOrtForward` ⊂ `SslComp`, `AutoEqOrtCtrl` ⊂ `AutoEQ`) — don't add
+  them to the parent, they're already counted there.
+- `p50/p95/p99` come from log2-bucket histograms (linear interpolation
+  within a bucket, so within ~2×); `max` is exact.
+- gated-off stages still show ~40 ns/call (two clock reads around an
+  immediate `break`). AutoEQ is NOT ~0 in `bypass`: its LSTM controller
+  runs ungated every block by design.
+- `timer_overhead_ns` is the cost of one clock read (calibrated at bench
+  startup); each recorded interval includes about one read of overhead.
+
+Guards (observer effect):
+
+- **Do not ship an instrumented build** — the probes cost two clock reads
+  per stage per 128-sample block in the audio hot path.
+- `run_bench.py` **refuses `--update-baseline`** while the plugin reports
+  per-stage data (exit 1): instrumented numbers must never become the
+  committed baseline.
+- `build.sh` auto-detects a stale instrumented CMake cache and forces the
+  option back OFF (loud notice) when `AXON_STAGE_TIMING=1` isn't set, so
+  a later default build can't silently ship with probes in.
 
 ## Updating the baseline
 

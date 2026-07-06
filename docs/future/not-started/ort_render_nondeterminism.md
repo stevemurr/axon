@@ -22,7 +22,7 @@ strictly immune.
 
 The diffs sit inside the documented Auto-EQ/MelLimiter ill-conditioned band
 (−75..−90 dBFS from 1-ULP perturbations — see
-`docs/*` ill-conditioning notes and `mel_limiter_perf_findings.md`), which is
+the Mel Limiter and Auto EQ deep dives, `docs/deep-dives/`), which is
 why a single-ULP upstream wobble surfaces at these levels.
 
 ## What is already ruled in/out

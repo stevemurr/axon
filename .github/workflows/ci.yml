@@ -1,13 +1,19 @@
 name: CI
 
-# Build the CLAP plugins and run the C++ unit tests.
+# Build the CLAP plugins and run the C++ unit tests, on both supported
+# platforms:
 #
-# The whole native build is Apple-Silicon-only by design:
-#   - native/clap/CMakeLists.txt FATAL_ERRORs on non-Apple and forces arm64
-#   - cmake/FetchOnnxRuntime.cmake downloads the osx-ARM64 ONNX Runtime tarball
-# so CI MUST run on an Apple-Silicon runner. macos-14 and macos-15 are arm64;
-# macos-13 is Intel and would fail to configure. Nothing here "expects" Apple
-# Silicon in a fragile way — the entire toolchain targets it natively.
+#   * macOS arm64 — the reference platform. Real Accelerate/vDSP, real
+#     bundles; renders here are the null-test baseline, so this job must stay
+#     green and byte-identical in behavior.
+#   * Linux x64 — the port's Phase 1 (headless; portable pffft-backed
+#     Accelerate shim, no GUI backend). Renders CANNOT be compared against
+#     mac ones (different FFT backend), so this job's oracle is the unit
+#     suite + test_tolerance_stages (steady-state magnitude/level invariants)
+#     + the plugin-level ssl-integration test against a packaged dir-bundle.
+#
+# macos-14/15 are arm64; macos-13 is Intel and would fail to configure.
+# See docs/future/active/windows-linux-builds.md for the port's design.
 
 on:
   push:
@@ -42,9 +48,10 @@ jobs:
           clang --version | head -1
           echo "arch: $(uname -m)"
 
-      # CLAP, nlohmann/json (git) and ONNX Runtime (release tarball) are pulled
-      # at configure time into build/_deps. Cache them keyed on the Fetch files.
-      - name: Cache fetched deps (CLAP / json / ONNX Runtime)
+      # CLAP, nlohmann/json (git), ONNX Runtime (release tarball) and pffft
+      # (git) are pulled at configure time into build/_deps. Cache them keyed
+      # on the Fetch files.
+      - name: Cache fetched deps (CLAP / json / ONNX Runtime / pffft)
         uses: actions/cache@v4
         with:
           path: native/clap/build/_deps
@@ -84,3 +91,56 @@ jobs:
             exit 1
           fi
           exit "$fail"
+
+  build-and-test-linux:
+    name: build + unit tests (Linux x64, headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          cmake --version
+          c++ --version | head -1
+          echo "arch: $(uname -m)"
+
+      - name: Install apt deps (libsndfile for axon_bench)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsndfile1-dev pkg-config
+
+      - name: Cache fetched deps (CLAP / json / ONNX Runtime / pffft)
+        uses: actions/cache@v4
+        with:
+          path: native/clap/build/_deps
+          key: deps-${{ runner.os }}-x64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
+          restore-keys: |
+            deps-${{ runner.os }}-x64-
+
+      - name: Configure
+        run: >
+          cmake -S native/clap -B native/clap/build
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (plugins + bench + all unit tests)
+        run: cmake --build native/clap/build -j
+
+      # Stage the composite dir-bundle so test_ssl_integration runs for real
+      # on Linux (it self-skips without a packaged plugin). This exercises the
+      # whole load path: dladdr resource discovery -> Resources/ probing ->
+      # ORT session bring-up -> bench render.
+      - name: Package Axon.clap (Linux directory bundle)
+        run: bash native/clap/package_linux.sh axon "$PWD/weights/axon_bundle" "$PWD/build/Axon.clap"
+
+      - name: Run test suite (ctest)
+        run: ctest --test-dir native/clap/build --output-on-failure
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-logs
+          path: |
+            native/clap/build/Testing/**/*.log
+          if-no-files-found: ignore

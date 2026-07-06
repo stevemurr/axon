@@ -33,7 +33,7 @@
 
 #pragma once
 
-#include <Accelerate/Accelerate.h>
+#include "accelerate_shim.hpp"  // vDSP on macOS; portable pffft-backed shim elsewhere
 
 #include <cmath>
 #include <vector>

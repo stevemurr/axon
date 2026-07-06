@@ -23,13 +23,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
-
-#include <dlfcn.h>
 
 #include <clap/clap.h>
 #include <onnxruntime_cxx_api.h>
@@ -37,10 +34,9 @@
 #include "meta.hpp"
 #include "ort_session.hpp"
 #include "param_id.hpp"
+#include "resource_path.hpp"  // cross-platform bundle/resource discovery
 
 namespace nablafx {
-
-namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
 // Module-global state (loaded once at module init)
@@ -48,7 +44,7 @@ namespace fs = std::filesystem;
 
 struct ModuleState {
     PluginMeta                 meta;
-    std::string                bundle_dir;           // .../MyEffect.clap/Contents
+    std::string                resources_dir;        // see resource_path.hpp
     std::string                model_onnx_path;
     std::string                plugin_id_str;        // "com.nablafx.<model_id>"
     clap_plugin_descriptor_t   descriptor{};
@@ -58,19 +54,6 @@ struct ModuleState {
 };
 
 static ModuleState* g_state = nullptr;
-
-// Locate the .clap bundle by asking dlfcn for the path of the symbol we're
-// executing — the dylib lives at .clap/Contents/MacOS/<name>, so the bundle
-// is two directories up.
-static std::string find_bundle_contents_() {
-    Dl_info info{};
-    if (dladdr(reinterpret_cast<const void*>(&find_bundle_contents_), &info) == 0 || !info.dli_fname) {
-        return {};
-    }
-    fs::path dylib = info.dli_fname;
-    // .clap/Contents/MacOS/<dylib>  ->  .clap/Contents
-    return dylib.parent_path().parent_path().string();
-}
 
 static void populate_descriptor_(ModuleState& st) {
     st.plugin_id_str = "com.nablafx." + st.meta.model_id;
@@ -419,12 +402,12 @@ static bool entry_init(const char* /*plugin_path*/) {
     if (g_state) return true;
     try {
         auto st = std::make_unique<ModuleState>();
-        st->bundle_dir = find_bundle_contents_();
-        if (st->bundle_dir.empty()) return false;
+        st->resources_dir = find_resources_dir(
+            reinterpret_cast<const void*>(&entry_init), "plugin_meta.json");
+        if (st->resources_dir.empty()) return false;
 
-        const std::string meta_path = st->bundle_dir + "/Resources/plugin_meta.json";
-        st->meta = load_meta(meta_path);
-        st->model_onnx_path = st->bundle_dir + "/Resources/model.onnx";
+        st->meta = load_meta(st->resources_dir + "/plugin_meta.json");
+        st->model_onnx_path = st->resources_dir + "/model.onnx";
 
         st->ort_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "nablafx");
         populate_descriptor_(*st);

@@ -9,7 +9,7 @@
 // unchanged and renders stay byte-identical.
 
 #pragma once
-#include <Accelerate/Accelerate.h>
+#include "accelerate_shim.hpp"  // vDSP on macOS; portable pffft-backed shim elsewhere
 
 #include <algorithm>
 #include <cmath>

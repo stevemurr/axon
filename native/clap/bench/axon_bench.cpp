@@ -230,11 +230,39 @@ static bool out_try_push(const clap_output_events_t*, const clap_event_header_t*
 // Bundle helpers
 // -----------------------------------------------------------------------------
 
+// Locate the loadable plugin binary for every supported .clap layout (see
+// src/resource_path.hpp for the resource-side convention):
+//   - macOS bundle:       <bundle>/Contents/MacOS/<binary>
+//   - directory bundle:   <bundle>/<name>.so or <name>.clap (Linux/Windows)
+//   - flat single file:   <bundle> IS the shared object itself
 static std::string find_clap_dylib(const std::string& bundle) {
-    fs::path mac = fs::path(bundle) / "Contents" / "MacOS";
-    if (!fs::is_directory(mac)) return {};
-    for (auto& e : fs::directory_iterator(mac)) {
-        if (e.is_regular_file()) return e.path().string();
+    fs::path p(bundle);
+    if (fs::is_regular_file(p)) return p.string();  // flat single-file .clap
+    fs::path mac = p / "Contents" / "MacOS";
+    if (fs::is_directory(mac)) {
+        for (auto& e : fs::directory_iterator(mac)) {
+            if (e.is_regular_file()) return e.path().string();
+        }
+        return {};
+    }
+    if (fs::is_directory(p)) {  // directory bundle: binary at the top level
+        // Prefer "<BundleStem>.so/.clap" (what package scripts stage), then
+        // any plugin-looking binary that is not a bundled dependency
+        // (libonnxruntime.so.* also lives here — never dlopen that).
+        const std::string stem = p.stem().string();
+        for (const char* ext : {".so", ".clap", ".dll"}) {
+            fs::path cand = p / (stem + ext);
+            if (fs::is_regular_file(cand)) return cand.string();
+        }
+        for (auto& e : fs::directory_iterator(p)) {
+            if (!e.is_regular_file()) continue;
+            const std::string name = e.path().filename().string();
+            const std::string ext  = e.path().extension().string();
+            if (name.rfind("lib", 0) == 0) continue;  // dependency, not plugin
+            if (ext == ".so" || ext == ".clap" || ext == ".dll") {
+                return e.path().string();
+            }
+        }
     }
     return {};
 }
@@ -253,7 +281,7 @@ int main(int argc, char** argv) {
     // 1. dlopen the bundle's executable + grab clap_entry.
     std::string dylib = find_clap_dylib(a.plugin_path);
     if (dylib.empty()) {
-        std::fprintf(stderr, "no executable in %s/Contents/MacOS/\n", a.plugin_path.c_str());
+        std::fprintf(stderr, "no plugin binary found in %s (looked for Contents/MacOS/*, <stem>.so/.clap, flat file)\n", a.plugin_path.c_str());
         return 1;
     }
     void* handle = dlopen(dylib.c_str(), RTLD_NOW | RTLD_LOCAL);

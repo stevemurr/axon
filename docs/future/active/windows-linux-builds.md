@@ -313,3 +313,139 @@ both platforms (`gui_set_scale` currently returns false).
 **Deliberately NOT in Phase 3:** Wayland embedding, HiDPI scale
 plumbing, a WebView2 runtime bootstrapper/installer, `install --linux/
 --win` CLI sugar, code signing.
+
+## Implementation (2026-07-06+)
+
+Consolidated record of what the port shipped, phase by phase, plus the
+final verification gate. The detailed per-phase notes above remain the
+authoritative design record; this section is the summary + acceptance
+ledger.
+
+### What shipped per phase
+
+- **Phase 0 — the Accelerate seam (merged to main via 1af8f37).**
+  `src/accelerate_shim.hpp` is the single portability boundary:
+  `#ifdef __APPLE__` → real Accelerate (mac renders byte-identical by
+  construction); everywhere else the same 17-symbol vDSP/vForce surface
+  (including the zrip packed format and its 2N forward scaling) is
+  implemented in `nablafx::portable_shim` over pffft
+  (`cmake/FetchPffft.cmake`, SHA-pinned, BSD-3-style license). The six
+  consuming files swapped one include each — zero call-site changes.
+  Also: `std::chrono` fallback in the stage-timing header and the
+  `ORTCHAR_T`-aware `ort_path.hpp` at both `Ort::Session` sites.
+- **Phase 1 — Linux x64 headless (merged to main via 1af8f37).**
+  `src/resource_path.hpp` resource convention (decision recorded below),
+  full non-Apple CMake path (SHA-pinned linux-x64 ORT 1.20.1, shim
+  threaded through every vDSP consumer, `$ORIGIN` rpath), headless GUI
+  stub, `package_linux.sh` dir-bundle staging, ubuntu-latest CI running
+  the entire ctest suite including `test_ssl_integration` against the
+  real packaged plugin.
+- **Phase 2 — Windows x64 headless.** clang-cl + Ninja WIN32 CMake
+  branch, SHA-pinned ORT win-x64 + libsndfile win64 prebuilts,
+  `src/dyn_module.hpp` (dlopen ↔ `LoadLibraryExW` seam),
+  `package_windows.py` dir-bundle, portable temp-file fixes, and a
+  windows-latest CI job — none of the ctest targets skipped.
+- **Phase 3 — GUI backends.** `src/axon_gui_gtk.cpp`
+  (webkit2gtk/GtkPlug, `CLAP_WINDOW_API_X11`) and `src/axon_gui_win.cpp`
+  (WebView2, `CLAP_WINDOW_API_WIN32`) implement the unchanged
+  `axon_gui.h` C ABI over the unmodified `ui/index.html`; the shared,
+  unit-tested bridge core `src/axon_gui_bridge.hpp` is now used by all
+  three backends including the mac reference. Compile+link is verified
+  by CI (`-DAXON_REQUIRE_GUI=ON`); **runtime in a real host is not**
+  (see the hands-on list).
+
+### Test inventory added by the port
+
+The suite grew 25 → 29 ctest targets; every new test also runs on macOS
+so regressions are caught locally, not just in platform CI.
+
+1. `test_accelerate_shim` (Phase 0) — pins the zrip packing per backend
+   with known answers, forward/inverse FFT equivalence + round-trips for
+   both backends (N = 1024/2048/4096), all 11 vector/complex ops against
+   scalar references (bitwise) and real vDSP, vForce within 4 ulp.
+2. `test_tolerance_stages` (Phase 1) — the per-platform acceptance
+   oracle the scoping caveat demanded: steady-state magnitude/level
+   invariants (±0.1–0.75 dB point checks, bit-exact contractual
+   passthroughs) for MelLimiter, SpectralMaskEq, IirFilterbankEq,
+   BassMono, Widener, Reverb, LoudnessMeter; deterministic signal
+   generation (xorshift, no `std::*_distribution`). Green against BOTH
+   FFT backends.
+3. `test_resource_path` (Phase 2) — `module_path_from_addr` against the
+   real per-OS API, both resource-layout rules exercised with real temp
+   trees on every platform, and the `ort_model_path` `ORTCHAR_T`
+   boundary (POSIX identity-by-reference; UTF-8→UTF-16 on Windows).
+4. `test_axon_gui_bridge` (Phase 3) — golden `axonInit({...})` handshake
+   bytes (the three backends cannot drift from the page contract),
+   bridge-message decoder happy paths + 23 malformed-input rejections,
+   `file_url_from_path` POSIX/drive/UNC shapes, WebView2 bootstrap-shim
+   tokens.
+
+Additionally: `test_ssl_integration` now runs for real on Linux AND
+Windows CI against packaged dir-bundles (previously it would self-skip
+off-mac), and `test_meta`, `test_ort_session`,
+`test_composite_meta_validate`, `test_spectral_mask_eq`, `test_cli`
+gained Windows portability branches so nothing is skipped anywhere.
+
+### CI matrix (.github/workflows/ci.yml)
+
+| Job | Runner | Toolchain | DSP backend | GUI | Suite |
+|---|---|---|---|---|---|
+| macOS arm64 | macos-14 | AppleClang | real Accelerate | Cocoa/WebKit | all test binaries (reference platform; null-test baseline) |
+| Linux x64 | ubuntu-latest | gcc | pffft shim | webkit2gtk (`AXON_REQUIRE_GUI=ON`) | full ctest (29), incl. packaged-plugin integration |
+| Windows x64 | windows-latest | clang-cl + Ninja | pffft shim | WebView2 (`AXON_REQUIRE_GUI=ON`) | full ctest (29), incl. packaged-plugin integration |
+
+Non-mac jobs package the dir-bundle before ctest so the plugin-level
+integration test exercises the real load path end to end.
+
+### Resource-layout decision (recorded)
+
+- **macOS: unchanged, byte-identical** — resources are always at
+  `<module_dir>/../Resources` (the historical bundle rule, no probing).
+- **Linux/Windows: directory bundle first, flat side-by-side fallback.**
+  The loader probes `<module_dir>/Resources/<marker>` then
+  `<module_dir>/<marker>`, where the marker is the plugin's meta json —
+  so a stray `Resources/` directory cannot shadow the real layout. The
+  canonical install form is the dir-bundle staged by
+  `package_linux.sh` / `package_windows.py`: `Axon.clap/` (plain dir)
+  containing the renamed plugin binary, the ORT shared library
+  (`$ORIGIN` rpath on Linux; `LoadLibraryEx` altered-search-path on
+  Windows), and `Resources/`.
+
+### Final gate (2026-07-06)
+
+Run on the branch head after merging origin/main back into feat/xplat:
+
+- Clean-checkout macOS rebuild: green.
+- Full ctest suite: 29/29 pass.
+- `uv run axon eval null` vs the installed plugin: 3/3 sets
+  byte-identical (two ORT flakes on the neural sets matched on retry —
+  the documented nondeterminism protocol; the adaptive set was
+  first-pass identical).
+- CI: all three jobs green on the branch head.
+- Branch hygiene: `origin/main..feat/xplat` is exactly the port commits
+  (+ this doc/merge); feat/xplat contains origin/main.
+
+### Still requires HANDS-ON verification (not CI-provable)
+
+1. **Linux GUI runtime** in a real host (Bitwig/REAPER, Ubuntu 24.04 +
+   X11): the full manual script in the Phase 3 notes — embed renders
+   the real UI, knob→DSP and DSP→GUI round-trips, drag-reorder, 5×
+   editor close/reopen without crash or zombie `WebKitWebProcess`,
+   Wayland fallback to generic params.
+2. **Windows GUI runtime** in a real host (Win10/11): same script, plus
+   SetParent focus/keyboard-capture behavior and the
+   WebView2-runtime-missing degrade path (must fall back to generic
+   params, no crash); decide the runtime-bootstrapper installer story.
+3. **macOS GUI regression** in a real host: editor opens and knob
+   round-trip works (the mm now routes through the shared init
+   builder).
+4. **Host loading on real machines**: a Linux CLAP host and a Windows
+   CLAP host actually load the packaged dir-bundle (CI proves the load
+   path via axon_bench, not via a third-party host).
+5. **Listening tests on Linux/Windows renders** — per the acceptance
+   caveat, cross-platform renders cannot be null-tested against mac;
+   the tolerance suite is necessary but not sufficient. A/B listen on
+   program material on both platforms.
+6. **webkit2gtk-less Linux hosts**: a GUI-enabled Linux .clap
+   hard-links webkit2gtk; verify the ship decision (`-DAXON_GUI=OFF`
+   builds) for such targets.

@@ -14,6 +14,7 @@ before running), so there is exactly one implementation of each flow:
     uv run axon autoeq train [fanout args...]                 (training host)
     uv run axon autoeq export --run-dir ... --out ...         (training host)
     uv run axon autoeq probe --run-dir ...                     (training host)
+    uv run axon train nablafx <hydra overrides...>             (training host)
     uv run axon report [--open]
 
 Output convention (test / bench / coverage / eval): every run writes
@@ -385,6 +386,21 @@ def cmd_autoeq_probe(args) -> int:
                 *rest_args(args)])
 
 
+def cmd_train_nablafx(args) -> int:
+    """Raw nablafx training run with hydra overrides passed through verbatim,
+    e.g.: axon train nablafx data=ssl_comp_musdb_trainval model=tcn/model_bb_tcn_ssl_comp"""
+    if (rc := _require_train_extra(
+            "train nablafx", "the nablafx trainer (hydra overrides pass "
+            "through verbatim; recipes per piece are in the README Training "
+            "section — note the auto-EQ 5-class fan-out has its own command, "
+            "axon autoeq train)")) is not None:
+        return rc
+    exe = shutil.which("nablafx")
+    if not exe:
+        return die("nablafx trainer not on PATH (comes with the train extra)")
+    return run([exe, *rest_args(args)])
+
+
 def cmd_autoeq_export(args) -> int:
     if (rc := _require_train_extra(
             "autoeq export", "nablafx-export (per-class bundle: model.onnx + "
@@ -464,6 +480,13 @@ def build_parser() -> argparse.ArgumentParser:
                             help="adaptivity probe: shipped bundles by default (runs anywhere), "
                                  "or --run-dir <hydra_run> on the training host")
     aqpr.set_defaults(fn=cmd_autoeq_probe, passthrough="probe_auto_eq_adaptivity.py")
+
+    tn = sub.add_parser("train", help="training runs (GPU host; needs --extra train)")
+    tnsub = tn.add_subparsers(dest="train_cmd", required=True)
+    tnn = tnsub.add_parser("nablafx", add_help=False,
+                           help="raw nablafx run; hydra overrides pass through verbatim "
+                                "(e.g. data=ssl_comp_musdb_trainval model=tcn/model_bb_tcn_ssl_comp)")
+    tnn.set_defaults(fn=cmd_train_nablafx, passthrough="nablafx")
 
     rp = sub.add_parser("report", help="regenerate the HTML run report from artifacts/")
     rp.add_argument("--open", action="store_true", help="open it in the browser")

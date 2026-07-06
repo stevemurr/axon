@@ -1,6 +1,6 @@
 // Auto-EQ sonic A/B harness. Drives a renderer with a fixed per-band target
 // curve and measures magnitude-match / transient preservation / musical noise /
-// latency / reconstruction / CPU. See docs/sonic_harness_spec.md.
+// latency / reconstruction / CPU. See docs/deep-dives/auto-eq.md, "The A/B doctrine".
 //
 //   c++ -O3 -std=c++17 -I src bench/sonic/harness_auto_eq.cpp \
 //       -framework Accelerate -o bench/sonic/harness_auto_eq

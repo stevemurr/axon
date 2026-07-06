@@ -1,6 +1,6 @@
 // Measurement primitives for the sonic A/B harness. Header-only, no FFT
 // dependency — single-bin DFT (Goertzel) for spectral probes + time-domain
-// statistics. See docs/sonic_harness_spec.md.
+// statistics. See docs/deep-dives/auto-eq.md, "The A/B doctrine".
 #pragma once
 #include <algorithm>
 #include <cmath>

@@ -6,16 +6,22 @@ name: CI
 #   * macOS arm64 — the reference platform. Real Accelerate/vDSP, real
 #     bundles; renders here are the null-test baseline, so this job must stay
 #     green and byte-identical in behavior.
-#   * Linux x64 — the port's Phase 1 (headless; portable pffft-backed
-#     Accelerate shim, no GUI backend). Renders CANNOT be compared against
+#   * Linux x64 — portable pffft-backed Accelerate shim + the webkit2gtk GUI
+#     backend (Phase 3; compile+link verified here, runtime needs a real
+#     host — see the scoping doc). Renders CANNOT be compared against
 #     mac ones (different FFT backend), so this job's oracle is the unit
 #     suite + test_tolerance_stages (steady-state magnitude/level invariants)
 #     + the plugin-level ssl-integration test against a packaged dir-bundle.
-#   * Windows x64 — the port's Phase 2 (headless, same shim). Toolchain is
-#     clang-cl + Ninja: clang-cl keeps the compiler front-end in the clang
-#     family shared with the mac/Linux builds (same __builtin_* intrinsics,
-#     same conformance corners) while linking against the MSVC runtime the
-#     ONNX Runtime prebuilt DLL expects. Same oracle as Linux.
+#   * Windows x64 — same shim + the WebView2 GUI backend (Phase 3, same
+#     compile-only caveat). Toolchain is clang-cl + Ninja: clang-cl keeps
+#     the compiler front-end in the clang family shared with the mac/Linux
+#     builds (same __builtin_* intrinsics, same conformance corners) while
+#     linking against the MSVC runtime the ONNX Runtime prebuilt DLL
+#     expects. Same oracle as Linux.
+#
+# Both non-mac jobs configure with -DAXON_REQUIRE_GUI=ON so a missing GUI
+# dependency fails the configure instead of silently falling back to the
+# headless stub.
 #
 # macos-14/15 are arm64; macos-13 is Intel and would fail to configure.
 # See docs/future/active/windows-linux-builds.md for the port's design.
@@ -98,7 +104,7 @@ jobs:
           exit "$fail"
 
   build-and-test-linux:
-    name: build + unit tests (Linux x64, headless)
+    name: build + unit tests (Linux x64)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -110,10 +116,11 @@ jobs:
           c++ --version | head -1
           echo "arch: $(uname -m)"
 
-      - name: Install apt deps (libsndfile for axon_bench)
+      - name: Install apt deps (libsndfile for axon_bench; webkit2gtk for the GUI)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsndfile1-dev pkg-config
+          sudo apt-get install -y --no-install-recommends \
+            libsndfile1-dev pkg-config libwebkit2gtk-4.1-dev libx11-dev
 
       - name: Cache fetched deps (CLAP / json / ONNX Runtime / pffft)
         uses: actions/cache@v4
@@ -127,6 +134,7 @@ jobs:
         run: >
           cmake -S native/clap -B native/clap/build
           -DCMAKE_BUILD_TYPE=Release
+          -DAXON_REQUIRE_GUI=ON
 
       - name: Build (plugins + bench + all unit tests)
         run: cmake --build native/clap/build -j
@@ -151,7 +159,7 @@ jobs:
           if-no-files-found: ignore
 
   build-and-test-windows:
-    name: build + unit tests (Windows x64, headless)
+    name: build + unit tests (Windows x64)
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -196,6 +204,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=clang-cl
           -DCMAKE_CXX_COMPILER=clang-cl
+          -DAXON_REQUIRE_GUI=ON
 
       - name: Build (plugins + bench + all unit tests)
         run: cmake --build native/clap/build -j

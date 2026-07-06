@@ -83,14 +83,62 @@ target_link_libraries(nablafx_clap PRIVATE
 # true-peak ceiling running in-host. spectral_mask_eq.hpp + rational_a.hpp
 # are header-only so they don't appear in the source list.
 #
-# GUI backend: the Cocoa/WKWebView implementation on mac; a headless no-op
-# stub elsewhere (all params are CLAP params, hosts show their generic UI —
-# webkit2gtk/WebView2 backends are Phase 3 of the port).
-if(APPLE)
+# GUI backend selection (Phase 3 of the port). One backend file per platform
+# behind the same C ABI (src/axon_gui.h) and the same JS bridge contract with
+# ui/index.html (shared core: src/axon_gui_bridge.hpp):
+#   macOS   — src/axon_gui.mm      (Cocoa/WKWebView; the reference impl)
+#   Linux   — src/axon_gui_gtk.cpp (webkit2gtk 4.1, falling back to 4.0;
+#                                    X11/XEmbed via GtkPlug)
+#   Windows — src/axon_gui_win.cpp (WebView2; SDK pinned via
+#                                    cmake/FetchWebView2.cmake, static loader)
+# Headless fallback: src/axon_gui_stub.cpp + AXON_HAS_GUI=0 — the gui
+# extension is then not offered at all and hosts show their generic param UI.
+#   -DAXON_GUI=OFF      force the headless stub (also drops the webkit2gtk
+#                       runtime dependency of the Linux binary)
+#   -DAXON_REQUIRE_GUI=ON  configure-time error if no backend can be built
+#                       (CI uses this so a silent fallback can't mask a
+#                       GUI build regression)
+option(AXON_GUI "Build the native GUI backend where available" ON)
+option(AXON_REQUIRE_GUI "Fail configure if no native GUI backend can be built" OFF)
+
+set(AXON_GUI_BACKEND "none")
+set(AXON_GUI_LIBS "")
+if(AXON_GUI AND APPLE)
     set(AXON_GUI_SRC src/axon_gui.mm)
-else()
-    set(AXON_GUI_SRC src/axon_gui_stub.cpp)
+    set(AXON_GUI_BACKEND "cocoa")
+elseif(AXON_GUI AND WIN32)
+    include(cmake/FetchWebView2.cmake)
+    set(AXON_GUI_SRC src/axon_gui_win.cpp)
+    set(AXON_GUI_BACKEND "webview2")
+    # ole32: COM; user32/gdi32: the child HWND; version/advapi32/shlwapi:
+    # WebView2LoaderStatic.lib dependencies.
+    set(AXON_GUI_LIBS "${WEBVIEW2_LOADER_STATIC}"
+        user32 gdi32 ole32 oleaut32 advapi32 shlwapi version)
+elseif(AXON_GUI)  # Linux / other Unix: webkit2gtk if the dev package exists
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(AXON_WEBKITGTK QUIET IMPORTED_TARGET webkit2gtk-4.1)
+        if(NOT AXON_WEBKITGTK_FOUND)
+            pkg_check_modules(AXON_WEBKITGTK QUIET IMPORTED_TARGET webkit2gtk-4.0)
+        endif()
+        pkg_check_modules(AXON_GUI_X11 QUIET IMPORTED_TARGET x11)
+    endif()
+    if(AXON_WEBKITGTK_FOUND AND AXON_GUI_X11_FOUND)
+        set(AXON_GUI_SRC src/axon_gui_gtk.cpp)
+        set(AXON_GUI_BACKEND "webkit2gtk")
+        set(AXON_GUI_LIBS PkgConfig::AXON_WEBKITGTK PkgConfig::AXON_GUI_X11)
+    endif()
 endif()
+if(AXON_GUI_BACKEND STREQUAL "none")
+    set(AXON_GUI_SRC src/axon_gui_stub.cpp)
+    if(AXON_REQUIRE_GUI)
+        message(FATAL_ERROR
+            "AXON_REQUIRE_GUI=ON but no GUI backend is buildable here "
+            "(Linux needs libwebkit2gtk-4.1-dev or -4.0-dev + libx11-dev; "
+            "pass -DAXON_GUI=OFF for an intentionally headless build).")
+    endif()
+endif()
+message(STATUS "axon_clap GUI backend: ${AXON_GUI_BACKEND}")
 
 add_library(axon_clap MODULE
     src/axon_plugin.cpp
@@ -129,7 +177,20 @@ else()
         ${ONNXRUNTIME_LIBRARY}
         ${AXON_DSP_LIBS}
         ${AXON_PLATFORM_LIBS}
+        ${AXON_GUI_LIBS}
     )
+endif()
+if(AXON_GUI_BACKEND STREQUAL "webview2")
+    target_include_directories(axon_clap PRIVATE ${WEBVIEW2_INCLUDE_DIR})
+endif()
+
+# AXON_HAS_GUI gates whether axon_plugin.cpp offers the CLAP gui extension at
+# all: with the stub backend the extension is withheld so hosts go straight
+# to their generic parameter UI instead of creating a dead embedded view.
+if(AXON_GUI_BACKEND STREQUAL "none")
+    target_compile_definitions(axon_clap PRIVATE AXON_HAS_GUI=0)
+else()
+    target_compile_definitions(axon_clap PRIVATE AXON_HAS_GUI=1)
 endif()
 
 # Per-stage CPU timing instrumentation (src/axon_stage_timing.h). Bench-only:
@@ -349,6 +410,11 @@ axon_add_test(test_iir_filterbank_eq tests/test_iir_filterbank_eq.cpp)
 
 # test_axon_gui_js — WKWebView JS-bridge string builders (no fixed-buffer overflow).
 axon_add_test(test_axon_gui_js tests/test_axon_gui_js.cpp)
+
+# test_axon_gui_bridge — the shared GUI bridge core all three WebView backends
+# sit on (axonInit golden bytes, JS->native message decoder, file:// URLs).
+# Pure logic: runs on every platform's suite.
+axon_add_test(test_axon_gui_bridge tests/test_axon_gui_bridge.cpp)
 
 # test_spectral_mask_eq — STFT mask EQ OLA output-ring overflow clamp.
 axon_add_test(test_spectral_mask_eq tests/test_spectral_mask_eq.cpp

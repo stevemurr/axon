@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "axon_gui.h"
+#include "axon_gui_bridge.hpp"  // shared axonInit builder (all backends)
 #include "axon_gui_js.hpp"
 
 // ---------------------------------------------------------------------------
@@ -323,54 +324,12 @@ void axon_gui_send_init(
 ) {
     if (!gui) return;
 
-    // Build JSON: { paramMeta:{...}, paramValues:{...}, processorOrder:[...] }
-    std::string js;
-    js.reserve(2048);
-    js += "axonInit({\"paramMeta\":{";
-
-    for (int i = 0; i < n_params; ++i) {
-        const AxonParamInfo& p = params[i];
-        if (i) js += ',';
-        js += json_escape(p.id);
-        js += ":{\"name\":";
-        js += json_escape(p.name);
-
-        char buf[128];
-        snprintf(buf, sizeof(buf),
-                 ",\"min\":%g,\"max\":%g,\"def\":%g,\"unit\":",
-                 (double)p.min, (double)p.max, (double)p.def);
-        js += buf;
-        js += json_escape(p.unit);
-
-        if (p.enum_options && p.n_enum_options > 0) {
-            js += ",\"enumOptions\":[";
-            for (int k = 0; k < p.n_enum_options; ++k) {
-                if (k) js += ',';
-                js += json_escape(p.enum_options[k] ? p.enum_options[k] : "");
-            }
-            js += ']';
-        }
-        js += '}';
-    }
-
-    js += "},\"paramValues\":{";
-    for (int i = 0; i < n_params; ++i) {
-        const AxonParamInfo& p = params[i];
-        if (i) js += ',';
-        js += json_escape(p.id);
-        char buf[64];
-        snprintf(buf, sizeof(buf), ":%g", (double)p.current_value);
-        js += buf;
-    }
-
-    js += "},\"processorOrder\":[";
-    for (int i = 0; i < order_count; ++i) {
-        if (i) js += ',';
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", order[i]);
-        js += buf;
-    }
-    js += "]});";
+    // { paramMeta:{...}, paramValues:{...}, processorOrder:[...] } — built by
+    // the shared, unit-tested builder (axon_gui_bridge.hpp); the code moved
+    // there VERBATIM so the payload stays byte-identical to the historical
+    // in-place construction.
+    std::string js = axon::gui::build_init_js(params, n_params,
+                                              order, order_count);
 
     auto eval_block = ^{
         if (!gui->page_loaded) {

@@ -155,3 +155,59 @@ backends (real vDSP, and pffft via the sed-`__APPLE__` probe trick).
 **Deliberately NOT ported in Phase 1:** the GUI (stub only; CLAP generic
 param UI is the interface), `install --linux` CLI sugar, and any
 cross-platform render comparison (impossible per the acceptance caveat).
+
+### Phase 2 (2026-07-06, Windows x64 headless) — SHIPPED
+
+**Toolchain: clang-cl + Ninja on `windows-latest`** (`-DCMAKE_C_COMPILER=
+clang-cl -DCMAKE_CXX_COMPILER=clang-cl`, MSVC dev env via
+`ilammy/msvc-dev-cmd`). Why clang-cl and not `cl`: the DSP/timing headers use
+clang/gcc `__builtin_*` intrinsics (`__builtin_clzll` in
+`axon_stage_timing.h`), and one compiler front-end across all three platforms
+keeps conformance/warning behavior aligned with the reference mac build —
+while still linking the MSVC runtime the ORT prebuilt DLL expects. The WIN32
+CMake branch adds the global defines `_USE_MATH_DEFINES` (UCRT's `M_PI`),
+`NOMINMAX` and `WIN32_LEAN_AND_MEAN`.
+
+**What a Windows .clap is:** the plugin DLL renamed to `.clap`
+(`AXON_PLUGIN_SUFFIX=.dll` at build; `package_windows.py` stages the same
+directory-bundle layout as Linux — `Axon.clap/` containing `axon.clap`,
+`onnxruntime.dll` (+ `onnxruntime_providers_shared.dll`), and `Resources/`).
+`resource_path.hpp`'s `GetModuleFileNameW` branch and the same
+`Resources/<marker>` → flat probe rule cover discovery; `CLAP_EXPORT` already
+expands to `__declspec(dllexport)` for `clap_entry`, nothing extra needed.
+
+**The DLL-search story (no rpath on Windows):** hosts must load plugins with
+`LoadLibraryExW(abs_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)` so the
+plugin's own dependents (`onnxruntime.dll`) resolve from the plugin's
+directory, not the host `.exe`'s. `axon_bench` does exactly this via the new
+`src/dyn_module.hpp` (dlopen/LoadLibrary seam; POSIX branch is verbatim the
+old dlopen flags). Test executables get the DLLs they need copied next to
+them post-build (`onnxruntime.dll` for `test_ort_session`, `sndfile.dll` for
+`axon_bench`).
+
+**Windows prebuilts, SHA-pinned:** ORT `win-x64` 1.20.1 zip
+(`78d447051e48bd2e1e778bba378bec4ece11191c9e538cf7b2c4a4565e8f5581`; import
+lib `lib/onnxruntime.lib`, DLL `lib/onnxruntime.dll`) in
+`FetchOnnxRuntime.cmake`; libsndfile 1.2.2 win64 zip
+(`2173935c0c1ed13cf627951d34483f9d405ead2eb473190461c42ba220643a3f`) in the
+new `FetchSndfileWin.cmake` (bench-only — the plugins never link sndfile).
+The `ORTCHAR_T` wide-path helper (`ort_path.hpp`, Phase 0) is now actually
+exercised at both `Ort::Session` sites by Windows CI.
+
+**Tests:** all 28 ctest targets run on Windows CI, none skipped —
+`test_ssl_integration` runs against a packaged dir-bundle (exercising
+LoadLibraryEx + `GetModuleFileNameW` discovery + wide-path ORT bring-up end
+to end), and `test_accelerate_shim`'s cross-backend sections are
+self-comparisons off-mac by construction (global vDSP names ARE the portable
+ones there). New in this phase: `test_resource_path`, which unit-tests BOTH
+per-platform resource-layout rules on every platform (they're plain inline
+functions now), `module_path_from_addr` against the real per-OS API, and the
+`ort_model_path` boundary (POSIX identity-by-reference; UTF-8→UTF-16 on
+Windows). Portability fixes: mkstemp/unistd temp files in
+`test_meta`/`test_ort_session` got `_WIN32` branches; python-based tests use
+a configure-time `Python3_EXECUTABLE` on Windows (`/usr/bin/env python3`
+kept verbatim on POSIX).
+
+**Deliberately NOT in Phase 2:** GUI (Phase 3: WebView2 over the same C ABI;
+the gui extension still only advertises COCOA so Windows hosts show generic
+params), installer/`install --win` sugar, ARM64 Windows, code signing.

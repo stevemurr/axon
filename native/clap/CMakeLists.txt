@@ -32,9 +32,20 @@ if(APPLE)
     set(AXON_DSP_LIBS "-framework Accelerate")
     set(AXON_PLATFORM_LIBS "-framework CoreFoundation")
 elseif(WIN32)
-    message(FATAL_ERROR
-        "nablafx_clap: Windows is Phase 2 of the port (clang-cl + Ninja) and "
-        "not wired up yet. See docs/future/active/windows-linux-builds.md.")
+    # Windows x64 headless (Phase 2 of the port). Supported toolchain is
+    # clang-cl + Ninja: clang-cl keeps the compiler FRONT-END in the same
+    # clang family as the macOS/Linux builds (same __builtin_* intrinsics —
+    # e.g. __builtin_clzll in axon_stage_timing.h — same warning surface,
+    # same C++17 conformance corners) while staying ABI-compatible with the
+    # MSVC runtime that the ONNX Runtime prebuilt DLL expects.
+    #   cmake -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+    # Global defines: UCRT's <cmath> only provides M_PI with
+    # _USE_MATH_DEFINES; NOMINMAX/WIN32_LEAN_AND_MEAN keep <windows.h>
+    # (ort_path/resource_path/dyn_module) from macro-clobbering std::min/max.
+    add_compile_definitions(_USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN)
+    set(AXON_SHIM_SRC src/accelerate_shim.cpp)
+    set(AXON_DSP_LIBS axon_pffft)     # no separate libm on Windows
+    set(AXON_PLATFORM_LIBS "")
 else()
     set(AXON_SHIM_SRC src/accelerate_shim.cpp)
     set(AXON_DSP_LIBS axon_pffft m)
@@ -135,16 +146,27 @@ endif()
 # Install the onnxruntime dylib next to ours and make each plugin find it at
 # load time: @loader_path/../Frameworks inside the mac .clap bundle; $ORIGIN
 # (same directory as the plugin binary) inside the Linux directory bundle
-# (see src/resource_path.hpp + package_linux.sh for the layout).
+# (see src/resource_path.hpp + package_linux.sh for the layout). Windows has
+# no rpath — the DLL loader finds onnxruntime.dll next to the plugin because
+# hosts load plugins with LOAD_WITH_ALTERED_SEARCH_PATH (src/dyn_module.hpp).
+#
+# Build-product suffix: ".so" on mac/Linux (packaging renames to the bundle
+# executable), ".dll" on Windows (package_windows.py renames to <name>.clap —
+# a CLAP on Windows is just a renamed DLL).
 if(APPLE)
     set(AXON_PLUGIN_RPATH "@loader_path/../Frameworks")
 else()
     set(AXON_PLUGIN_RPATH "$ORIGIN")
 endif()
+if(WIN32)
+    set(AXON_PLUGIN_SUFFIX ".dll")
+else()
+    set(AXON_PLUGIN_SUFFIX ".so")
+endif()
 foreach(_t nablafx_clap axon_clap)
     set_target_properties(${_t} PROPERTIES
         PREFIX ""
-        SUFFIX ".so"                 # packaging renames to the bundle executable
+        SUFFIX "${AXON_PLUGIN_SUFFIX}"
         INSTALL_RPATH "${AXON_PLUGIN_RPATH}"
         BUILD_WITH_INSTALL_RPATH TRUE
     )
@@ -181,6 +203,11 @@ if(NOT _have_sndfile)
         endif()
     endforeach()
 endif()
+if(NOT _have_sndfile AND WIN32)
+    # No pkg-config/homebrew on Windows: pinned official win64 prebuilt.
+    include(cmake/FetchSndfileWin.cmake)
+    set(_have_sndfile 1)
+endif()
 
 # -----------------------------------------------------------------------------
 # Test targets. axon_add_test() enforces two suite-wide invariants that used to
@@ -199,9 +226,23 @@ enable_testing()
 function(axon_add_test name)
     add_executable(${name} ${ARGN})
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
-    target_compile_options(${name} PRIVATE -UNDEBUG)
+    if(MSVC)  # MSVC frontend (incl. clang-cl): /U spelling of "undefine NDEBUG"
+        target_compile_options(${name} PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(${name} PRIVATE -UNDEBUG)
+    endif()
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
+
+# Interpreter for the python-based tests below. /usr/bin/env python3 verbatim
+# on POSIX (historical behavior, kept untouched); Windows has no /usr/bin/env,
+# so resolve a real interpreter at configure time.
+if(WIN32)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(AXON_TEST_PYTHON ${Python3_EXECUTABLE})
+else()
+    set(AXON_TEST_PYTHON /usr/bin/env python3)
+endif()
 
 # test_mel_limiter — unit tests for the MelLimiter DSP (no external deps).
 axon_add_test(test_mel_limiter tests/test_mel_limiter.cpp src/mel_limiter.cpp
@@ -285,6 +326,13 @@ target_link_libraries(test_ort_session PRIVATE ${ONNXRUNTIME_LIBRARY})
 # test runs from the build dir, so point rpath at the FetchContent lib dir.
 set_target_properties(test_ort_session PROPERTIES
     BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib")
+# Windows has no rpath: the loader resolves onnxruntime.dll starting from the
+# executable's own directory, so stage the DLL next to the test binary.
+if(WIN32)
+    add_custom_command(TARGET test_ort_session POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_DYLIB_REAL}" "$<TARGET_FILE_DIR:test_ort_session>")
+endif()
 
 # test_autoeq_param_guard — num_control_params <= kEqParamsStorage stack-buffer
 # guard (constant shared with the plugin via src/axon_limits.hpp).
@@ -344,18 +392,27 @@ axon_add_test(test_tolerance_stages tests/test_tolerance_stages.cpp
     src/mel_limiter.cpp src/meter.cpp ${AXON_SHIM_SRC})
 target_link_libraries(test_tolerance_stages PRIVATE ${AXON_DSP_LIBS})
 
+# test_resource_path — the cross-platform module/resource discovery seam
+# (src/resource_path.hpp) + the ORTCHAR_T path-conversion boundary
+# (src/ort_path.hpp). Both per-platform layout rules are plain inline
+# functions compiled on EVERY platform, so the mac suite also covers the
+# Linux/Windows probe logic (and vice versa); module_path_from_addr exercises
+# the real per-OS API (dladdr / GetModuleFileNameW) against the test binary.
+axon_add_test(test_resource_path tests/test_resource_path.cpp)
+target_link_libraries(test_resource_path PRIVATE ${AXON_PLATFORM_LIBS})
+
 # test_ssl_integration.py — plugin-level SSL EQ integration through axon_bench
 # against a built build/Axon.clap. Self-skips (rc 77) when the plugin or bench
 # isn't built, so ctest reports it as SKIPPED rather than failing.
 add_test(NAME test_ssl_integration
-         COMMAND /usr/bin/env python3 ${CMAKE_SOURCE_DIR}/tests/test_ssl_integration.py)
+         COMMAND ${AXON_TEST_PYTHON} ${CMAKE_SOURCE_DIR}/tests/test_ssl_integration.py)
 set_tests_properties(test_ssl_integration PROPERTIES SKIP_RETURN_CODE 77)
 
 # test_cli.py — unit tests for the `uv run axon` CLI router (subcommand
 # routing/pass-through, the wav data-chunk comparator, the axon-run/1
 # envelope, and the HTML report generator). Pure-stdlib python.
 add_test(NAME test_cli
-         COMMAND /usr/bin/env python3 ${CMAKE_SOURCE_DIR}/../../axon/test_cli.py)
+         COMMAND ${AXON_TEST_PYTHON} ${CMAKE_SOURCE_DIR}/../../axon/test_cli.py)
 
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
@@ -369,6 +426,12 @@ if(_have_sndfile)
         ${SNDFILE_LIBRARIES}
         ${AXON_PLATFORM_LIBS}
     )
+    if(WIN32 AND DEFINED SNDFILE_WIN_DLL)
+        # sndfile.dll next to axon_bench.exe (no rpath on Windows).
+        add_custom_command(TARGET axon_bench POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${SNDFILE_WIN_DLL}" "$<TARGET_FILE_DIR:axon_bench>")
+    endif()
     message(STATUS "axon_bench: enabled (sndfile in ${SNDFILE_INCLUDE_DIRS})")
 else()
     message(STATUS "axon_bench: SKIPPED (libsndfile not found; brew install libsndfile)")

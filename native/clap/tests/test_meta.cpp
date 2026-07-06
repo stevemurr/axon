@@ -34,7 +34,12 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <chrono>       // unique temp names (no mkstemp on Windows)
+#include <filesystem>
+#else
 #include <unistd.h>   // mkstemp
+#endif
 
 namespace {
 
@@ -166,9 +171,21 @@ const char* kValidV1Meta = R"JSON(
 }
 )JSON";
 
-// Write `contents` to a unique temp path and return that path. Uses mkstemp so
-// the path is created safely and uniquely.
+// Write `contents` to a unique temp path and return that path. Uses mkstemp
+// on POSIX so the path is created safely and uniquely; Windows has no
+// mkstemp, so uses temp_directory_path + a clock nonce + counter (the test
+// is single-process/single-threaded, so this cannot collide in practice).
 std::string write_temp(const std::string& contents, const char* tag) {
+#ifdef _WIN32
+    static int counter = 0;
+    const auto nonce =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string path =
+        (std::filesystem::temp_directory_path() /
+         (std::string("test_meta_") + tag + "_" + std::to_string(nonce) +
+          "_" + std::to_string(counter++)))
+            .string();
+#else
     std::string templ = std::string("/tmp/test_meta_") + tag + "_XXXXXX";
     std::vector<char> buf(templ.begin(), templ.end());
     buf.push_back('\0');
@@ -176,6 +193,7 @@ std::string write_temp(const std::string& contents, const char* tag) {
     assert(fd != -1);
     ::close(fd);
     std::string path(buf.data());
+#endif
     std::ofstream f(path);
     assert(f.is_open());
     f << contents;

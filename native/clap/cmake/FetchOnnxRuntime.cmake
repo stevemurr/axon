@@ -1,10 +1,10 @@
-# Download the prebuilt ONNX Runtime release tarball for the current platform.
-# These aren't on a package registry, so we grab the tgz from the GitHub
+# Download the prebuilt ONNX Runtime release archive for the current platform.
+# These aren't on a package registry, so we grab the tgz/zip from the GitHub
 # release. One archive + SHA pin per supported platform, same ORT_VERSION.
 #
 # Updating:
 #   - bump ORT_VERSION below
-#   - for each platform archive: sha256sum -b onnxruntime-<plat>-X.Y.Z.tgz
+#   - for each platform archive: sha256sum -b onnxruntime-<plat>-X.Y.Z.<ext>
 #   - paste into the matching ORT_SHA256_* below
 include(FetchContent)
 
@@ -15,10 +15,17 @@ set(ORT_VERSION "1.20.1" CACHE STRING "onnxruntime release tag")
 # rebuild downloads and links the tarball with zero integrity verification.
 set(ORT_SHA256_OSX_ARM64  "b678fc3c2354c771fea4fba420edeccfba205140088334df801e7fc40e83a57a")
 set(ORT_SHA256_LINUX_X64  "67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105")
+set(ORT_SHA256_WIN_X64    "78d447051e48bd2e1e778bba378bec4ece11191c9e538cf7b2c4a4565e8f5581")
 
+set(_ort_archive_ext "tgz")
 if(APPLE)
     set(ORT_PLATFORM "osx-arm64")
     set(_ort_sha_default "${ORT_SHA256_OSX_ARM64}")
+elseif(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    # Windows releases ship as .zip (not .tgz), with an import lib + DLL.
+    set(ORT_PLATFORM "win-x64")
+    set(_ort_sha_default "${ORT_SHA256_WIN_X64}")
+    set(_ort_archive_ext "zip")
 elseif(UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     set(ORT_PLATFORM "linux-x64")
     set(_ort_sha_default "${ORT_SHA256_LINUX_X64}")
@@ -31,7 +38,7 @@ endif()
 
 set(ORT_ARCHIVE "onnxruntime-${ORT_PLATFORM}-${ORT_VERSION}")
 set(ORT_URL
-    "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_ARCHIVE}.tgz"
+    "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_ARCHIVE}.${_ort_archive_ext}"
 )
 set(ORT_SHA256 "${_ort_sha_default}"
     CACHE STRING "sha256 of the ORT tarball; empty = trust the URL")
@@ -53,6 +60,14 @@ if(APPLE)
     # real dylib into the .clap bundle's Frameworks/.
     set(ONNXRUNTIME_LIBRARY "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.dylib" CACHE FILEPATH "" FORCE)
     set(ONNXRUNTIME_DYLIB_REAL "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.${ORT_VERSION}.dylib" CACHE FILEPATH "" FORCE)
+elseif(WIN32)
+    # Windows zip ships lib/onnxruntime.lib (import lib; records the DLL name
+    # "onnxruntime.dll") + lib/onnxruntime.dll. Link the import lib; packaging
+    # copies the DLL next to the plugin binary, where the loader finds it
+    # because hosts open plugins with LOAD_WITH_ALTERED_SEARCH_PATH (as does
+    # axon_bench — see src/dyn_module.hpp).
+    set(ONNXRUNTIME_LIBRARY "${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib" CACHE FILEPATH "" FORCE)
+    set(ONNXRUNTIME_DYLIB_REAL "${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll" CACHE FILEPATH "" FORCE)
 else()
     # Linux tgz ships libonnxruntime.so.<version> plus .so / .so.1 symlinks
     # (SONAME libonnxruntime.so.1). Link the versionless symlink; packaging

@@ -43,7 +43,12 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#ifdef _WIN32
+#include <chrono>       // unique temp names (no mkstemp on Windows)
+#include <filesystem>
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
 namespace {
@@ -274,10 +279,22 @@ const unsigned char kAxonTestModelB[] = {
 const size_t kAxonTestModelB_len = sizeof(kAxonTestModelB);
 
 // OrtSession's public ctor takes a filesystem path, so materialize the
-// embedded bytes as a temp file (removed in the destructor).
+// embedded bytes as a temp file (removed in the destructor). POSIX uses
+// mkstemp; Windows has no mkstemp, so temp_directory_path + clock nonce +
+// counter (single-process/single-threaded test — cannot collide in practice).
 struct TempModelFile {
     std::string path;
     explicit TempModelFile(const unsigned char* bytes, size_t len) {
+#ifdef _WIN32
+        static int counter = 0;
+        const auto nonce =
+            std::chrono::steady_clock::now().time_since_epoch().count();
+        path = (std::filesystem::temp_directory_path() /
+                ("axon_test_model_" + std::to_string(nonce) + "_" +
+                 std::to_string(counter++)))
+                   .string();
+        FILE* f = std::fopen(path.c_str(), "wb");
+#else
         const char* tmpdir = std::getenv("TMPDIR");
         std::string tmpl = std::string(tmpdir ? tmpdir : "/tmp");
         if (!tmpl.empty() && tmpl.back() != '/') tmpl += '/';
@@ -287,13 +304,15 @@ struct TempModelFile {
         int fd = mkstemp(buf.data());
         assert(fd >= 0);
         FILE* f = fdopen(fd, "wb");
+        path.assign(buf.data());
+#endif
         assert(f != nullptr);
         size_t written = fwrite(bytes, 1, len, f);
         assert(written == len);
         fclose(f);
-        path.assign(buf.data());
     }
-    ~TempModelFile() { unlink(path.c_str()); }
+    // std::remove == unlink for files on POSIX; portable to Windows.
+    ~TempModelFile() { std::remove(path.c_str()); }
 };
 
 // Meta matching Model A. rf=4, 2 controls, one state tensor of 4 elements.

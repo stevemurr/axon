@@ -59,7 +59,7 @@ The two ONNX models are the whole story: SslComp is 58.5% and its SslOrtForward 
 
 ### Prose notes
 
-1. **ssl_comp re-export (T=1654).** 99.3% of SslComp is the forward itself (17,226 calls x 1045.5 us); ring memmove/dry-delay/telemetry/blends are ~0.7% and not worth touching. The stage consumes only the last kSslHop=1024 of 1418 outputs (`axon_plugin.cpp:1837-1838`), and everything is sized from `plugin_meta.json` (`:1750-1752`, ring alloc `:1160`), so only the bundle changes. Verified bit-identical over the consumed range (Section 3). Exporter lives in the external nablafx fork — owner decision; null-test the new export (ssl_comp is well-conditioned; steady-state null feasible). Prior recommendation in `docs/bus_comp_perf_findings.md:45-51`, unshipped.
+1. **ssl_comp re-export (T=1654).** 99.3% of SslComp is the forward itself (17,226 calls x 1045.5 us); ring memmove/dry-delay/telemetry/blends are ~0.7% and not worth touching. The stage consumes only the last kSslHop=1024 of 1418 outputs (`axon_plugin.cpp:1837-1838`), and everything is sized from `plugin_meta.json` (`:1750-1752`, ring alloc `:1160`), so only the bundle changes. Verified bit-identical over the consumed range (Section 3). Exporter lives in the external nablafx fork — owner decision; null-test the new export (ssl_comp is well-conditioned; steady-state null feasible). Prior recommendation from the June 2026 bus-comp findings (doc since retired; shipped 2026-07-05, see section 6).
 2. **L/R hop stagger.** Both channels' `ssl_comp_in_fill` start at 0 (`:636`, reset `:1163`), so every hop boundary runs both ~1.05 ms forwards in one block (`:1781`, trigger `:1810`). Offsetting channel 1 by kSslHop/2 puts one forward per hop block; output timing is unchanged (wet always trails by 896 samples, queue pop independent of hop phase) and steady-state values are mathematically identical at any phase. FP-position effects in ORT SIMD tails make bit-identity likely but unprovable; needs first-cycle pass-through gating for the offset channel.
 3. **Mono-sum controller.** The per-channel loop (`axon_plugin.cpp:1555`, call `:1584`) runs a full 128-timestep 2-layer/64-hidden LSTM per channel. One call on 0.5*(L+R) removes exactly half of the 24.0% AutoEqOrtCtrl share. Behavior change on stereo-asymmetric material (both channels get the same curve — arguably better mastering imaging, but audible): owner decision.
 4. **Display-curve decimation.** ch0 evaluates 55 `magnitude_db` points across 64 biquads every block (`:1611-1619`, `:1631-1639`) but the spectrum transfer consumes it only every 16th block (2048-sample gate, `:202-226`); 15/16 evaluations are overwritten unseen, and this runs even with no GUI attached. Audio path untouched — bit-identical.
@@ -104,7 +104,7 @@ SslEq (0.59%), TrimCeiling (0.58%), Reverb (0.42%), MeterIn/MeterOut (0.25% each
   (AutoEqOrtCtrl 25.6 %), MelLimiter 1.45 %. Non-subtimer stage means sum
   ≈ 408 µs/block vs ≈ 443 before (~−7 %).
 - **#1 (ssl_comp resize) — SHIPPED same day**, via in-place ONNX graph surgery
-  (no retraining): see `native/clap/docs/ssl_comp_reexport_handoff.md` for the
+  (no retraining): implementation record in commit 634f980 and the conf yaml note; the
   full record. Byte-identical at every level (graph rewrite at T=2048,
   consumed outputs at T=1655, and a full old-vs-new plugin render). Measured:
   forward −20.5% standalone (0.999 → 0.794 ms), in-chain SslOrtForward mean

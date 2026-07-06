@@ -1,6 +1,10 @@
 # ORT render nondeterminism (same binary, run to run)
 
-Status: open. Severity: inaudible; matters only if bit-exact renders become a
+Status: not-started
+Opened: 2026-07-06
+Issue: #19
+
+Severity: Severity: inaudible; matters only if bit-exact renders become a
 requirement (regression null-testing already works around it).
 
 ## Observed (2026-07-06, cleanup-pass final gate)

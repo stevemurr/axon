@@ -44,5 +44,17 @@ input ─▶ Bass Mono ─▶ EQ ─▶ Auto EQ ─▶ Reverb ─▶ Widener ─
 
 ---
 
+## Where documentation lives
+
+| Area | Location | What belongs there |
+|---|---|---|
+| **Module guide** (this dir) | `docs/*.md` | Tutorial-style design/math write-ups per DSP module — durable, not task-based |
+| **Implementation findings** | `native/clap/docs/` | Algorithm deep-dives and *current* measured findings (e.g. `limiter_algorithm.md`, `perf_stage_ranking.md`, the MelLimiter null-variance envelope) |
+| **Future work** | `docs/future/` | Every unexplored idea / open investigation, lifecycle-managed (see its README; worked via the `/next-idea` skill; mirrored to GitHub issues) |
+
+Task-based documents (agent handoffs, one-shot research reports) are deleted
+once consumed — git history keeps them; the durable conclusions live in the
+module guide, the findings docs, or a future-work outcome.
+
 Source lives in [`../native/clap/src`](../native/clap/src). Each doc links back
 to the exact `file:line` it describes.

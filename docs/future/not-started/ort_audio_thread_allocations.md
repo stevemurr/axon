@@ -1,6 +1,10 @@
 # ORT audio-thread allocations (RT-safety debt)
 
-Status: open. Severity: no measured throughput cost (~0.2%); this is
+Status: not-started
+Opened: 2026-07-06
+Issue: #18
+
+Severity: Severity: no measured throughput cost (~0.2%); this is
 real-time-safety hygiene — heap alloc/free on the audio thread risks priority
 inversion under memory pressure, not slowness.
 

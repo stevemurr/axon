@@ -30,8 +30,10 @@ void MelLimiter::init(int sample_rate) {
     n_freq_   = kFFTSize / 2 + 1;
     ola_scale_ = 1.f / (2.f * static_cast<float>(kFFTSize));
 
-    // Pre-allocate per-bin gain scratch so process() never allocates.
+    // Pre-allocate per-bin gain and power-spectrum scratch so process() never
+    // allocates.
     bin_gain_arr_.assign(n_freq_, 0.f);
+    pwr_.assign(n_freq_, 0.f);
 
     // Hann window.
     window_.resize(kFFTSize);
@@ -130,6 +132,30 @@ void MelLimiter::build_mel_() {
     for (int b = 0; b < kNumBands; ++b)
         for (int k = 0; k < n_freq_; ++k)
             bin_norm_[k] += band_to_bin_[b * n_freq_ + k];
+
+    // Sparse spans: first/last nonzero weight per band (triangles are
+    // contiguous, so [start, start+len) covers every nonzero).
+    for (int b = 0; b < kNumBands; ++b) {
+        int lo = n_freq_, hi = -1;
+        for (int k = 0; k < n_freq_; ++k)
+            if (band_to_bin_[b * n_freq_ + k] > 0.f) { if (k < lo) lo = k; hi = k; }
+        band_start_[b] = (hi >= lo) ? lo : 0;
+        band_len_[b]   = (hi >= lo) ? (hi - lo + 1) : 0;
+    }
+    // Prenormalized weights and the uncovered-bin template (bins no triangle
+    // reaches must pass through with gain 1, matching the dense path's
+    // bin_norm_ ≤ 1e-6 branch).
+    band_to_bin_nrm_.assign(kNumBands * n_freq_, 0.f);
+    bin_gain_tmpl_.assign(n_freq_, 0.f);
+    for (int k = 0; k < n_freq_; ++k) {
+        if (bin_norm_[k] > 1e-6f) {
+            for (int b = 0; b < kNumBands; ++b)
+                band_to_bin_nrm_[b * n_freq_ + k] =
+                    band_to_bin_[b * n_freq_ + k] / bin_norm_[k];
+        } else {
+            bin_gain_tmpl_[k] = 1.f;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,20 +168,25 @@ void MelLimiter::solve_gains_(float* const* ch_sp_re,
                               const Params& p,
                               float* out_gains) const {
     // Compute per-band energy = max over channels (linked stereo).
+    // Power spectrum once per channel, then one sparse dot product per band —
+    // instead of re-deriving re²+im² for all 513 bins inside every band.
     std::array<float, kNumBands> band_level{};
-    for (int b = 0; b < kNumBands; ++b) {
-        float max_e = 0.f;
-        for (int c = 0; c < n_ch; ++c) {
-            const float* w  = band_to_bin_.data() + b * n_freq_;
-            const float* re = ch_sp_re[c];
-            const float* im = ch_sp_im[c];
-            float e = w[0] * re[0] * re[0]               // DC
-                    + w[n_freq_ - 1] * im[0] * im[0];    // Nyquist (packed in im[0])
-            for (int k = 1; k < n_freq_ - 1; ++k)
-                e += w[k] * (re[k] * re[k] + im[k] * im[k]);
-            if (e > max_e) max_e = e;
+    std::array<float, kNumBands> max_e_arr{};
+    for (int c = 0; c < n_ch; ++c) {
+        DSPSplitComplex sp{ch_sp_re[c], ch_sp_im[c]};
+        vDSP_zvmags(&sp, 1, pwr_.data(), 1, kFFTSize / 2);
+        pwr_[0]           = ch_sp_re[c][0] * ch_sp_re[c][0];  // DC
+        pwr_[n_freq_ - 1] = ch_sp_im[c][0] * ch_sp_im[c][0];  // Nyquist (packed in im[0])
+        for (int b = 0; b < kNumBands; ++b) {
+            const int s = band_start_[b], n = band_len_[b];
+            float e = 0.f;
+            vDSP_dotpr(band_to_bin_.data() + b * n_freq_ + s, 1,
+                       pwr_.data() + s, 1, &e, static_cast<vDSP_Length>(n));
+            if (e > max_e_arr[b]) max_e_arr[b] = e;
         }
-        band_level[b] = std::sqrt(max_e) * level_scale_;
+    }
+    for (int b = 0; b < kNumBands; ++b) {
+        band_level[b] = std::sqrt(max_e_arr[b]) * level_scale_;
         disp_level_[b] = band_level[b];   // display tap
     }
 
@@ -340,18 +371,18 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
                 band_gain_[n]    = c * prev + (1.f - c) * tgt;
             }
 
-            // ── Map per-band gains to per-bin gains.
-            std::fill(bin_gain_arr.begin(), bin_gain_arr.end(), 0.f);
+            // ── Map per-band gains to per-bin gains: seed uncovered bins from
+            //    the template, then accumulate each band's prenormalized
+            //    weights over its nonzero span only.
+            std::copy(bin_gain_tmpl_.begin(), bin_gain_tmpl_.end(),
+                      bin_gain_arr.begin());
             for (int b = 0; b < kNumBands; ++b) {
-                const float* w = band_to_bin_.data() + b * n_freq_;
-                for (int k = 0; k < n_freq_; ++k)
-                    bin_gain_arr[k] += w[k] * band_gain_[b];
-            }
-            for (int k = 0; k < n_freq_; ++k) {
-                if (bin_norm_[k] > 1e-6f)
-                    bin_gain_arr[k] /= bin_norm_[k];
-                else
-                    bin_gain_arr[k] = 1.f;
+                const int s = band_start_[b], n = band_len_[b];
+                vDSP_vsma(band_to_bin_nrm_.data() + b * n_freq_ + s, 1,
+                          &band_gain_[b],
+                          bin_gain_arr.data() + s, 1,
+                          bin_gain_arr.data() + s, 1,
+                          static_cast<vDSP_Length>(n));
             }
 
             // ── Apply gains + IFFT + OLA per channel, reusing the already-
@@ -367,13 +398,13 @@ void MelLimiter::process(float* l, float* r, int n_ch, int n_samples,
                 auto& ch = ch_[c];
                 DSPSplitComplex sp{ch.sp_re.data(), ch.sp_im.data()};
 
-                // Apply per-bin gain.
+                // Apply per-bin gain (DC and Nyquist are packed in element 0).
                 sp.realp[0] *= bin_gain_arr[0];
                 sp.imagp[0] *= bin_gain_arr[n_freq_ - 1];
-                for (int k = 1; k < n_freq_ - 1; ++k) {
-                    sp.realp[k] *= bin_gain_arr[k];
-                    sp.imagp[k] *= bin_gain_arr[k];
-                }
+                vDSP_vmul(sp.realp + 1, 1, bin_gain_arr.data() + 1, 1,
+                          sp.realp + 1, 1, static_cast<vDSP_Length>(n_freq_ - 2));
+                vDSP_vmul(sp.imagp + 1, 1, bin_gain_arr.data() + 1, 1,
+                          sp.imagp + 1, 1, static_cast<vDSP_Length>(n_freq_ - 2));
 
                 // Inverse FFT.
                 vDSP_fft_zrip(fft_setup_, &sp, 1, log2n_, kFFTDirection_Inverse);

@@ -98,6 +98,16 @@ private:
     int                n_freq_{0};
     std::vector<float> band_to_bin_;   // [kNumBands * n_freq]
     std::vector<float> bin_norm_;      // [n_freq]
+    // Sparse acceleration for the triangular filterbank (built in build_mel_):
+    // each band touches only a contiguous bin span (~93% of the dense matrix is
+    // zero), and prenormalizing by bin_norm_ folds the per-bin divide into the
+    // weights. bin_gain_tmpl_ seeds uncovered bins (bin_norm_ ≈ 0) with gain 1.
+    std::array<int, kNumBands> band_start_{};  // first nonzero bin per band
+    std::array<int, kNumBands> band_len_{};    // nonzero span length per band
+    std::vector<float> band_to_bin_nrm_;       // [kNumBands * n_freq] w/bin_norm_
+    std::vector<float> bin_gain_tmpl_;         // [n_freq] 1 where uncovered, else 0
+    // Power-spectrum scratch for solve_gains_ (const method; audio thread only).
+    mutable std::vector<float> pwr_;           // [n_freq]
     // Per-bin gain scratch — reused each hop (pre-allocated in init to avoid
     // heap allocation on the audio thread).
     std::vector<float> bin_gain_arr_;  // [n_freq]

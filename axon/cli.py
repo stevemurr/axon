@@ -13,6 +13,7 @@ before running), so there is exactly one implementation of each flow:
     uv run axon autoeq prepare --musdb --src ... --out ...   (training host)
     uv run axon autoeq train [fanout args...]                 (training host)
     uv run axon autoeq export --run-dir ... --out ...         (training host)
+    uv run axon autoeq probe --run-dir ...                     (training host)
     uv run axon report [--open]
 
 Output convention (test / bench / coverage / eval): every run writes
@@ -377,6 +378,13 @@ def cmd_autoeq_train(args) -> int:
                 *rest_args(args)])
 
 
+def cmd_autoeq_probe(args) -> int:
+    # Bundle mode (default) runs anywhere with onnxruntime; the script itself
+    # gates --run-dir mode on torch/nablafx (training host).
+    return run([sys.executable, REPO / "scripts" / "probe_auto_eq_adaptivity.py",
+                *rest_args(args)])
+
+
 def cmd_autoeq_export(args) -> int:
     if (rc := _require_train_extra(
             "autoeq export", "nablafx-export (per-class bundle: model.onnx + "
@@ -452,6 +460,10 @@ def build_parser() -> argparse.ArgumentParser:
     aqe = aqsub.add_parser("export", add_help=False,
                            help="export a trained run to a per-class bundle (args pass through to nablafx-export)")
     aqe.set_defaults(fn=cmd_autoeq_export, passthrough="nablafx-export")
+    aqpr = aqsub.add_parser("probe", add_help=False,
+                            help="adaptivity probe: shipped bundles by default (runs anywhere), "
+                                 "or --run-dir <hydra_run> on the training host")
+    aqpr.set_defaults(fn=cmd_autoeq_probe, passthrough="probe_auto_eq_adaptivity.py")
 
     rp = sub.add_parser("report", help="regenerate the HTML run report from artifacts/")
     rp.add_argument("--open", action="store_true", help="open it in the browser")

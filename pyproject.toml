@@ -9,11 +9,14 @@ authors = [
     {name = "Steven Murr", email = "codec01_sedan@icloud.com"},
 ]
 
-# The local CLI (uv run axon ...) is dependency-free on purpose: build/test/
-# bench/eval delegate to the repo's canonical scripts. Training/export pulls
-# torch via nablafx, so it lives behind an extra — install it ONLY on the
-# training host:  uv sync --extra train
-dependencies = []
+# The local CLI (uv run axon ...) stays lightweight: numpy + onnxruntime power
+# the model evals/probes (eval ssl-comp, autoeq probe in bundle mode); heavy
+# training deps (torch via nablafx) live behind an extra — install it ONLY on
+# the training host:  uv sync --extra train
+dependencies = [
+    "numpy>=1.24",
+    "onnxruntime>=1.20",
+]
 
 [project.optional-dependencies]
 train = [

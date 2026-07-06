@@ -89,8 +89,9 @@ uv run axon install --mac
 
 This builds the `.clap` from the committed model bundle (`weights/axon_bundle/`),
 ad-hoc code-signs it, and installs to `~/Library/Audio/Plug-Ins/CLAP/Axon.clap`
-(under the hood: `scripts/install_axon_mac.sh`). No Python dependencies are
-pulled — the CLI is a thin, dependency-free router.
+(under the hood: `scripts/install_axon_mac.sh`). The CLI pulls only numpy +
+onnxruntime (for the model evals/probes) — torch stays behind the `train`
+extra.
 
 ## 🧰 One CLI for everything
 
@@ -119,8 +120,8 @@ tool — no `--` separator needed (e.g. `uv run axon test -R meter`).
 
 `eval null` encodes the null-test protocol (data-chunk-only compares — wav
 metadata embeds timestamps — plus the retry rule for the known ORT run-to-run
-nondeterminism; see `docs/future/` — the future-work lifecycle). The local CLI is
-dependency-free; only training pulls torch, behind the `train` extra.
+nondeterminism; see `docs/future/` — the future-work lifecycle). The local CLI
+pulls only numpy + onnxruntime; training's torch stays behind the `train` extra.
 
 **Uniform outputs:** every `test` / `bench` / `coverage` / `eval` run writes
 `artifacts/<tool>/<timestamp>/` (gitignored) containing `result.json` — a
@@ -205,8 +206,9 @@ uv run axon autoeq prepare --musdb \
 # 2. Train all five classes (spectral-mask 64-band config):
 uv run axon autoeq train
 
-# 3. Verify the controller actually adapts:
-uv run python scripts/probe_auto_eq_adaptivity.py --run-dir <hydra_run>
+# 3. Verify the controller actually adapts (also runs anywhere against the
+#    shipped bundles: `uv run axon autoeq probe`):
+uv run axon autoeq probe --run-dir <hydra_run>
 
 # 4. Export the per-class bundle into the staging dir:
 uv run axon autoeq export --run-dir <hydra_run> --out weights/axon_bundle/auto_eq_full_mix

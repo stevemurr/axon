@@ -53,6 +53,10 @@ def test_parser_routing() -> None:
     assert args.fn is cli.cmd_autoeq_export and extra == ["--run-dir", "/r"]
     check("autoeq export routes")
 
+    args, extra = p.parse_known_args(["autoeq", "probe", "--run-dir", "/r"])
+    assert args.fn is cli.cmd_autoeq_probe and extra == ["--run-dir", "/r"]
+    check("autoeq probe routes")
+
     args, extra = p.parse_known_args(["bench", "--json", "--buffers", "128"])
     assert args.fn is cli.cmd_bench and args.as_json and extra == ["--buffers", "128"]
     check("bench keeps own --json, forwards the rest")

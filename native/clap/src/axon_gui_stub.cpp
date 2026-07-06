@@ -1,15 +1,13 @@
-// axon_gui_stub.cpp — headless no-op implementation of the axon_gui.h C ABI
-// for platforms without a native GUI backend yet (Linux/Windows Phase 1-2 of
-// the port; the real backends — webkit2gtk / WebView2 — are Phase 3).
+// axon_gui_stub.cpp — headless no-op implementation of the axon_gui.h C ABI.
+// Used when no native GUI backend is available or wanted: -DAXON_GUI=OFF, or
+// a Linux build without the webkit2gtk dev package (the real backends are
+// axon_gui.mm / axon_gui_gtk.cpp / axon_gui_win.cpp — see CMakeLists.txt).
 //
 // The plugin is fully usable headless: every control is exposed as a CLAP
-// param, so hosts show their generic UI. axon_plugin.cpp's CLAP gui
-// extension only advertises CLAP_WINDOW_API_COCOA, so on other platforms
+// param, so hosts show their generic UI. Stub builds compile axon_plugin.cpp
+// with AXON_HAS_GUI=0, which withholds the CLAP gui extension entirely, so
 // hosts never even attempt to create the embedded GUI; these stubs exist so
 // the plugin links and so any stray call is a safe no-op.
-//
-// Compiled ONLY on non-Apple platforms (see CMakeLists.txt); macOS builds
-// keep src/axon_gui.mm untouched.
 
 #include "axon_gui.h"
 

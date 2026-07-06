@@ -18,7 +18,6 @@
 
 #include <clap/clap.h>
 #include <sndfile.h>
-#include <dlfcn.h>
 
 #include <algorithm>
 #include <chrono>
@@ -34,6 +33,7 @@
 #include <vector>
 
 #include "axon_stage_timing.h"   // per-stage timing readout ABI (optional ext)
+#include "dyn_module.hpp"        // dlopen/LoadLibrary seam (Windows port)
 
 namespace fs = std::filesystem;
 
@@ -278,15 +278,21 @@ int main(int argc, char** argv) {
     // Timer-overhead calibration (before any processing so it's unperturbed).
     const double timer_overhead_ns = calibrate_timer_overhead_ns();
 
-    // 1. dlopen the bundle's executable + grab clap_entry.
+    // 1. Load the bundle's executable + grab clap_entry (dlopen on POSIX,
+    //    LoadLibraryEx on Windows — see src/dyn_module.hpp).
     std::string dylib = find_clap_dylib(a.plugin_path);
     if (dylib.empty()) {
-        std::fprintf(stderr, "no plugin binary found in %s (looked for Contents/MacOS/*, <stem>.so/.clap, flat file)\n", a.plugin_path.c_str());
+        std::fprintf(stderr, "no plugin binary found in %s (looked for Contents/MacOS/*, <stem>.so/.clap/.dll, flat file)\n", a.plugin_path.c_str());
         return 1;
     }
-    void* handle = dlopen(dylib.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!handle) { std::fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
-    auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(dlsym(handle, "clap_entry"));
+    nablafx::DynModule handle = nablafx::dyn_open(dylib);
+    if (!handle) {
+        std::fprintf(stderr, "dyn_open %s: %s\n", dylib.c_str(),
+                     nablafx::dyn_error().c_str());
+        return 1;
+    }
+    auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
+        nablafx::dyn_sym(handle, "clap_entry"));
     if (!entry) { std::fprintf(stderr, "missing clap_entry symbol\n"); return 1; }
 
     if (!entry->init(a.plugin_path.c_str())) {
@@ -467,7 +473,7 @@ int main(int argc, char** argv) {
     plug->deactivate(plug);
     plug->destroy(plug);
     entry->deinit();
-    if (handle) dlclose(handle);
+    nablafx::dyn_close(handle);
 
     // 5. Optional output wav (last iter's output is in out_planar).
     if (!a.out_path.empty()) {

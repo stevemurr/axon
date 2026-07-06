@@ -31,9 +31,10 @@
 //     json (axon_meta.json / plugin_meta.json) so an unrelated Resources/
 //     directory can't shadow the real layout. Returns "" if neither matches.
 //
-// Windows note (Phase 2): GetModuleFileNameW on the HMODULE resolved from an
-// address in this module via GetModuleHandleExW; UTF-16 -> UTF-8 conversion
-// mirrors ort_path.hpp's boundary conversion in reverse.
+// Windows: GetModuleFileNameW on the HMODULE resolved from an address in
+// this module via GetModuleHandleExW; UTF-16 -> UTF-8 conversion mirrors
+// ort_path.hpp's boundary conversion in reverse. The repo carries all paths
+// as UTF-8 std::string; std::filesystem converts back at the API boundary.
 
 #pragma once
 
@@ -85,21 +86,24 @@ inline std::string module_path_from_addr(const void* addr_in_module) {
 #endif
 }
 
-// Resolve the plugin's resources directory (see layout comment above).
-// `marker` is the meta file that must exist at the resources root on
-// non-Apple platforms (e.g. "axon_meta.json"). Returns "" on failure.
-inline std::string find_resources_dir(const void* addr_in_module,
-                                      const char* marker) {
-    const std::string mod = module_path_from_addr(addr_in_module);
-    if (mod.empty()) return {};
-    const std::filesystem::path mod_dir =
-        std::filesystem::path(mod).parent_path();
-#ifdef __APPLE__
-    // .clap/Contents/MacOS/<dylib> -> .clap/Contents/Resources. Historical
-    // behavior, kept verbatim: no marker probing, no existence check.
-    (void)marker;
+// The two per-platform layout rules, as plain functions of the module's
+// directory. Both are compiled on EVERY platform (find_resources_dir below
+// picks the right one per OS) so tests/test_resource_path.cpp can cover the
+// macOS rule and the Linux/Windows probe logic on any build machine.
+
+// macOS bundle rule: .clap/Contents/MacOS/<dylib> -> .clap/Contents/Resources.
+// Historical behavior, kept verbatim: no marker probing, no existence check.
+inline std::string resources_dir_macos_layout(
+    const std::filesystem::path& mod_dir) {
     return (mod_dir.parent_path() / "Resources").string();
-#else
+}
+
+// Linux/Windows probe rule: <module_dir>/Resources/<marker> (directory
+// bundle) first, then <module_dir>/<marker> (flat side-by-side). The marker
+// requirement means a stray Resources/ dir can't shadow a flat install.
+// Returns "" if neither layout matches.
+inline std::string resources_dir_probe_layout(
+    const std::filesystem::path& mod_dir, const char* marker) {
     std::error_code ec;
     const std::filesystem::path candidates[] = {
         mod_dir / "Resources",  // directory bundle
@@ -111,6 +115,22 @@ inline std::string find_resources_dir(const void* addr_in_module,
         }
     }
     return {};
+}
+
+// Resolve the plugin's resources directory (see layout comment above).
+// `marker` is the meta file that must exist at the resources root on
+// non-Apple platforms (e.g. "axon_meta.json"). Returns "" on failure.
+inline std::string find_resources_dir(const void* addr_in_module,
+                                      const char* marker) {
+    const std::string mod = module_path_from_addr(addr_in_module);
+    if (mod.empty()) return {};
+    const std::filesystem::path mod_dir =
+        std::filesystem::path(mod).parent_path();
+#ifdef __APPLE__
+    (void)marker;
+    return resources_dir_macos_layout(mod_dir);
+#else
+    return resources_dir_probe_layout(mod_dir, marker);
 #endif
 }
 

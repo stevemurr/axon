@@ -44,6 +44,34 @@
 #include <clap/clap.h>
 #include <onnxruntime_cxx_api.h>
 
+// ---------------------------------------------------------------------------
+// Per-platform CLAP window API for the embedded GUI (Phase 3 of the
+// Windows/Linux port). The axon_gui.h C ABI takes the host's native window
+// handle as void*; which clap_window_t member carries it — and which api
+// string we advertise — is per-platform:
+//   macOS   cocoa  NSView*                 (axon_gui.mm, WKWebView)
+//   Windows win32  HWND                    (axon_gui_win.cpp, WebView2)
+//   Linux   x11    XID (unsigned long)     (axon_gui_gtk.cpp, webkit2gtk)
+// AXON_HAS_GUI (defined by CMake: 1 when a native backend is compiled in,
+// 0 with the headless stub) gates whether the gui extension is offered at
+// all — a headless build reports no CLAP_EXT_GUI and hosts use their
+// generic parameter UI.
+// ---------------------------------------------------------------------------
+#if defined(__APPLE__)
+    #define AXON_GUI_WINDOW_API CLAP_WINDOW_API_COCOA
+#elif defined(_WIN32)
+    #define AXON_GUI_WINDOW_API CLAP_WINDOW_API_WIN32
+#else
+    #define AXON_GUI_WINDOW_API CLAP_WINDOW_API_X11
+#endif
+#ifndef AXON_HAS_GUI
+    #ifdef __APPLE__
+        #define AXON_HAS_GUI 1   // historical default (mac always had the GUI)
+    #else
+        #define AXON_HAS_GUI 0   // stub unless CMake says a backend is built
+    #endif
+#endif
+
 #include "composite_meta.hpp"
 #include "axon_limits.hpp"     // kBlockSize / kSslHop / kEqParamsStorage (shared with tests)
 #include "auto_gain.hpp"
@@ -2410,7 +2438,8 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
 }
 
 // ---------------------------------------------------------------------------
-// GUI extension  (CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA)
+// GUI extension  (CLAP_EXT_GUI; window api per platform — see
+// AXON_GUI_WINDOW_API above: cocoa / win32 / x11)
 // ---------------------------------------------------------------------------
 
 static void gui_send_full_state_(Plugin* plug) {
@@ -2448,10 +2477,10 @@ static void gui_send_full_state_(Plugin* plug) {
 }
 
 static bool gui_is_api_supported(const clap_plugin_t*, const char* api, bool is_floating) {
-    return !is_floating && std::strcmp(api, CLAP_WINDOW_API_COCOA) == 0;
+    return !is_floating && std::strcmp(api, AXON_GUI_WINDOW_API) == 0;
 }
 static bool gui_get_preferred_api(const clap_plugin_t*, const char** api, bool* is_floating) {
-    *api = CLAP_WINDOW_API_COCOA;
+    *api = AXON_GUI_WINDOW_API;
     *is_floating = false;
     return true;
 }
@@ -2493,7 +2522,15 @@ static bool gui_set_size(const clap_plugin_t*, uint32_t, uint32_t) { return true
 static bool gui_set_parent(const clap_plugin_t* p, const clap_window_t* window) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     if (!plug->gui_state) return false;
-    return axon_gui_set_parent(plug->gui_state, window->cocoa);
+#if defined(__APPLE__)
+    void* native = window->cocoa;                 // NSView*
+#elif defined(_WIN32)
+    void* native = window->win32;                 // HWND
+#else
+    // clap_xwnd is an X11 XID (unsigned long); the C ABI carries it as void*.
+    void* native = reinterpret_cast<void*>(static_cast<uintptr_t>(window->x11));
+#endif
+    return axon_gui_set_parent(plug->gui_state, native);
 }
 static bool gui_set_transient(const clap_plugin_t*, const clap_window_t*) { return false; }
 static void gui_suggest_title(const clap_plugin_t*, const char*) {}
@@ -2556,7 +2593,11 @@ static const void* plugin_get_extension(const clap_plugin_t*, const char* id) {
     if (std::strcmp(id, CLAP_EXT_PARAMS)       == 0) return &s_ext_params;
     if (std::strcmp(id, CLAP_EXT_LATENCY)      == 0) return &s_ext_latency;
     if (std::strcmp(id, CLAP_EXT_STATE)        == 0) return &s_ext_state;
+#if AXON_HAS_GUI
+    // Withheld on headless builds (stub backend): hosts then show their
+    // generic parameter UI instead of embedding a dead view.
     if (std::strcmp(id, CLAP_EXT_GUI)          == 0) return &s_ext_gui;
+#endif
 #if AXON_STAGE_TIMING
     if (std::strcmp(id, AXON_EXT_STAGE_TIMING) == 0) return &s_ext_stage_timing;
 #endif

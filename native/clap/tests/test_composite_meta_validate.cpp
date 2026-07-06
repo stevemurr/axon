@@ -29,6 +29,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#ifdef _WIN32
+#include <filesystem>
+#endif
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -66,7 +69,16 @@ std::string make_meta_json(const std::string& lookahead_field) {
 }
 
 std::string write_temp(const std::string& contents, const char* tag) {
+#ifdef _WIN32
+    // No /tmp on Windows — same std::filesystem pattern as test_meta.cpp /
+    // test_ort_session.cpp. POSIX branch below kept verbatim.
+    const std::string path =
+        (std::filesystem::temp_directory_path() /
+         (std::string("axon_meta_test_") + tag + ".json"))
+            .string();
+#else
     std::string path = std::string("/tmp/axon_meta_test_") + tag + ".json";
+#endif
     std::ofstream o(path, std::ios::trunc);
     o << contents;
     o.close();

@@ -62,7 +62,10 @@ def generate(repo: Path) -> Path:
     payload = json.dumps({"meta": meta, "tools": tools}).replace("</", "<\\/")
     out = repo / "artifacts" / "report" / "index.html"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_TEMPLATE.replace("__DATA__", payload))
+    # Explicit UTF-8: the template contains non-ASCII (e.g. '→') and the page
+    # declares charset=utf-8. Windows' locale default is cp1252, which cannot
+    # encode it; on POSIX the default was already UTF-8 (byte-identical).
+    out.write_text(_TEMPLATE.replace("__DATA__", payload), encoding="utf-8")
     return out
 
 

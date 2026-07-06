@@ -17,7 +17,8 @@ import math, os, struct, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 CLAP = os.path.join(REPO, "build", "Axon.clap")
-BENCH = os.path.join(HERE, "..", "build", "axon_bench")
+BENCH = os.path.join(HERE, "..", "build",
+                     "axon_bench.exe" if os.name == "nt" else "axon_bench")
 
 # Isolate the SSL EQ: every other orderable/parallel stage off.
 COMMON = "MLI=0,RVB_MIX=0,WID_ON=0,BMI=0,AGN=0,SSC=0,EQ=0"

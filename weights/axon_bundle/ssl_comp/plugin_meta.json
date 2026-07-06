@@ -8,7 +8,7 @@
   "receptive_field": 631,
   "latency_samples": 0,
   "num_controls": 0,
-  "trace_len": 2048,
+  "trace_len": 1655,
   "stage_kind": "nn",
   "controls": [],
   "state_tensors": [],

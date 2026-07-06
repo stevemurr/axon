@@ -9,8 +9,10 @@
 #
 # channel_width=16 keeps capacity for the VCA-color side of things while
 # the smaller block stack keeps total params ~10K and per-call compute
-# tiny. With kSslHop=2048 the runtime sits well under 1 GMAC/sec for the
-# whole stage.
+# tiny. The runtime hops kSslHop=1024 samples per forward; the shipped ONNX
+# was resized in place to trace_len=1655 (= kSslHop + RF, the minimum the
+# plugin's activate-time guard accepts) on 2026-07-05 — if re-exporting from
+# a checkpoint, export with that trace_len.
 
 _target_: nablafx.BlackBoxSystem
 lr: 0.005

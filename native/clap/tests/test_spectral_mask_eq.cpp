@@ -20,15 +20,33 @@
 // reach the clamp through it — the only way to exercise the fixed line is to
 // generate frames without draining. `#define private public` is the standard
 // header-only-test idiom for poking at internal invariants.
+//
+// MSVC STL portability: its headers hard-#error when a keyword is macroized
+// (xkeycheck.h), and genuinely break if first-included with `private` mapped
+// to `public`. Two-part defence, keeping the idiom intact:
+//   1. _ALLOW_KEYWORD_MACROS disables the xkeycheck #error.
+//   2. Pre-include the full transitive STANDARD-header set of
+//      spectral_mask_eq.hpp below, so every STL header is fully processed
+//      (and include-guarded) BEFORE the macro goes live. Only project
+//      headers then compile under it — which is the point.
+#if defined(_MSC_VER)
+#define _ALLOW_KEYWORD_MACROS 1
+#endif
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+#include <variant>
+#include <vector>
+
 #define private public
 #include "../src/spectral_mask_eq.hpp"
 #undef private
-
-#include <algorithm>
-#include <cassert>
-#include <cmath>
-#include <cstdio>
-#include <vector>
 
 namespace {
 

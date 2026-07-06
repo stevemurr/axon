@@ -10,7 +10,23 @@ before running), so there is exactly one implementation of each flow:
     uv run axon coverage
     uv run axon eval null [--against BUNDLE] [--set NAME]
     uv run axon eval ssl-comp
-    uv run axon train [fanout args...]          (training host)
+    uv run axon autoeq prepare --musdb --src ... --out ...   (training host)
+    uv run axon autoeq train [fanout args...]                 (training host)
+    uv run axon autoeq export --run-dir ... --out ...         (training host)
+    uv run axon report [--open]
+
+Output convention (test / bench / coverage / eval): every run writes
+artifacts/<tool>/<timestamp>/ containing result.json (the uniform axon-run/1
+envelope: status, summary, metrics, git state) + output.log (full tool
+output) + tool-specific artifacts; artifacts/<tool>/latest always points at
+the newest run, and every command ends with the same one-line footer:
+
+    [axon] <tool>: PASS|FAIL — <summary> -> artifacts/<tool>/<ts>/
+
+Pass --json (before any pass-through args) to also print the envelope to
+stdout for CI. artifacts/ is gitignored; the only TRACKED result artifact is
+bench/baseline.json, which is an input (the regression reference), not an
+output.
 
 Do not add flow logic here that belongs in the underlying scripts — this file
 should stay a router plus the null-compare protocol.
@@ -18,11 +34,15 @@ should stay a router plus the null-compare protocol.
 from __future__ import annotations
 
 import argparse
+import datetime
+import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,7 +54,7 @@ FIXTURE = CLAP / "bench" / "fixtures" / "bench_input_20s.wav"
 
 # Reference param sets for A/B null evaluation. "adaptive_eq" involves the ORT
 # paths, which are subject to a known same-binary run-to-run nondeterminism at
-# -86..-99 dBFS — see native/clap/docs/investigations/ort_render_nondeterminism.md.
+# -86..-99 dBFS — see docs/future/*/ort_render_nondeterminism.md.
 # The compare below implements that doc's retry protocol.
 EVAL_SETS = {
     "defaults": "",
@@ -66,6 +86,83 @@ def rest_args(args) -> list:
     return r
 
 
+def run_logged(cmd, log_path: Path, env=None, quiet: bool = False) -> int:
+    """Run a command streaming stdout+stderr to the console AND a log file."""
+    line = " ".join(str(c) for c in cmd)
+    if not quiet:
+        print(f"[axon] $ {line}", flush=True)
+    with open(log_path, "a") as log:
+        log.write(f"$ {line}\n")
+        proc = subprocess.Popen([str(c) for c in cmd], env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        for out in proc.stdout:
+            if not quiet:
+                sys.stdout.write(out)
+            log.write(out)
+        return proc.wait()
+
+
+def _git_state() -> dict:
+    try:
+        rev = subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "-C", REPO, "status", "--porcelain"],
+                                    capture_output=True, text=True).stdout.strip())
+        return {"rev": rev, "dirty": dirty}
+    except Exception:
+        return {}
+
+
+class Run:
+    """The axon-run/1 output convention (see module docstring)."""
+
+    def __init__(self, tool: str):
+        self.tool = tool
+        self.t0 = time.time()
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.dir = REPO / "artifacts" / tool / stamp
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.log = self.dir / "output.log"
+        self.metrics: dict = {}
+        self.details: dict = {}
+
+    def run(self, cmd, env=None, quiet: bool = False) -> int:
+        return run_logged(cmd, self.log, env=env, quiet=quiet)
+
+    def keep(self, src: Path, name: str | None = None) -> None:
+        shutil.copy2(src, self.dir / (name or Path(src).name))
+
+    def finish(self, ok: bool, summary: str, exit_code: int | None = None,
+               as_json: bool = False) -> int:
+        envelope = {
+            "schema": "axon-run/1",
+            "tool": self.tool,
+            "status": "pass" if ok else "fail",
+            "summary": summary,
+            "duration_s": round(time.time() - self.t0, 2),
+            "git": _git_state(),
+            "metrics": self.metrics,
+            "details": self.details,
+            "artifacts": sorted(p.name for p in self.dir.iterdir()
+                                if p.name != "result.json"),
+        }
+        (self.dir / "result.json").write_text(json.dumps(envelope, indent=2) + "\n")
+        latest = self.dir.parent / "latest"
+        latest.unlink(missing_ok=True)
+        latest.symlink_to(self.dir.name)
+        try:
+            # Keep the HTML view current on every run; never fail a run over it.
+            from axon import report
+            report.generate(REPO)
+        except Exception:
+            pass
+        print(f"[axon] {self.tool}: {'PASS' if ok else 'FAIL'} — {summary} "
+              f"-> {self.dir.relative_to(REPO)}/")
+        if as_json:
+            print(json.dumps(envelope))
+        return exit_code if exit_code is not None else (0 if ok else 1)
+
+
 # ---------------------------------------------------------------- build / test
 
 def cmd_build(args) -> int:
@@ -88,15 +185,66 @@ def cmd_install(args) -> int:
 def cmd_test(args) -> int:
     if not args.no_build and (rc := cmd_build(argparse.Namespace())):
         return rc
-    return run(["ctest", "--test-dir", BUILD_DIR, "--output-on-failure", *rest_args(args)])
+    r = Run("test")
+    junit = r.dir / "junit.xml"
+    rc = r.run(["ctest", "--test-dir", BUILD_DIR, "--output-on-failure",
+                "--output-junit", junit, *rest_args(args)])
+    total = failed = None
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.parse(junit).getroot()
+        total = int(root.get("tests", 0))
+        failed = int(root.get("failures", 0))
+        r.metrics = {"tests": total, "failures": failed,
+                     "skipped": int(root.get("skipped") or root.get("disabled") or 0)}
+    except Exception:
+        pass
+    ok = rc == 0
+    summary = (f"{total - failed}/{total} tests passed" if total is not None
+               else ("suite passed" if ok else "suite FAILED"))
+    return r.finish(ok, summary, exit_code=rc, as_json=args.as_json)
 
 
 def cmd_bench(args) -> int:
-    return run([sys.executable, CLAP / "bench" / "run_bench.py", *rest_args(args)])
+    r = Run("bench")
+    rest = rest_args(args)
+    if not any(a.startswith("--out") for a in rest):
+        rest += ["--out", str(r.dir / "bench.json")]
+    if not any(a.startswith("--summary") for a in rest):
+        rest += ["--summary", str(r.dir / "bench.md")]
+    rc = r.run([sys.executable, CLAP / "bench" / "run_bench.py", *rest])
+    try:
+        cells = json.loads((r.dir / "bench.json").read_text()).get("results", [])
+        r.metrics = {"cells": len(cells),
+                     "deadline_misses": sum(c.get("deadline_misses", 0) for c in cells)}
+    except Exception:
+        pass
+    summary = {0: f"{r.metrics.get('cells', '?')} cells, no regressions",
+               2: "REGRESSION vs baseline"}.get(rc, "bench error")
+    return r.finish(rc == 0, summary, exit_code=rc, as_json=args.as_json)
 
 
 def cmd_coverage(args) -> int:
-    return run(["bash", CLAP / "bench" / "run_coverage.sh", *rest_args(args)])
+    r = Run("coverage")
+    rc = r.run(["bash", CLAP / "bench" / "run_coverage.sh", *rest_args(args)])
+    report = CLAP / "build-cov" / "coverage-report.txt"
+    line_pct = None
+    if report.exists():
+        r.keep(report)
+        for line in report.read_text().splitlines():
+            if line.startswith("TOTAL"):
+                # llvm-cov report TOTAL row: pct columns are regions,
+                # functions, lines (in that order).
+                pcts = [t.rstrip("%") for t in line.split() if t.endswith("%")]
+                if pcts:
+                    line_pct = float(pcts[2] if len(pcts) >= 3 else pcts[-1])
+        if line_pct is not None:
+            r.metrics["line_pct"] = line_pct
+    r.details["html"] = str(CLAP / "build-cov" / "coverage-html" / "index.html")
+    ok = rc == 0
+    summary = (f"{line_pct}% line coverage" if line_pct is not None
+               else ("done" if ok else "coverage FAILED"))
+    return r.finish(ok, summary, exit_code=rc, as_json=args.as_json)
 
 
 # ---------------------------------------------------------------- eval
@@ -124,12 +272,12 @@ def _max_diff_dbfs(a: bytes, b: bytes) -> float:
     return 20.0 * math.log10(mx) if mx > 0 else float("-inf")
 
 
-def _render(bundle: Path, params: str, out: Path) -> int:
+def _render(r: "Run", bundle: Path, params: str, out: Path) -> int:
     cmd = [BUILD_DIR / "axon_bench", "--plugin", bundle, "--in", FIXTURE,
            "--buffer", "128", "--iters", "1", "--warmup", "0", "--out", out, "--json"]
     if params:
         cmd += ["--params", params]
-    return run(cmd, stdout=subprocess.DEVNULL)
+    return r.run(cmd, quiet=True)
 
 
 def cmd_eval_null(args) -> int:
@@ -139,58 +287,119 @@ def cmd_eval_null(args) -> int:
         return die(f"reference bundle not found: {ref}")
     if not args.no_build and (rc := cmd_build(argparse.Namespace())):
         return rc
+    r = Run("eval-null")
+    r.details["against"] = str(ref)
     sets = EVAL_SETS if args.set == "all" else {args.set: EVAL_SETS[args.set]}
-    failed = []
+    failed, flakes = [], 0
     with tempfile.TemporaryDirectory(prefix="axon-eval-") as td:
         tdir = Path(td)
         for name, params in sets.items():
-            # Retry protocol (investigations/ort_render_nondeterminism.md):
+            # Retry protocol (docs/future ort_render_nondeterminism doc):
             # only a REPRODUCIBLE mismatch across attempts indicts the change.
             verdicts = []
             for attempt in range(3):
-                a, b = tdir / f"{name}_ref_{attempt}.wav", tdir / f"{name}_cur_{attempt}.wav"
-                if _render(ref, params, a) or _render(BUNDLE, params, b):
-                    return die(f"render failed for set '{name}'")
+                a = tdir / f"{name}_ref_{attempt}.wav"
+                b = tdir / f"{name}_cur_{attempt}.wav"
+                if _render(r, ref, params, a) or _render(r, BUNDLE, params, b):
+                    return r.finish(False, f"render failed for set '{name}'",
+                                    as_json=args.as_json)
                 da, db = _wav_data(a), _wav_data(b)
                 if da == db:
                     verdicts.append("IDENTICAL")
                     break
                 verdicts.append(f"{_max_diff_dbfs(da, db):.1f} dBFS")
+                # Keep the differing pair for inspection.
+                r.keep(a); r.keep(b)
             ok = verdicts[-1] == "IDENTICAL"
             flake = ok and len(verdicts) > 1
+            flakes += flake
+            r.details[name] = verdicts
             print(f"[axon] {name}: {verdicts[-1]}"
                   + (f"  (flaked then matched: {verdicts[:-1]} — known ORT nondeterminism)" if flake else ""))
             if not ok:
                 failed.append(name)
                 print(f"[axon] {name}: REPRODUCIBLE mismatch across {len(verdicts)} attempts: {verdicts}")
-    if failed:
-        return die(f"non-null sets: {', '.join(failed)}")
-    print("[axon] eval null: PASS")
-    return 0
+    r.metrics = {"sets": len(sets), "failed": len(failed), "flakes": flakes}
+    summary = (f"non-null sets: {', '.join(failed)}" if failed
+               else f"{len(sets)}/{len(sets)} sets null"
+                    + (f" ({flakes} ORT flake(s) resolved on retry)" if flakes else ""))
+    return r.finish(not failed, summary, as_json=args.as_json)
 
 
 def cmd_eval_ssl_comp(args) -> int:
-    return run([sys.executable, REPO / "scripts" / "verify_ssl_comp_model.py", *rest_args(args)])
+    r = Run("eval-ssl-comp")
+    rc = r.run([sys.executable, REPO / "scripts" / "verify_ssl_comp_model.py",
+                *rest_args(args)])
+    # The verify script's machine-readable line: "RESULT k=v k=v ..."
+    if r.log.exists():
+        for line in reversed(r.log.read_text().splitlines()):
+            if line.startswith("RESULT "):
+                for kv in line[len("RESULT "):].split():
+                    k, _, v = kv.partition("=")
+                    try:
+                        r.metrics[k] = float(v)
+                    except ValueError:
+                        r.metrics[k] = v
+                break
+    ok = rc == 0
+    return r.finish(ok, "all sizing invariants PASS" if ok else "invariant checks FAILED",
+                    exit_code=rc, as_json=args.as_json)
 
 
-# ---------------------------------------------------------------- train
+# ------------------------------------------------- autoeq model lifecycle
 
-def cmd_train(args) -> int:
+def _require_train_extra(what: str, wraps: str) -> int | None:
     try:
         import nablafx  # noqa: F401
+        return None
     except ImportError:
         return die(
-            "nablafx is not installed — training runs on the GPU host.\n"
-            "  There:  uv sync --extra train && uv run axon train ...\n"
-            "  This wraps scripts/train_auto_eq_musdb_fanout.sh (expects the\n"
-            "  /shared/artifacts data layout)."
+            f"nablafx is not installed — '{what}' runs on the GPU host.\n"
+            f"  There:  uv sync --extra train && uv run axon {what} ...\n"
+            f"  This wraps {wraps}."
         )
-    return run(["bash", REPO / "scripts" / "train_auto_eq_musdb_fanout.sh", *rest_args(args)])
+
+
+def cmd_autoeq_prepare(args) -> int:
+    if (rc := _require_train_extra("autoeq prepare",
+                                   "scripts/prepare_auto_eq_data.py")) is not None:
+        return rc
+    return run([sys.executable, REPO / "scripts" / "prepare_auto_eq_data.py",
+                *rest_args(args)])
+
+
+def cmd_autoeq_train(args) -> int:
+    if (rc := _require_train_extra(
+            "autoeq train", "scripts/train_auto_eq_musdb_fanout.sh (expects the "
+            "/shared/artifacts data layout)")) is not None:
+        return rc
+    return run(["bash", REPO / "scripts" / "train_auto_eq_musdb_fanout.sh",
+                *rest_args(args)])
+
+
+def cmd_autoeq_export(args) -> int:
+    if (rc := _require_train_extra(
+            "autoeq export", "nablafx-export (per-class bundle: model.onnx + "
+            "plugin_meta.json into weights/axon_bundle/auto_eq_<class>)")) is not None:
+        return rc
+    exe = shutil.which("nablafx-export")
+    if not exe:
+        return die("nablafx-export not on PATH (comes with the nablafx install)")
+    return run([exe, *rest_args(args)])
+
+
+def cmd_report(args) -> int:
+    from axon import report
+    out = report.generate(REPO)
+    print(f"[axon] report: {out.relative_to(REPO)}")
+    if args.open:
+        subprocess.call(["open", str(out)])
+    return 0
 
 
 # ---------------------------------------------------------------- main
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="axon", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -207,16 +416,18 @@ def main(argv=None) -> int:
 
     t = sub.add_parser("test", help="build, then run the full suite via ctest")
     t.add_argument("--no-build", action="store_true", help="run against existing binaries")
-    t.add_argument("rest", nargs=argparse.REMAINDER, help="extra ctest args (e.g. -R name)")
-    t.set_defaults(fn=cmd_test)
+    t.add_argument("--json", dest="as_json", action="store_true",
+                   help="also print the result envelope to stdout")
+    t.set_defaults(fn=cmd_test, passthrough="ctest")
 
     be = sub.add_parser("bench", help="scenario/buffer benchmark matrix (bench/run_bench.py)")
-    be.add_argument("rest", nargs=argparse.REMAINDER)
-    be.set_defaults(fn=cmd_bench)
+    be.add_argument("--json", dest="as_json", action="store_true",
+                    help="also print the result envelope (place before pass-through args)")
+    be.set_defaults(fn=cmd_bench, passthrough="run_bench.py")
 
     c = sub.add_parser("coverage", help="llvm-cov over the test suite (bench/run_coverage.sh)")
-    c.add_argument("rest", nargs=argparse.REMAINDER)
-    c.set_defaults(fn=cmd_coverage)
+    c.add_argument("--json", dest="as_json", action="store_true")
+    c.set_defaults(fn=cmd_coverage, passthrough="run_coverage.sh")
 
     e = sub.add_parser("eval", help="evaluations")
     esub = e.add_subparsers(dest="eval_cmd", required=True)
@@ -225,16 +436,38 @@ def main(argv=None) -> int:
                     help=f"reference .clap bundle (default: {INSTALLED})")
     en.add_argument("--set", default="all", choices=[*EVAL_SETS, "all"])
     en.add_argument("--no-build", action="store_true")
+    en.add_argument("--json", dest="as_json", action="store_true")
     en.set_defaults(fn=cmd_eval_null)
     es = esub.add_parser("ssl-comp", help="ssl_comp model sizing invariants (scripts/verify_ssl_comp_model.py)")
-    es.add_argument("rest", nargs=argparse.REMAINDER)
-    es.set_defaults(fn=cmd_eval_ssl_comp)
+    es.add_argument("--json", dest="as_json", action="store_true")
+    es.set_defaults(fn=cmd_eval_ssl_comp, passthrough="verify_ssl_comp_model.py")
 
-    tr = sub.add_parser("train", help="auto-EQ training fan-out (GPU host; needs --extra train)")
-    tr.add_argument("rest", nargs=argparse.REMAINDER)
-    tr.set_defaults(fn=cmd_train)
+    aq = sub.add_parser("autoeq", help="auto-EQ model lifecycle (GPU host; needs --extra train)")
+    aqsub = aq.add_subparsers(dest="autoeq_cmd", required=True)
+    aqp = aqsub.add_parser("prepare", add_help=False,
+                           help="dataset prep (args pass through to scripts/prepare_auto_eq_data.py)")
+    aqp.set_defaults(fn=cmd_autoeq_prepare, passthrough="prepare_auto_eq_data.py")
+    aqt = aqsub.add_parser("train", help="train all five class models (scripts/train_auto_eq_musdb_fanout.sh)")
+    aqt.set_defaults(fn=cmd_autoeq_train, passthrough="train fan-out")
+    aqe = aqsub.add_parser("export", add_help=False,
+                           help="export a trained run to a per-class bundle (args pass through to nablafx-export)")
+    aqe.set_defaults(fn=cmd_autoeq_export, passthrough="nablafx-export")
 
-    args = p.parse_args(argv)
+    rp = sub.add_parser("report", help="regenerate the HTML run report from artifacts/")
+    rp.add_argument("--open", action="store_true", help="open it in the browser")
+    rp.set_defaults(fn=cmd_report)
+    return p
+
+
+def main(argv=None) -> int:
+    p = build_parser()
+    # Pass-through subcommands forward every argument they don't recognize to
+    # the underlying tool — no `--` separator needed (argparse REMAINDER can't
+    # do this when the first forwarded token is a flag).
+    args, extra = p.parse_known_args(argv)
+    if extra and not getattr(args, "passthrough", None):
+        p.error(f"unrecognized arguments: {' '.join(extra)}")
+    args.rest = extra
     return args.fn(args)
 
 

@@ -108,13 +108,33 @@ uv run axon bench                 # scenario × buffer matrix (bench/run_bench.p
 uv run axon coverage              # llvm-cov over the test suite
 uv run axon eval null             # A/B null: current tree vs the installed plugin
 uv run axon eval ssl-comp         # ssl_comp model sizing invariants
-uv run axon train                 # auto-EQ fan-out (GPU host; needs `uv sync --extra train`)
+uv run axon autoeq prepare ...    # auto-EQ dataset prep      (GPU host; `uv sync --extra train`)
+uv run axon autoeq train          # train all 5 class models  (GPU host)
+uv run axon autoeq export ...     # trained run -> per-class bundle (GPU host)
+uv run axon report --open         # HTML dashboard over all runs (auto-refreshed by every run)
 ```
+
+Pass-through subcommands forward unrecognized args straight to the underlying
+tool — no `--` separator needed (e.g. `uv run axon test -R meter`).
 
 `eval null` encodes the null-test protocol (data-chunk-only compares — wav
 metadata embeds timestamps — plus the retry rule for the known ORT run-to-run
-nondeterminism; see `native/clap/docs/investigations/`). The local CLI is
+nondeterminism; see `docs/future/` — the future-work lifecycle). The local CLI is
 dependency-free; only training pulls torch, behind the `train` extra.
+
+**Uniform outputs:** every `test` / `bench` / `coverage` / `eval` run writes
+`artifacts/<tool>/<timestamp>/` (gitignored) containing `result.json` — a
+common `axon-run/1` envelope with status, one-line summary, metrics, and git
+state — plus `output.log` and tool-specific artifacts (junit XML, bench
+json/md, the coverage report, differing eval wavs kept for inspection).
+`artifacts/<tool>/latest` points at the newest run, every command ends with
+the same `[axon] <tool>: PASS|FAIL — <summary> -> <dir>` footer, and `--json`
+prints the envelope for CI. `artifacts/report/index.html` is a self-contained
+HTML dashboard rendered FROM those envelopes (status tiles + full history;
+regenerated after every run; `uv run axon report --open` to view) — the JSON
+stays the machine-readable source of truth. The one *tracked* result file
+stays `native/clap/bench/baseline.json` — it's an input (the regression
+reference), not an output.
 
 ## 🔬 Inside the limiter
 
@@ -150,7 +170,7 @@ Standalone, dependency-free unit tests cover the DSP and the plugin contract:
 
 ```sh
 uv run axon test              # build, then run the full suite
-uv run axon test -- -R meter  # pass ctest args through (filter by name)
+uv run axon test -R meter     # pass ctest args through (filter by name)
 uv run axon coverage          # llvm-cov line coverage over the suite
 ```
 
@@ -178,18 +198,18 @@ pinned nablafx fork): `uv sync --extra train`.
 
 ```sh
 # 1. Prep an augmented per-class dataset (e.g. full_mix) from MUSDB:
-uv run python scripts/prepare_auto_eq_data.py --musdb \
+uv run axon autoeq prepare --musdb \
     --src /path/to/musdb18 --target-class full_mix --augment-pre-eq \
     --out /path/to/datasets/axon_auto_eq_musdb_full_mix_aug
 
 # 2. Train all five classes (spectral-mask 64-band config):
-uv run axon train
+uv run axon autoeq train
 
 # 3. Verify the controller actually adapts:
 uv run python scripts/probe_auto_eq_adaptivity.py --run-dir <hydra_run>
 
 # 4. Export the per-class bundle into the staging dir:
-uv run nablafx-export --run-dir <hydra_run> --out weights/axon_bundle/auto_eq_full_mix
+uv run axon autoeq export --run-dir <hydra_run> --out weights/axon_bundle/auto_eq_full_mix
 ```
 
 ## 📁 Repo layout

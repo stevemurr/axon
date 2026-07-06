@@ -269,6 +269,12 @@ add_test(NAME test_ssl_integration
          COMMAND /usr/bin/env python3 ${CMAKE_SOURCE_DIR}/tests/test_ssl_integration.py)
 set_tests_properties(test_ssl_integration PROPERTIES SKIP_RETURN_CODE 77)
 
+# test_cli.py — unit tests for the `uv run axon` CLI router (subcommand
+# routing/pass-through, the wav data-chunk comparator, the axon-run/1
+# envelope, and the HTML report generator). Pure-stdlib python.
+add_test(NAME test_cli
+         COMMAND /usr/bin/env python3 ${CMAKE_SOURCE_DIR}/../../axon/test_cli.py)
+
 if(_have_sndfile)
     add_executable(axon_bench bench/axon_bench.cpp)
     target_include_directories(axon_bench PRIVATE

@@ -159,15 +159,23 @@ jobs:
         run: ctest --test-dir native/clap/build --output-on-failure
 
       # clap-validator: a real out-of-process CLAP host that exercises the spec
-      # (scan, params, state) and the GUI extension lifecycle against the
-      # packaged dir-bundle. Run under Xvfb so the webkit2gtk backend actually
-      # initializes — the automatable part of the Phase-3 Linux GUI-runtime
-      # gate. Built from source with the runner's preinstalled cargo (pinned by
-      # the repo's Cargo.lock via --locked).
+      # (scan, params, state) and the GUI extension lifecycle. Run under Xvfb so
+      # the webkit2gtk backend actually initializes — the automatable part of
+      # the Phase-3 Linux GUI-runtime gate. Built from source with the runner's
+      # preinstalled cargo (pinned by the repo's Cargo.lock via --locked).
+      #
+      # Point it at the INNER <executable>.clap: the packaged Axon.clap is a
+      # directory bundle (ELF + Resources/ inside), so a host that takes a file
+      # path — clap-validator does not recurse into directories — must load the
+      # inner shared library. dladdr-based resource discovery still resolves
+      # Resources/ as its sibling, so this exercises the real load + ORT path.
       - name: Install clap-validator
         run: cargo install --git https://github.com/free-audio/clap-validator --locked
       - name: Validate CLAP bundle (clap-validator, under Xvfb)
-        run: xvfb-run -a clap-validator validate "$PWD/build/Axon.clap"
+        run: |
+          inner=$(ls "$PWD"/build/Axon.clap/*.clap)
+          echo "Validating inner CLAP: $inner"
+          xvfb-run -a clap-validator validate "$inner"
 
       - name: Upload test logs
         if: failure()
@@ -240,15 +248,21 @@ jobs:
       - name: Run test suite (ctest)
         run: ctest --test-dir native/clap/build --output-on-failure
 
-      # clap-validator against the packaged bundle. The windows-latest runner
-      # has an interactive desktop and a preinstalled WebView2 runtime, so the
-      # GUI extension lifecycle exercises the real WebView2 backend. Same spec
-      # + GUI conformance gate as Linux; the interactive real-DAW UX and the
+      # clap-validator against the INNER <executable>.clap (the packaged
+      # Axon.clap is a directory bundle; a CLAP on Windows is a renamed DLL, and
+      # the validator takes a file path, not a directory). The windows-latest
+      # runner has an interactive desktop and a preinstalled WebView2 runtime,
+      # so the GUI extension lifecycle exercises the real WebView2 backend. Same
+      # spec + GUI conformance gate as Linux; interactive real-DAW UX and the
       # WebView2-runtime-missing degrade path remain manual (see scoping doc).
       - name: Install clap-validator
         run: cargo install --git https://github.com/free-audio/clap-validator --locked
       - name: Validate CLAP bundle (clap-validator)
-        run: clap-validator validate build/Axon.clap
+        shell: pwsh
+        run: |
+          $inner = (Get-ChildItem build/Axon.clap -Filter *.clap | Select-Object -First 1).FullName
+          Write-Host "Validating inner CLAP: $inner"
+          clap-validator validate $inner
 
       - name: Upload test logs
         if: failure()

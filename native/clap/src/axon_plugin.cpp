@@ -18,7 +18,9 @@
 //   - arm64 macOS only (parent CMakeLists guards against other platforms)
 //   - CPU execution provider only
 //   - per-block parameter snapshot (no sample-accurate smoothing)
-//   - refuses activation if host sample rate != composite_meta.sample_rate
+//   - NO host sample-rate guard or resampling: the neural stages run
+//     fixed-sample-count windows trained at 44.1 kHz, so their behavior drifts
+//     at other host rates and activation is NOT refused (issue #11)
 
 #include <algorithm>
 #include <atomic>

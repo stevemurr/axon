@@ -373,6 +373,11 @@ target_include_directories(test_ssl_hop_contract PRIVATE ${JSON_INCLUDE_DIR})
 target_compile_definitions(test_ssl_hop_contract PRIVATE
     SSL_META_PATH="${CMAKE_SOURCE_DIR}/../../weights/axon_bundle/ssl_comp/plugin_meta.json")
 
+# test_ssl_hop_stagger — the L/R hop-phase stagger (issue #22) keeps both
+# channels' TCN forwards off the same host block. Mirrors the flush cadence
+# against the real kSslHop/kBlockSize; no ORT needed.
+axon_add_test(test_ssl_hop_stagger tests/test_ssl_hop_stagger.cpp)
+
 # test_nablafx_plugin — control-snapshot bounds + clamped normalization logic.
 axon_add_test(test_nablafx_plugin tests/test_nablafx_plugin.cpp src/param_id.cpp)
 

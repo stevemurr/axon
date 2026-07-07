@@ -648,6 +648,15 @@ struct ChannelChain {
     // often. Adds (kSslHop - kBlockSize) samples of latency.
     std::vector<float>                     ssl_comp_in_accum;    // [kSslHop]
     int                                    ssl_comp_in_fill{0};
+    // Hop-phase stagger: channels past the first start their accumulator
+    // pre-loaded to kSslHop/2 so their TCN forward lands in a different host
+    // block than channel 0's (halves the per-block spike). The first flush
+    // fired from that pre-loaded phase sees a partial (half-zero) accumulator,
+    // so it primes the ring only — this counter suppresses that flush's ORT
+    // output, keeping warm-up dry until a full real window exists. Output
+    // timing is phase-independent (wet always trails input by kSslHop-kBlockSize
+    // once primed), so L/R stay sample-aligned in steady state. 0 = none pending.
+    int                                    ssl_comp_prime_flushes{0};
     std::vector<float>                     ssl_comp_out_queue;   // [kSslHop]
     int                                    ssl_comp_out_avail{0};
     int                                    ssl_comp_out_read{0};
@@ -1213,6 +1222,7 @@ static bool plugin_activate_impl(const clap_plugin_t* p, double sample_rate) {
             ch.ssl_comp_out_buf.assign(N, 0.0f);
             ch.ssl_comp_in_accum.assign(kSslHop, 0.0f);
             ch.ssl_comp_in_fill = 0;
+            ch.ssl_comp_prime_flushes = 0;
             ch.ssl_comp_out_queue.assign(kSslHop, 0.0f);
             ch.ssl_comp_out_avail = 0;
             ch.ssl_comp_out_read = 0;
@@ -1244,6 +1254,25 @@ static bool plugin_activate_impl(const clap_plugin_t* p, double sample_rate) {
         ch.bypass_fifo.assign(Plugin::kBypassRing, 0.f);
     }
     plug->bypass_w = plug->bypass_r = 0;
+
+    // Stagger the ssl_comp hop phase across channels so both channels' TCN
+    // forwards don't land in the SAME host block (the dominant per-block CPU
+    // spike). Pre-load channel 1's accumulator to kSslHop/2 (an integer number
+    // of kBlockSize flushes, since kSslHop % kBlockSize == 0) so its hop
+    // boundary sits half a hop away from channel 0's. Its first flush from
+    // this phase is a half-zero window used only to prime the ring, so mark
+    // one priming flush to keep that channel dry until a full real window
+    // exists. Output timing is phase-independent (each wet trails input by
+    // kSslHop - kBlockSize once primed), so L/R stay sample-aligned in steady
+    // state. Mono (channels < 2) is untouched — only chains[1] is offset.
+    if (plug->channels >= 2 && g_state->ssl_comp_loaded &&
+        g_state->ssl_comp_meta.trace_len > 0) {
+        static_assert((kSslHop / 2) % kBlockSize == 0,
+                      "hop stagger assumes kSslHop/2 lands on a flush boundary "
+                      "so the pre-loaded accumulator writes stay in bounds");
+        plug->chains[1].ssl_comp_in_fill       = kSslHop / 2;
+        plug->chains[1].ssl_comp_prime_flushes = 1;
+    }
 
     plug->spectrum.init();
     plug->bass_mono.prepare(plug->sample_rate);
@@ -1908,6 +1937,7 @@ void flush_chain_block_(Plugin& plug,
                 int&  avail  = plug.chains[ch].ssl_comp_out_avail;
                 int&  rd     = plug.chains[ch].ssl_comp_out_read;
                 int&  dwr    = plug.chains[ch].ssl_comp_dry_write;
+                int&  prime  = plug.chains[ch].ssl_comp_prime_flushes;
 
                 // Push input into the hop-sized accumulator, applying the input
                 // trim so the MODEL sees the attenuated/boosted signal. `dry`
@@ -1932,6 +1962,17 @@ void flush_chain_block_(Plugin& plug,
                                 ring.data() + N - kSslHop);
                     fill = 0;
 
+                    if (prime > 0) {
+                        // Priming-only flush (the hop-staggered channel's first
+                        // partial hop): the ring is now seeded, but its leading
+                        // kSslHop/2 samples are the activate zero-fill, not real
+                        // audio. Skip the forward and leave the output queue
+                        // empty so this channel stays in warm-up pass-through
+                        // until its next (fully real) flush half a hop later —
+                        // exactly the existing first-hop dry semantics, just one
+                        // partial hop later on the offset channel. One-time.
+                        --prime;
+                    } else {
                     // ORT produces `actual_olen` (= N - rf + 1) samples;
                     // pass that as audio_out_len so OrtMiniSession doesn't
                     // read past the tensor end.
@@ -1955,6 +1996,7 @@ void flush_chain_block_(Plugin& plug,
                                 outq.data());
                     avail = kSslHop;
                     rd    = 0;
+                    }
                 }
 
                 // Build a per-sample time-aligned dry block. With dry delay

@@ -184,7 +184,7 @@
       "name": "Drive",
       "min": 0.0,
       "max": 24.0,
-      "default": 2.0,
+      "default": 5.0,
       "skew": 1.0,
       "unit": "dB"
     },

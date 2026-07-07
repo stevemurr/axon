@@ -151,7 +151,7 @@ def _build_default_meta(
         # Mel limiter.
         _ctl("MLI", "Limiter",         0.0,  1.0, 1.0),
         _ctl("MLC", "Ceiling",       -12.0,  0.0, 0.0, "dBFS"),
-        _ctl("MLD", "Drive",           0.0, 24.0, 2.0, "dB"),
+        _ctl("MLD", "Drive",           0.0, 24.0, 5.0, "dB"),
         _ctl("MLG", "Adaptive Gain",   0.0,  1.0, 0.5),
         _ctl("MLS", "Adaptive Speed",  0.0,  1.0, 0.5),
         _ctl("MLA", "Dynamic",         0.0,  1.0, 1.0, "switch"),

@@ -23,12 +23,21 @@ name: CI
 # dependency fails the configure instead of silently falling back to the
 # headless stub.
 #
+# On top of build+ctest, the Linux and Windows jobs run clap-validator (a real
+# out-of-process CLAP host) against the packaged dir-bundle — CLAP spec + GUI
+# extension lifecycle conformance. On Linux it runs under Xvfb so the real
+# webkit2gtk backend initializes (create/destroy, no crash, no zombie
+# WebKitWebProcess). This is the automatable slice of the Phase-3 GUI-runtime
+# gate that CI could not previously cover (issue #23); the remaining gate is
+# interactive real-DAW UX + listening on native x64. A separate GUI-off job
+# pins the webkit2gtk-less (-DAXON_GUI=OFF) stub build.
+#
 # macos-14/15 are arm64; macos-13 is Intel and would fail to configure.
 # See docs/future/active/windows-linux-builds.md for the port's design.
 
 on:
   push:
-    branches: [main, "feat/**", "fix/**", "chore/**"]
+    branches: [main, "feat/**", "fix/**", "chore/**", "ci/**"]
     paths:
       - "native/clap/**"
       - "weights/axon_bundle/**"
@@ -116,11 +125,11 @@ jobs:
           c++ --version | head -1
           echo "arch: $(uname -m)"
 
-      - name: Install apt deps (libsndfile for axon_bench; webkit2gtk for the GUI)
+      - name: Install apt deps (libsndfile for axon_bench; webkit2gtk for the GUI; xvfb for the validator display)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libsndfile1-dev pkg-config libwebkit2gtk-4.1-dev libx11-dev
+            libsndfile1-dev pkg-config libwebkit2gtk-4.1-dev libx11-dev xvfb
 
       - name: Cache fetched deps (CLAP / json / ONNX Runtime / pffft)
         uses: actions/cache@v4
@@ -148,6 +157,17 @@ jobs:
 
       - name: Run test suite (ctest)
         run: ctest --test-dir native/clap/build --output-on-failure
+
+      # clap-validator: a real out-of-process CLAP host that exercises the spec
+      # (scan, params, state) and the GUI extension lifecycle against the
+      # packaged dir-bundle. Run under Xvfb so the webkit2gtk backend actually
+      # initializes — the automatable part of the Phase-3 Linux GUI-runtime
+      # gate. Built from source with the runner's preinstalled cargo (pinned by
+      # the repo's Cargo.lock via --locked).
+      - name: Install clap-validator
+        run: cargo install --git https://github.com/free-audio/clap-validator --locked
+      - name: Validate CLAP bundle (clap-validator, under Xvfb)
+        run: xvfb-run -a clap-validator validate "$PWD/build/Axon.clap"
 
       - name: Upload test logs
         if: failure()
@@ -220,6 +240,16 @@ jobs:
       - name: Run test suite (ctest)
         run: ctest --test-dir native/clap/build --output-on-failure
 
+      # clap-validator against the packaged bundle. The windows-latest runner
+      # has an interactive desktop and a preinstalled WebView2 runtime, so the
+      # GUI extension lifecycle exercises the real WebView2 backend. Same spec
+      # + GUI conformance gate as Linux; the interactive real-DAW UX and the
+      # WebView2-runtime-missing degrade path remain manual (see scoping doc).
+      - name: Install clap-validator
+        run: cargo install --git https://github.com/free-audio/clap-validator --locked
+      - name: Validate CLAP bundle (clap-validator)
+        run: clap-validator validate build/Axon.clap
+
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -228,3 +258,36 @@ jobs:
           path: |
             native/clap/build/Testing/**/*.log
           if-no-files-found: ignore
+
+  # Pins the webkit2gtk-less ship decision (scoping doc item 6): -DAXON_GUI=OFF
+  # must build+link the headless GUI stub with no webkit2gtk / X11 dependency,
+  # so a GUI-enabled .clap is not the only shippable Linux artifact. Build-only
+  # (own build dir + cache); runs in parallel, off the critical path.
+  build-linux-nogui:
+    name: build (Linux x64, GUI off)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install apt deps (libsndfile only — no webkit2gtk/X11 with GUI off)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsndfile1-dev pkg-config
+
+      - name: Cache fetched deps (CLAP / json / ONNX Runtime / pffft)
+        uses: actions/cache@v4
+        with:
+          path: native/clap/build-nogui/_deps
+          key: deps-nogui-${{ runner.os }}-x64-${{ hashFiles('native/clap/cmake/Fetch*.cmake') }}
+          restore-keys: |
+            deps-nogui-${{ runner.os }}-x64-
+
+      - name: Configure (GUI off → headless stub)
+        run: >
+          cmake -S native/clap -B native/clap/build-nogui
+          -DCMAKE_BUILD_TYPE=Release
+          -DAXON_GUI=OFF
+
+      - name: Build (plugins + bench + unit tests, headless stub GUI)
+        run: cmake --build native/clap/build-nogui -j

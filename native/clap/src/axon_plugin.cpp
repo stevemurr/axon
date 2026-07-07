@@ -947,7 +947,17 @@ static bool params_text_to_value(const clap_plugin_t* p, clap_id id, const char*
     return true;
 }
 
-static void params_flush(const clap_plugin_t*, const clap_input_events_t*, const clap_output_events_t*) {}
+// Defined with plugin_process below. flush() must apply host param edits made
+// while the plugin is NOT processing, so params_get_value reflects them —
+// otherwise a host that sets params via flush() (e.g. clap-validator) sees the
+// reported values never change. CLAP guarantees flush() is never concurrent
+// with process(), so writing control_values here is as safe as apply_events_
+// is inside process().
+static void apply_events_(Plugin* plug, const clap_input_events_t* in_events);
+static void params_flush(const clap_plugin_t* p, const clap_input_events_t* in,
+                         const clap_output_events_t* /*out*/) {
+    apply_events_(static_cast<Plugin*>(p->plugin_data), in);
+}
 
 static const clap_plugin_params_t s_ext_params = {
     params_count, params_get_info, params_get_value, params_value_to_text,
@@ -1028,8 +1038,20 @@ static bool state_save(const clap_plugin_t* p, const clap_ostream_t* stream) {
     auto& jo = j["processor_order"];
     for (int i = 0; i < kNumStages; ++i) jo.push_back(plug->processor_order[i]);
     std::string txt = j.dump();
-    int64_t written = stream->write(stream, txt.data(), txt.size());
-    return written == static_cast<int64_t>(txt.size());
+    // clap_ostream::write may accept FEWER bytes than requested; loop until the
+    // whole buffer is written. A host that streams state in small chunks (e.g.
+    // clap-validator's 23-bytes-at-a-time test) otherwise gets a false save.
+    // Mirrors the read loop in state_load below.
+    const char* data   = txt.data();
+    int64_t remaining  = static_cast<int64_t>(txt.size());
+    while (remaining > 0) {
+        const int64_t n = stream->write(stream, data,
+                                        static_cast<uint64_t>(remaining));
+        if (n <= 0) return false;   // -1 = error, 0 = no progress
+        data      += n;
+        remaining -= n;
+    }
+    return true;
 }
 
 static bool state_load(const clap_plugin_t* p, const clap_istream_t* stream) {

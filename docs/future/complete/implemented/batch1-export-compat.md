@@ -1,8 +1,12 @@
 # Make the plugin safe for batch-1 auto-EQ exports (activate-time check + adapter)
 
-Status: not-started
+Status: complete/implemented
 Opened: 2026-07-06
 Issue: #24
+Concluded: 2026-07-06
+Outcome: Shipped Option 1 (activate-time batch guard) — a batch-1 auto-EQ
+export now fails activation with an actionable message instead of crashing the
+host on the first process() call. Batch-2 path unchanged.
 
 Crash bug found by the training-coupling investigation: the documented
 retrain -> export -> install flow currently ships a plugin that blows up on
@@ -41,3 +45,29 @@ the audio thread.
   (option 2) or fails activation with an actionable error (option 1) — unit
   test with a surgically-downgraded model.
 - Shipped batch-2 path unchanged: suite green, eval null byte-identical.
+
+## Outcome
+
+Shipped 2026-07-06 (branch `fix/batch1-export-crash`), **Option 1 — the
+activate-time guard** (the minimal, low-risk fix; Option 2's shape-driven
+run_controller is deferred and can still be done later without re-opening the
+crash).
+
+What changed:
+- New shared helper `native/clap/src/ort_shape.hpp` — `ort_input_batch(session,
+  "audio_in")` reads the model's declared batch dim via the ORT C++ API.
+- `OrtMiniSession::audio_in_batch()` wraps it; `plugin_activate_impl` calls it
+  right after each auto-EQ controller session is constructed and throws
+  `std::runtime_error` if the batch dim != 2. The existing activate try/catch
+  turns that throw into a clean activation failure the host reports — instead
+  of the uncaught audio-thread exception (`std::terminate`) a batch-1 bundle
+  used to cause at first process().
+
+Verification:
+- New `test_batch_probe_rejects_batch1` (in `test_ort_session.cpp`) builds the
+  embedded batch-1 Model A and asserts `ort_input_batch` reports batch=1 (→ the
+  guard rejects) and -1 for a missing input. `test_ort_session`: ALL 12 passed.
+- `uv run axon test`: 30/30 green — the shipped batch-2 bundle activates and
+  processes exactly as before (guard is a no-op when batch==2).
+- No render change to the batch-2 path (the guard only runs at activate and
+  only throws on a non-conforming bundle).

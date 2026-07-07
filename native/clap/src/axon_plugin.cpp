@@ -86,6 +86,7 @@
 #include "param_id.hpp"
 #include "mel_limiter.hpp"
 #include "ort_path.hpp"   // ORTCHAR_T-aware Ort::Session path (no-op on POSIX)
+#include "ort_shape.hpp"  // ort_input_batch() — batch-1 controller guard (#24)
 #include "resource_path.hpp"  // cross-platform bundle/resource discovery
 #include "stft_common.hpp"
 #include "rational_a.hpp"
@@ -436,6 +437,13 @@ public:
     }
 
     StateBuf& in_state(const std::string& name) { return in_states_.at(name); }
+
+    // Batch dimension the model's "audio_in" input declares (-1 if absent/rank
+    // 0). The batched controller contract requires 2; a batch-1 export would
+    // crash run_controller. Checked at activate (issue #24).
+    int64_t audio_in_batch() const {
+        return nablafx::ort_input_batch(*session_, "audio_in");
+    }
 
     void reset_state() {
         for (auto& [_, b] : in_states_)  std::fill(b.data.begin(), b.data.end(), 0.0f);
@@ -1186,6 +1194,22 @@ static bool plugin_activate_impl(const clap_plugin_t* p, double sample_rate) {
                 *g_state->ort_env,
                 g_state->resources_dir + "/" + dir + "/model.onnx",
                 g_state->autoeq_metas[i]));
+
+            // Batch-2 contract: run_controller stacks both channels into ONE
+            // ORT call, feeding a fixed audio_in of shape {2,1,T} and reading
+            // batch-2 param offsets. A batch-1 export (nablafx-export's default
+            // shape) would throw inside run_controller ON THE AUDIO THREAD,
+            // which has no try/catch -> std::terminate -> host crash. Reject it
+            // HERE, where the activate try/catch turns it into a clean
+            // activation failure the host can report (issue #24).
+            const int64_t batch = plug->autoeq_ort_per_class.back()->audio_in_batch();
+            if (batch != 2) {
+                throw std::runtime_error(
+                    "auto_eq class '" + cls + "' model.onnx declares audio_in "
+                    "batch=" + std::to_string(batch) + ", but the batched "
+                    "controller requires batch=2. This is a batch-1 export; "
+                    "re-run the batch-2 conversion before installing.");
+            }
 
             // Every auto-EQ class declares spectral_mask_eq as its
             // dsp_blocks[0]; meta.cpp throws if anything else slips through.

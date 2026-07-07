@@ -33,6 +33,7 @@
 #include "../src/meta.hpp"
 #include "../src/ort_run_guard.hpp"
 #include "../src/ort_session.hpp"
+#include "../src/ort_shape.hpp"   // ort_input_batch() — batch-1 controller guard (#24)
 
 #include <cassert>
 #include <cstddef>
@@ -560,6 +561,22 @@ void test_bad_model_path_throws(Ort::Env& env) {
 
 }  // namespace
 
+// The activate-time batch guard for the auto-EQ controller (#24): a batched
+// controller must declare audio_in batch=2. Model A is a BATCH-1 export
+// (audio_in [1,1,L]), so the probe the guard uses must report 1 (-> reject);
+// a missing input must report -1. Built from the model bytes directly so the
+// test needs no file path.
+void test_batch_probe_rejects_batch1(Ort::Env& env) {
+    Ort::SessionOptions opts;
+    Ort::Session sess(env, kAxonTestModelA, kAxonTestModelA_len, opts);
+    const int64_t b = nablafx::ort_input_batch(sess, "audio_in");
+    std::fprintf(stderr, "[batch] Model A audio_in batch=%lld (want 1 -> guard rejects)\n",
+                 (long long)b);
+    assert(b == 1);   // guard throws on != 2, so a batch-1 export is caught
+    assert(nablafx::ort_input_batch(sess, "does_not_exist") == -1);
+    std::fprintf(stderr, "[batch] PASS\n");
+}
+
 int main() {
     // Part 1 — guard arithmetic (no ORT needed).
     test_underflow_is_catastrophic_when_unguarded();
@@ -576,7 +593,8 @@ int main() {
     test_minimal_model_all_lengths(env);
     test_denormal_passthrough(env);
     test_bad_model_path_throws(env);
+    test_batch_probe_rejects_batch1(env);
 
-    std::fprintf(stderr, "ALL 11 TESTS PASSED\n");
+    std::fprintf(stderr, "ALL 12 TESTS PASSED\n");
     return 0;
 }

@@ -1,0 +1,114 @@
+/* ============================================================================
+ * Axon Design System — Component Styles
+ * Widgets built by components.js. All values derive from tokens.css.
+ * ==========================================================================*/
+
+/* ── Knob ────────────────────────────────────────────────────────────────*/
+.ax-knob {
+  display: flex; flex-direction: column; align-items: center;
+  gap: var(--sp-1);
+  cursor: ns-resize;
+  border-radius: var(--r-md);
+  padding: var(--sp-1) var(--sp-1) 0;
+  outline: none;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.ax-knob:focus-visible { box-shadow: var(--ring); }
+/* No CSS `filter` here on purpose: in an embedded WKWebView a filtered element
+ * rasterizes on a 1x layer and its curves alias. Depth comes from the SVG cap
+ * gradient; the active cue is a composited transform (stays crisp). */
+.ax-knob__svg { display: block; line-height: 0; transition: transform var(--dur-fast) var(--ease-out); }
+.ax-knob.is-active .ax-knob__svg { transform: scale(1.06); }
+.ax-knob__label {
+  font-size: var(--fs-9); font-weight: var(--fw-mid);
+  letter-spacing: var(--ls-label); color: var(--text-dim);
+  text-align: center; max-width: 72px;
+}
+.ax-knob__val {
+  font-size: var(--fs-9); font-weight: var(--fw-semi);
+  color: var(--accent); text-align: center; min-height: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Toggle / Button ─────────────────────────────────────────────────────*/
+.ax-toggle { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); }
+.ax-toggle__btn {
+  width: 56px; height: 56px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: var(--fs-10); font-weight: var(--fw-bold);
+  letter-spacing: var(--ls-label);
+  cursor: pointer;
+  box-shadow: var(--inset-top);
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.ax-toggle__btn:hover { background: var(--surface-hover); color: var(--text); }
+.ax-toggle__btn:focus-visible { outline: none; box-shadow: var(--ring); }
+.ax-toggle__btn.is-on {
+  --w-accent: var(--accent);
+  border-color: var(--w-accent);
+  background: var(--accent-weak);
+  color: var(--w-accent);
+}
+.ax-toggle__btn.is-danger.is-on {
+  border-color: var(--danger); background: var(--danger-weak); color: var(--danger);
+}
+.ax-toggle__label {
+  font-size: var(--fs-9); font-weight: var(--fw-mid);
+  letter-spacing: var(--ls-label); color: var(--text-dim); text-align: center;
+}
+
+/* ── Enum select ─────────────────────────────────────────────────────────*/
+.ax-enum { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); min-width: 96px; padding-top: var(--sp-1); }
+.ax-enum__select {
+  appearance: none; -webkit-appearance: none;
+  width: 100%;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 6px 22px 6px 10px;
+  font-family: var(--font-ui); font-size: var(--fs-11);
+  letter-spacing: var(--ls-label); cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 50%, calc(100% - 7px) 50%;
+  background-size: 5px 5px; background-repeat: no-repeat;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.ax-enum__select:hover { border-color: var(--accent); }
+.ax-enum__select:focus { outline: none; border-color: var(--accent); background-color: var(--accent-weak); }
+.ax-enum__label { font-size: var(--fs-9); color: var(--text-dim); letter-spacing: var(--ls-caps); text-transform: uppercase; }
+
+/* ── Chain card ──────────────────────────────────────────────────────────*/
+.ax-card {
+  --c-accent: var(--accent);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px;
+  width: 82px; height: 54px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); cursor: grab; flex-shrink: 0;
+  position: relative; box-shadow: var(--inset-top);
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.ax-card:hover { background: var(--surface-hover); }
+.ax-card.is-selected { border-color: var(--c-accent); background: var(--surface-raised); }
+.ax-card.is-selected::before {
+  content: ''; position: absolute; left: 10px; right: 10px; top: -1px; height: 2px;
+  border-radius: 2px; background: var(--c-accent); box-shadow: 0 0 8px var(--c-accent);
+}
+.ax-card.is-drag-over { border-color: var(--accent); opacity: 0.6; }
+.ax-card.is-dragging { opacity: 0.4; }
+.ax-card__name {
+  font-size: var(--fs-9); font-weight: var(--fw-semi);
+  letter-spacing: var(--ls-label); color: var(--text); text-align: center;
+}
+.ax-card__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); transition: background var(--dur-med) var(--ease-out), box-shadow var(--dur-med) var(--ease-out); }
+.ax-card__dot.is-active { background: var(--c-accent); box-shadow: 0 0 6px var(--c-accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}

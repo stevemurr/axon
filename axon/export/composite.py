@@ -175,10 +175,10 @@ def _build_default_meta(
         # Auto gain (level match) + master bypass.
         _ctl("AGN", "Auto Gain", 0.0, 1.0, 1.0, "switch"),
         _ctl("BYP", "Bypass",    0.0, 1.0, 0.0, "switch"),
-        # SSL 9000 J channel EQ (SEQ_*). SEQ_ON defaults OFF so the stage is
-        # a bit-identical bypass out of the box. SEQ_AUTO/SPLIT/CAL/RESET are
+        # SSL 9000 J channel EQ (SEQ_*). SEQ_ON defaults ON (EQ engaged out of the
+        # box); flat bands keep it near-transparent. SEQ_AUTO/SPLIT/CAL/RESET are
         # the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
-        _ctl("SEQ_ON",      "EQ",            0.0,     1.0,     0.0, "switch"),
+        _ctl("SEQ_ON",      "EQ",            0.0,     1.0,     1.0, "switch"),
         _ctl("SEQ_LF_G",    "LF Gain",     -18.0,    18.0,     0.0, "dB"),
         _ctl("SEQ_LF_F",    "LF Freq",      30.0,   600.0,   100.0, "Hz"),
         _ctl("SEQ_LF_BELL", "LF Bell",       0.0,     1.0,     0.0, "switch"),
@@ -196,7 +196,7 @@ def _build_default_meta(
         _ctl("SEQ_LPF_ON",  "LPF",           0.0,     1.0,     0.0, "switch"),
         _ctl("SEQ_LPF_F",   "LPF Freq",   3000.0, 22000.0, 20000.0, "Hz"),
         _ctl("SEQ_DRIVE",   "Colour",        0.0,     1.0,     0.0),
-        _ctl("SEQ_AUTO",    "Auto Assist",   0.0,     1.0,     0.0),
+        _ctl("SEQ_AUTO",    "Auto Assist",   0.0,     1.0,     1.0),
         _ctl("SEQ_SPLIT",   "Split",         0.0,     1.0,     0.6),
         _ctl("SEQ_CAL",     "Recalibrate",   0.0,     1.0,     0.0, "switch"),
         _ctl("SEQ_RESET",   "Reset",         0.0,     1.0,     0.0, "switch"),

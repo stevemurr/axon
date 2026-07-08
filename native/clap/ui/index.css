@@ -1,0 +1,126 @@
+/* ============================================================================
+ * Axon — Application Shell / Chrome (Modern Pro-Dark)
+ * Layout + non-widget surfaces. Widgets live in system/components.css; all
+ * colours/spacing come from system/tokens.css.
+ * ==========================================================================*/
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 820px; height: 600px; overflow: hidden;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); font-size: var(--fs-11);
+  user-select: none; -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app { display: flex; flex-direction: column; width: 820px; height: 600px; }
+
+/* ── Header ──────────────────────────────────────────────────────────────*/
+#header {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 44px; padding: 0 var(--sp-4);
+  background: linear-gradient(180deg, #0E1116 0%, #0A0C0F 100%);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+#logo {
+  font-size: var(--fs-18); font-weight: var(--fw-bold);
+  letter-spacing: var(--ls-logo); color: var(--text);
+  display: flex; align-items: baseline; gap: 1px;
+}
+#logo span { color: var(--accent); text-shadow: 0 0 14px var(--accent-glow); }
+#header-meta {
+  font-size: var(--fs-9); font-weight: var(--fw-semi);
+  letter-spacing: var(--ls-caps); color: var(--text-mute);
+  text-transform: uppercase;
+}
+
+/* ── Body ────────────────────────────────────────────────────────────────*/
+#body-row { display: flex; flex: 1; min-height: 0; }
+#main-col { width: 700px; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; }
+
+/* ── Chain strip ─────────────────────────────────────────────────────────*/
+#chain {
+  display: flex; align-items: center; height: 72px; padding: 0 var(--sp-3);
+  background: var(--bg-sunken); border-bottom: 1px solid var(--border);
+  flex-shrink: 0; overflow-x: auto;
+}
+#chain::-webkit-scrollbar { display: none; }
+.arrow { color: var(--text-mute); font-size: var(--fs-14); padding: 0 5px; flex-shrink: 0; }
+
+/* ── Spectrum view ───────────────────────────────────────────────────────*/
+#spectrum-view {
+  height: 160px; flex-shrink: 0; position: relative;
+  background: var(--bg-sunken); border-bottom: 1px solid var(--border);
+  padding: var(--sp-2) var(--sp-3);
+}
+#spectrum-canvas { display: block; }
+#eq-view-toggle {
+  position: absolute; top: var(--sp-2); right: var(--sp-3); display: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-pill);
+  padding: 0; cursor: pointer; overflow: hidden;
+  font: var(--fw-semi) 8px var(--font-ui); letter-spacing: var(--ls-label); color: var(--text-mute);
+}
+#eq-view-toggle span { display: inline-block; padding: 3px 9px; transition: background var(--dur-fast), color var(--dur-fast); }
+#eq-view-toggle span.active { background: var(--accent-weak); color: var(--accent); }
+
+/* ── Control surface ─────────────────────────────────────────────────────*/
+#surface { flex: 1; display: flex; flex-direction: column; padding: var(--sp-3) var(--sp-5) var(--sp-3); overflow: hidden; }
+#controls { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-5); align-items: flex-start; }
+/* Channel-strip layout: a non-wrapping row of vertical band columns, separated
+ * by hairline dividers (zero flex-gap so 9 columns fit the 660px surface). */
+#controls.is-grouped { flex-wrap: nowrap; gap: 0; align-items: flex-start; }
+.ax-group { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); }
+.ax-group:not(:first-child) { margin-left: var(--sp-1); padding-left: var(--sp-1); border-left: 1px solid var(--border); }
+.ax-group__label { font-size: var(--fs-9); font-weight: var(--fw-bold); letter-spacing: var(--ls-caps); color: var(--text-mute); text-transform: uppercase; margin-bottom: 1px; }
+/* Uniform cell height so rows (shape/Q · freq · gain) line up across every band
+ * column, whether a given cell is a knob or a button. Knobs lose their top pad
+ * so their dial top-aligns with the buttons in row 1. */
+#controls.is-grouped .ax-group > *:not(.ax-group__label) { height: 88px; flex-shrink: 0; }
+#controls.is-grouped .ax-group > .ax-knob { padding-top: 0; }
+
+/* Grouped ROWS: labelled horizontal clusters (for modules that also have a
+ * visualizer, so controls stay one row tall). */
+#controls.is-grouped-row { flex-wrap: nowrap; gap: 0; align-items: flex-start; }
+#controls.is-grouped-row .ax-group { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); }
+#controls.is-grouped-row .ax-group:not(:first-child) { margin-left: var(--sp-2); padding-left: var(--sp-2); border-left: 1px solid var(--border); }
+#controls.is-grouped-row .ax-group__row { display: flex; gap: var(--sp-3); align-items: flex-start; }
+#controls.is-grouped-row .ax-group__row > * { height: 88px; flex-shrink: 0; }
+#controls.is-grouped-row .ax-group__row > .ax-knob { padding-top: 0; }
+
+/* Module visualizer host + wraps */
+#viz { display: flex; flex-direction: column; }
+.viz-wrap {
+  display: none; margin-top: var(--sp-3); flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden;
+  background: var(--bg-sunken); box-shadow: var(--shadow-1);
+}
+.viz-wrap.is-shown { display: block; }
+.viz-wrap canvas { display: block; }
+
+/* ── Meter panel ─────────────────────────────────────────────────────────*/
+#meter-panel {
+  width: 120px; flex-shrink: 0; background: var(--bg-sunken);
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: stretch;
+  padding: var(--sp-2) var(--sp-2) var(--sp-3); gap: var(--sp-2);
+}
+#meter-title { font-size: var(--fs-9); font-weight: var(--fw-bold); letter-spacing: var(--ls-caps); color: var(--text-dim); text-align: center; }
+#meter-modes { display: flex; gap: 3px; }
+.pill {
+  flex: 1; text-align: center; font-size: 8px; font-weight: var(--fw-bold);
+  letter-spacing: var(--ls-label); padding: 5px 0;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm);
+  color: var(--text-dim); cursor: pointer;
+  transition: color var(--dur-fast), background var(--dur-fast), border-color var(--dur-fast);
+}
+.pill:hover { color: var(--text); background: var(--surface-hover); }
+.pill.is-on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+#meter-canvas { display: block; margin: 0 auto; }
+#meter-readouts { display: flex; gap: var(--sp-2); }
+.meter-ro { flex: 1; text-align: center; border: 1px solid var(--border); border-radius: var(--r-sm); padding: 4px 0 5px; background: var(--surface); }
+.meter-ro .lbl { font-size: 8px; color: var(--text-dim); letter-spacing: var(--ls-label); }
+.meter-ro .val { font-size: var(--fs-14); font-weight: var(--fw-bold); color: var(--text); font-variant-numeric: tabular-nums; }
+.meter-ro .val.in-zone { color: var(--ok); }
+#meter-toggles { display: flex; gap: var(--sp-2); }
+#meter-toggles .pill { font-size: 8px; padding: 6px 0; }
+#bypass-btn.is-on { background: var(--danger); border-color: var(--danger); color: var(--accent-ink); }

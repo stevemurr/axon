@@ -221,15 +221,20 @@ AxonGUIState* axon_gui_create(
 
     // --- Load HTML ---
     std::string html_path = state->resources_dir + "/ui/index.html";
-    std::string html      = read_file(html_path);
+    std::string html      = read_file(html_path);   // readability probe only
 
     if (!html.empty()) {
-        NSString* htmlStr  = [NSString stringWithUTF8String:html.c_str()];
-        // Use the ui/ directory as baseURL so relative asset paths resolve
-        NSString* basePath = [NSString stringWithUTF8String:
+        // Load the page as a real file:// URL and grant read access to the whole
+        // ui/ directory. loadHTMLString: would sandbox the page so its split
+        // subresources (system/*.css, system/*.js, modules/*.js) could not load;
+        // loadFileURL:allowingReadAccessToURL: lets those relative <link>/<script>
+        // tags resolve. The didFinishNavigation buffered-init replay is unaffected.
+        NSString* filePath = [NSString stringWithUTF8String:html_path.c_str()];
+        NSURL*    fileURL  = [NSURL fileURLWithPath:filePath isDirectory:NO];
+        NSString* dirPath  = [NSString stringWithUTF8String:
                               (state->resources_dir + "/ui/").c_str()];
-        NSURL*    baseURL  = [NSURL fileURLWithPath:basePath isDirectory:YES];
-        [wv loadHTMLString:htmlStr baseURL:baseURL];
+        NSURL*    dirURL   = [NSURL fileURLWithPath:dirPath isDirectory:YES];
+        [wv loadFileURL:fileURL allowingReadAccessToURL:dirURL];
     } else {
         // Fallback: show an error page
         NSString* fallback = @"<html><body style='background:#111;color:#f66;"

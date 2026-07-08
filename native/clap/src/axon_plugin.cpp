@@ -2629,10 +2629,15 @@ static bool gui_show(const clap_plugin_t* p) {
     if (!plug->gui_state) return false;
     gui_send_full_state_(plug);
     axon_gui_show(plug->gui_state);
+    // Resume the UI's rAF render loop (it self-pauses when hidden to keep idle
+    // CPU near zero — see ui/system/loop.js).
+    axon_gui_eval_js(plug->gui_state, "window.axonVisible&&window.axonVisible(true)");
     return true;
 }
 static bool gui_hide(const clap_plugin_t* p) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
+    if (plug->gui_state)
+        axon_gui_eval_js(plug->gui_state, "window.axonVisible&&window.axonVisible(false)");
     axon_gui_hide(plug->gui_state);
     return true;
 }
@@ -2914,11 +2919,11 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"WID_AMT",   "Amount",   0.0f,    2.0f,   1.38f, 1.0f, ""});
             inject(ControlSpec{"WID_FREQ",  "Low",     50.0f, 1000.0f,  250.0f, 1.0f, "Hz"});
             inject(ControlSpec{"WID_AIR",   "Air",      0.0f,    1.0f,    1.0f, 1.0f, ""});
-            // SSL 9000 J channel EQ (SEQ_*). Defaults make the stage a no-op
-            // (SEQ_ON = OFF → bit-identical bypass). LF/HF switch shelf<->bell via
-            // *_BELL; LMF/HMF carry Q; HPF/LPF have on/off + cutoff. SEQ_AUTO/SPLIT/CAL
-            // are the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
-            inject(ControlSpec{"SEQ_ON",     "EQ",           0.0f,     1.0f,    0.0f,  1.0f, "switch"});
+            // SSL 9000 J channel EQ (SEQ_*). SEQ_ON defaults ON (EQ engaged out of
+            // the box); flat bands keep it near-transparent. LF/HF switch shelf<->bell
+            // via *_BELL; LMF/HMF carry Q; HPF/LPF have on/off + cutoff. SEQ_AUTO/SPLIT/
+            // CAL are the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
+            inject(ControlSpec{"SEQ_ON",     "EQ",           0.0f,     1.0f,    1.0f,  1.0f, "switch"});
             inject(ControlSpec{"SEQ_LF_G",   "LF Gain",    -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
             inject(ControlSpec{"SEQ_LF_F",   "LF Freq",     30.0f,   600.0f,  100.0f,  1.0f, "Hz"});
             inject(ControlSpec{"SEQ_LF_BELL","LF Bell",      0.0f,     1.0f,    0.0f,  1.0f, "switch"});
@@ -2936,7 +2941,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"SEQ_LPF_ON", "LPF",          0.0f,     1.0f,    0.0f,  1.0f, "switch"});
             inject(ControlSpec{"SEQ_LPF_F",  "LPF Freq",  3000.0f, 22000.0f,20000.0f,  1.0f, "Hz"});
             inject(ControlSpec{"SEQ_DRIVE",  "Colour",       0.0f,     1.0f,    0.0f,  1.0f, ""});
-            inject(ControlSpec{"SEQ_AUTO",   "Auto Assist",  0.0f,     1.0f,    0.0f,  1.0f, ""});
+            inject(ControlSpec{"SEQ_AUTO",   "Auto Assist",  0.0f,     1.0f,    1.0f,  1.0f, ""});
             inject(ControlSpec{"SEQ_SPLIT",  "Split",        0.0f,     1.0f,    0.6f,  1.0f, ""});
             inject(ControlSpec{"SEQ_CAL",    "Recalibrate",  0.0f,     1.0f,    0.0f,  1.0f, "switch"});
             inject(ControlSpec{"SEQ_RESET",  "Reset",        0.0f,     1.0f,    0.0f,  1.0f, "switch"});

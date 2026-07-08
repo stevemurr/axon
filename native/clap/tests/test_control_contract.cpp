@@ -94,8 +94,10 @@ int main() {
         assert(mn <= mx && "control min > max");
         assert(df >= mn && df <= mx && "control default out of [min,max]");
     }
-    // SEQ_ON must default OFF so the stage is a bit-identical bypass out of the box.
-    assert(double(controls.at("SEQ_ON").at("default")) == 0.0 && "SEQ_ON must default off");
+    // SEQ_ON defaults ON (EQ engaged out of the box, per product default). With
+    // flat bands / HPF-LPF off / drive 0 the stage is near-transparent — no longer
+    // bit-identical bypass, but musically neutral until the user dials the EQ.
+    assert(double(controls.at("SEQ_ON").at("default")) == 1.0 && "SEQ_ON must default on");
     // SEQ_SPLIT (coupling alpha) default = 0.6.
     assert(double(controls.at("SEQ_SPLIT").at("default")) == 0.6 && "SEQ_SPLIT default drifted");
     std::fprintf(stderr, "[contract] 22 SEQ_* controls present + specs sane PASS\n");

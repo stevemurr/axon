@@ -1,0 +1,78 @@
+/* ============================================================================
+ * Axon Design System — Design Tokens (CSS)
+ * ----------------------------------------------------------------------------
+ * "Modern Pro-Dark": deep cool neutrals, one confident cyan accent used only on
+ * engaged / live-signal states, a strict 4px spacing grid, hairline structure,
+ * tabular numerics. This file is the SINGLE SOURCE OF TRUTH for the DOM/CSS
+ * layer. Its twin, tokens.js (window.AX.tokens), mirrors the same values for
+ * the SVG knobs and <canvas> painters so the palette is never re-typed. Keep
+ * the two in parity — the gallery + a contract check assert it.
+ * ==========================================================================*/
+
+:root {
+  /* ── Base surfaces (dark → light stack) ──────────────────────────────── */
+  --bg:            #0B0D10;  /* app background */
+  --bg-sunken:     #070809;  /* canvas wells, meter panel — one step deeper */
+  --surface:       #14171C;  /* cards, controls */
+  --surface-raised:#1B1F26;  /* raised/selected surfaces */
+  --surface-hover: #212632;  /* hover state */
+
+  /* ── Structure ───────────────────────────────────────────────────────── */
+  --border:        #232830;  /* default hairline border */
+  --border-strong: #2E353F;  /* emphasized divider */
+  --hairline:      rgba(255,255,255,0.055); /* canvas grid lines */
+  --hairline-strong: rgba(255,255,255,0.10);
+
+  /* ── Text ────────────────────────────────────────────────────────────── */
+  --text:          #E6EAF0;  /* primary */
+  --text-dim:      #8A94A3;  /* labels */
+  --text-mute:     #566072;  /* axis ticks, very dim */
+
+  /* ── Accent (the one bold color — engaged / selected / live) ─────────── */
+  --accent:        #35E0C8;  /* cyan */
+  --accent-dim:    rgba(53,224,200,0.55);
+  --accent-weak:   rgba(53,224,200,0.12); /* active-tint backgrounds, fills */
+  --accent-glow:   rgba(53,224,200,0.35);
+  --accent-ink:    #04140F;  /* text/icon on an accent fill */
+
+  /* ── Semantic ────────────────────────────────────────────────────────── */
+  --danger:        #FF6B57;  /* bypass, over-ceiling, cut */
+  --danger-weak:   rgba(255,107,87,0.14);
+  --warn:          #F3B14E;  /* caution */
+  --ok:            #4FD08A;  /* in-target loudness zone */
+  --ok-weak:       rgba(79,208,138,0.15);
+
+  /* ── Per-stage identity accents (indexed by StageID; see tokens.js) ──── */
+  --stage-1:  #EAC15F;  /* AUTO EQ   — gold  */
+  --stage-2:  #FF9F45;  /* SAT       — amber (dormant) */
+  --stage-3:  #5CB0E8;  /* SSL EQ    — sky   */
+  --stage-4:  #B58BFF;  /* BUS COMP  — violet */
+  --stage-5:  #FF6B57;  /* LIMITER   — coral */
+  --stage-6:  #7FD46A;  /* BASS MONO — green */
+  --stage-8:  #46B6E0;  /* REVERB    — blue  */
+  --stage-9:  #CE9BF0;  /* WIDENER   — lavender */
+
+  /* ── Spacing scale (4px grid) ────────────────────────────────────────── */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-7: 28px; --sp-8: 32px;
+
+  /* ── Radii ───────────────────────────────────────────────────────────── */
+  --r-sm: 4px; --r-md: 6px; --r-lg: 10px; --r-pill: 999px;
+
+  /* ── Typography ──────────────────────────────────────────────────────── */
+  --font-ui:   -apple-system, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Roboto Mono', Menlo, Consolas, monospace;
+  --fs-9: 9px; --fs-10: 10px; --fs-11: 11px; --fs-12: 12px; --fs-14: 14px; --fs-18: 18px;
+  --fw-mid: 500; --fw-semi: 600; --fw-bold: 700;
+  --ls-label: 0.08em; --ls-caps: 0.14em; --ls-logo: 0.24em;
+
+  /* ── Elevation ───────────────────────────────────────────────────────── */
+  --shadow-1: 0 1px 2px rgba(0,0,0,0.45);
+  --shadow-2: 0 6px 20px rgba(0,0,0,0.55);
+  --ring:     0 0 0 1px var(--accent), 0 0 0 4px var(--accent-glow);
+  --inset-top: inset 0 1px 0 rgba(255,255,255,0.04); /* subtle raised highlight */
+
+  /* ── Motion ──────────────────────────────────────────────────────────── */
+  --dur-fast: 120ms; --dur-med: 200ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+}

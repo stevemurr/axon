@@ -2,7 +2,7 @@
 //
 // Written on the Python side by ``nablafx.export.composite``; read here on
 // module load to wire the host-exposed AMT/TRM/CLS knobs to per-stage
-// parameters and to locate the saturator + per-class auto-EQ bundles.
+// parameters and to locate the per-class auto-EQ bundles.
 
 #pragma once
 
@@ -13,12 +13,6 @@
 #include "meta.hpp"
 
 namespace nablafx {
-
-struct CompositeAmountSat {
-    float pre_gain_db_max  = 12.0f;
-    float post_gain_db_max = -12.0f;
-    float wet_mix_max      = 1.0f;
-};
 
 struct CompositeAmountAutoEq {
     float wet_mix_max = 1.0f;
@@ -54,7 +48,7 @@ struct CompositeMeta {
     std::string                                    model_id;
     int                                            sample_rate{};
     int                                            channels{};
-    // Single-instance sub-bundles (saturator). Role → directory name
+    // Single-instance sub-bundles (e.g. ssl_comp). Role → directory name
     // relative to .clap/Contents/Resources/.
     std::unordered_map<std::string, std::string>   sub_bundles;
     // Multi-class auto-EQ — one bundle per instrument-class preset.
@@ -63,7 +57,6 @@ struct CompositeMeta {
     // plugins so existing param-id helpers apply unchanged.
     std::vector<ControlSpec>                       controls;
 
-    CompositeAmountSat                             amt_sat;
     CompositeAmountAutoEq                          amt_autoeq;
     CompositeAmountSslComp                         amt_ssl_comp;
     CompositeLevelerCfg                            leveler;

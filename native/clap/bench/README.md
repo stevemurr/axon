@@ -48,7 +48,6 @@ machine-readable dump with every cell's stats.
 |------------------|---------------------------------------------------------|
 | `full_chain`     | historical "full" mix: AutoEQ + bus comp + limiter      |
 | `eq_only`        | just the auto-EQ (controller + SpectralMaskEq)          |
-| `sat_only`       | just the saturator (RationalA)                          |
 | `bus_comp_only`  | just the bus comp TCN                               |
 | `bypass`         | every stage's amount at 0 — measures plumbing overhead  |
 | `full_chain_all` | every wired stage on: `full_chain` + SslEq (SEQ_ON=1, non-flat bands) + BassMono + Reverb + Widener |

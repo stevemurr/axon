@@ -1,12 +1,12 @@
 // Composite Axon CLAP plugin: 1 dylib that wires
 //
 //   audio → ort(autoeq controller) → SpectralMaskEq
-//         → RationalA (saturator)  → ort(ssl_comp) → BassMono
+//         → ort(ssl_comp) → BassMono
 //         → MelLimiter             → TruePeakCeiling → output trim
 //
 // The composite has two host-exposed knobs (AMT, TRM) defined in the
-// composite_meta. AMT remaps to per-stage params (saturator pre/post + wet/dry,
-// LA-2A peak reduction, auto-EQ wet/dry); TRM is a final linear gain.
+// composite_meta. AMT remaps to per-stage params (auto-EQ wet/dry); TRM is a
+// final linear gain.
 //
 // Block-rate streaming: the auto-EQ controller and the LA-2A LSTM both want
 // fixed 128-sample blocks (cond_block_size). The plugin accumulates host
@@ -89,7 +89,6 @@
 #include "ort_shape.hpp"  // ort_input_batch() — batch-1 controller guard (#24)
 #include "resource_path.hpp"  // cross-platform bundle/resource discovery
 #include "stft_common.hpp"
-#include "rational_a.hpp"
 #include "spectral_mask_eq.hpp"
 #include "iir_filterbank_eq.hpp"   // zero-latency renderer (STFT↔IIR toggle)
 #include "adaptive_eq.hpp"   // deterministic Auto-EQ controller (Neural↔Adaptive toggle)
@@ -108,8 +107,6 @@ using nablafx::CompositeMeta;
 using nablafx::ControlSpec;
 using nablafx::DspBlockSpec;
 using nablafx::PluginMeta;
-using nablafx::RationalA;
-using nablafx::RationalAParams;
 using nablafx::SpectralMaskEq;
 using nablafx::SpectralMaskEqParams;
 using nablafx::TruePeakCeiling;
@@ -120,12 +117,11 @@ using nablafx::param_id_for;
 // kBlockSize, kSslHop and kEqParamsStorage live in axon_limits.hpp so the
 // contract tests compile against the real values (not hand-copied mirrors).
 
-// Reorderable stages. The Saturator (StageID 2) is intentionally NOT in the
-// chain — its enum value, process case, module (RationalA), and params are all
-// KEPT (so it can be re-added by putting its id back into the order + bumping
-// this count), it's just not wired into processor_order, so it never runs and
-// has no UI tab. The SSL 9000 J channel EQ (StageID 3) reuses the freed
-// OutputLeveler slot and DOES run (before AutoEQ).
+// Reorderable stages. StageID 2 (Saturator/RationalA waveshaper) was REMOVED
+// 2026-07 — it was dormant (not in the chain) and aliased badly at base rate;
+// its value gap is kept as a tombstone so processor_order and saved sessions
+// never re-key the remaining stages. The SSL 9000 J channel EQ (StageID 3)
+// reuses the freed OutputLeveler slot and DOES run (before AutoEQ).
 constexpr int kNumStages  = 7;
 
 // IDs are stable (kept across the leveler removal) so existing automation and
@@ -134,7 +130,8 @@ constexpr int kNumStages  = 7;
 // are freely reorderable.
 enum class StageID : int {
     AutoEQ        = 1,
-    Saturator     = 2,
+    // 2 retired (Saturator/RationalA waveshaper, removed 2026-07 — aliased at
+    // base rate) — value gap kept so processor_order/sessions don't re-key.
     SslEq         = 3,   // SSL 9000 J channel EQ (native biquads; sits before AutoEQ)
     SslComp       = 4,
     MelLimiter    = 5,
@@ -342,7 +339,6 @@ struct ModuleState {
     // the lookup map mirrors the same data keyed by class name for convenience.
     std::vector<PluginMeta>                              autoeq_metas;
     std::unordered_map<std::string, std::size_t>         autoeq_class_index;
-    PluginMeta                 sat_meta;
     PluginMeta                 ssl_comp_meta;          // optional; loaded if
                                                        // axon_meta.sub_bundles
                                                        // has "ssl_comp"
@@ -353,8 +349,6 @@ struct ModuleState {
     std::vector<const char*>   feature_ptrs;
     std::array<const char*, 3> feature_storage{};
     std::unique_ptr<Ort::Env>  ort_env;
-    // Pulled out of sat_meta once at load.
-    RationalAParams            sat_rational;
     // Per-class DSP-block payload, parsed once at load. Every class declares
     // ``spectral_mask_eq`` as its dsp_blocks[0]; held here so the audio
     // thread can read num_control_params without re-parsing meta.
@@ -387,7 +381,7 @@ static void populate_descriptor_(ModuleState& st) {
     st.descriptor.manual_url   = "";
     st.descriptor.support_url  = "";
     st.descriptor.version      = "1.0.0";
-    st.descriptor.description  = "Axon — adaptive mastering chain (auto-EQ + saturator + bus comp + bass mono + limiter + ceiling)";
+    st.descriptor.description  = "Axon — adaptive mastering chain (auto-EQ + bus comp + bass mono + limiter + ceiling)";
     st.descriptor.features     = st.feature_ptrs.data();
 }
 
@@ -633,15 +627,6 @@ struct ChannelChain {
     // runtime collapsed the LSTM's input distribution. Attack-instant /
     // decay-slow tracking gives a stable scale across blocks.
     float                                  autoeq_peak_env{0.f};
-    RationalA                              saturator;
-    // 1st-order HPF for bass-preserved saturation (bilinear transform).
-    float sat_hpf_fc{-1.f};               // cached cutoff; -1 = stale
-    float sat_hpf_b0{0.f}, sat_hpf_b1{0.f}, sat_hpf_a1{0.f};
-    float sat_hpf_x1{0.f}, sat_hpf_y1{0.f};
-    // 1st-order LPF for treble-limited saturation (bilinear transform).
-    float sat_lpf_fc{-1.f};
-    float sat_lpf_b0{0.f}, sat_lpf_b1{0.f}, sat_lpf_a1{0.f};
-    float sat_lpf_x1{0.f}, sat_lpf_y1{0.f};
     // SSL-style bus comp (separate stage from LA-2A). Stateless long-RF
     // causal TCN: needs a trace_len-sized input ring per channel because the
     // ORT call expects all RF samples of context per invocation. Allocated
@@ -1245,9 +1230,6 @@ static bool plugin_activate_impl(const clap_plugin_t* p, double sample_rate) {
             ch.autoeq_iir_per_class[i]->reset(
                 std::get<SpectralMaskEqParams>(dsp.params));
         }
-        ch.saturator.reset(g_state->sat_rational.numerator,
-                           g_state->sat_rational.denominator);
-
         if (g_state->ssl_comp_loaded && g_state->ssl_comp_meta.trace_len > 0) {
             const int N  = g_state->ssl_comp_meta.trace_len;
             const int rf = g_state->ssl_comp_meta.receptive_field;
@@ -1419,7 +1401,6 @@ namespace {
 struct AmountSnapshot {
     float autoeq_wet_mix;
     int   autoeq_cls_idx;
-    float sat_pre_db, sat_post_db, sat_wet_mix, sat_hpf_hz, sat_lpf_hz, sat_thresh_lin, sat_bias;
     float trim_lin;
     float eq_range;
     bool  eq_adaptive;        // EQ_ENGINE: false = neural LSTM, true = deterministic cascade
@@ -1464,7 +1445,6 @@ struct AmountSnapshot {
 // uppercase id in a comment — it would keep a dead control "alive". Keep
 // reads in this form, or update the extractor in lock-step.
 AmountSnapshot resolve_amount_(const Plugin& plug) {
-    float sdr=0.f,svo=0.f,smx=0.5f,shf=20.f,slf=20000.f,sth=0.f,sbs=0.f;
     float mli=1.f,mlc=-1.f,mld=0.f,mlg=0.5f,mls=0.5f,mla=0.f;
     float bmi=0.f,bmf=250.f;
     float rm=0.f,rs=0.30f,rw=0.80f,rd=7000.f,rlc=250.f;  // reverb params
@@ -1491,10 +1471,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     for (size_t i=0;i<plug.meta->controls.size();++i) {
         const auto& c=plug.meta->controls[i];
         float v=std::clamp(plug.control_values[i],c.min,c.max);
-        if(c.id=="SDR") sdr=v; else if(c.id=="SVO") svo=v;
-        else if(c.id=="SMX") smx=v; else if(c.id=="SHF") shf=v; else if(c.id=="SLF") slf=v;
-        else if(c.id=="STH") sth=v; else if(c.id=="SBS") sbs=v;
-        else if(c.id=="EQ")  eq=v;
+        if(c.id=="EQ")  eq=v;
         else if(c.id=="CLS") cls_idx=static_cast<int>(std::lround(v));
         else if(c.id=="EQR") eqr=v; else if(c.id=="EQS") eqs=v;
         else if(c.id=="EQB") eqb=v;
@@ -1529,8 +1506,6 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="SEQ_RESET") sreset=v;
     }
     AmountSnapshot s{};
-    s.sat_pre_db=sdr; s.sat_post_db=svo; s.sat_wet_mix=smx; s.sat_hpf_hz=shf; s.sat_lpf_hz=slf;
-    s.sat_thresh_lin=std::pow(10.f, sth/20.f); s.sat_bias=sbs;
     s.autoeq_wet_mix=eq*g_state->axon_meta.amt_autoeq.wet_mix_max;
     const int n_cls = static_cast<int>(g_state->axon_meta.auto_eq.class_order.size());
     s.autoeq_cls_idx = std::clamp(cls_idx, 0, n_cls > 0 ? n_cls - 1 : 0);
@@ -1833,85 +1808,6 @@ void flush_chain_block_(Plugin& plug,
                     }
                 }
                 blend_(blk, dry.data(), wet_a.data(), amt.autoeq_wet_mix, kBlockSize);
-            }
-            break;
-        }
-
-        case StageID::Saturator: {
-            const float pre  = std::pow(10.f, amt.sat_pre_db / 20.f);
-            const float pst  = std::pow(10.f, amt.sat_post_db / 20.f);
-            const float T    = amt.sat_thresh_lin;
-            const float invT = 1.f / T;
-            const bool  use_hpf = amt.sat_hpf_hz > 21.f;
-            const bool  use_lpf = amt.sat_lpf_hz < 19000.f;
-            float* ch_buf[2] = {work_l, work_r};
-            for (uint32_t ch = 0; ch < n_ch; ++ch) {
-                float* blk   = ch_buf[ch];
-                auto&  chain = plug.chains[ch];
-                // DC offset introduced by bias; subtracted after eval to keep output AC.
-                const float dc = static_cast<float>(
-                    chain.saturator.eval(static_cast<double>(amt.sat_bias)));
-                if (use_hpf || use_lpf) {
-                    if (use_hpf && std::abs(amt.sat_hpf_hz - chain.sat_hpf_fc) > 0.5f) {
-                        const float K = std::tan(
-                            static_cast<float>(M_PI) * amt.sat_hpf_hz
-                            / static_cast<float>(plug.sample_rate));
-                        const float norm = 1.f / (1.f + K);
-                        chain.sat_hpf_b0 =  norm;
-                        chain.sat_hpf_b1 = -norm;
-                        chain.sat_hpf_a1 = (K - 1.f) * norm;
-                        chain.sat_hpf_fc = amt.sat_hpf_hz;
-                    }
-                    if (use_lpf && std::abs(amt.sat_lpf_hz - chain.sat_lpf_fc) > 0.5f) {
-                        const float K = std::tan(
-                            static_cast<float>(M_PI) * amt.sat_lpf_hz
-                            / static_cast<float>(plug.sample_rate));
-                        const float norm = 1.f / (1.f + K);
-                        chain.sat_lpf_b0 = K * norm;
-                        chain.sat_lpf_b1 = K * norm;
-                        chain.sat_lpf_a1 = (K - 1.f) * norm;
-                        chain.sat_lpf_fc = amt.sat_lpf_hz;
-                    }
-                    // Apply HPF then optional LPF to extract the saturation band.
-                    // wet_a = band; bypass = blk - band; recombined below.
-                    for (int i = 0; i < kBlockSize; ++i) {
-                        float s = blk[i];
-                        if (use_hpf) {
-                            const float x = s;
-                            s = chain.sat_hpf_b0 * x
-                              + chain.sat_hpf_b1 * chain.sat_hpf_x1
-                              - chain.sat_hpf_a1 * chain.sat_hpf_y1;
-                            chain.sat_hpf_x1 = x;
-                            chain.sat_hpf_y1 = s;
-                        }
-                        if (use_lpf) {
-                            const float x = s;
-                            s = chain.sat_lpf_b0 * x
-                              + chain.sat_lpf_b1 * chain.sat_lpf_x1
-                              - chain.sat_lpf_a1 * chain.sat_lpf_y1;
-                            chain.sat_lpf_x1 = x;
-                            chain.sat_lpf_y1 = s;
-                        }
-                        wet_a[i] = s;
-                    }
-                    for (int i = 0; i < kBlockSize; ++i) {
-                        const float x_in = wet_a[i] * pre * invT + amt.sat_bias;
-                        wet_b[i] = (static_cast<float>(chain.saturator.eval(
-                            static_cast<double>(x_in))) - dc) * T * pst;
-                    }
-                    for (int i = 0; i < kBlockSize; ++i)
-                        blk[i] = (blk[i] - wet_a[i])
-                                + (1.f - amt.sat_wet_mix) * wet_a[i]
-                                +         amt.sat_wet_mix  * wet_b[i];
-                } else {
-                    std::copy_n(blk, kBlockSize, dry.data());
-                    for (int i = 0; i < kBlockSize; ++i) {
-                        const float x_in = blk[i] * pre * invT + amt.sat_bias;
-                        wet_a[i] = (static_cast<float>(chain.saturator.eval(
-                            static_cast<double>(x_in))) - dc) * T * pst;
-                    }
-                    blend_(blk, dry.data(), wet_a.data(), amt.sat_wet_mix, kBlockSize);
-                }
             }
             break;
         }
@@ -2947,9 +2843,6 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"SEQ_RESET",  "Reset",        0.0f,     1.0f,    0.0f,  1.0f, "switch"});
         }
 
-        st->sat_meta    = load_meta(st->resources_dir + "/" +
-                                    st->axon_meta.sub_bundles.at("saturator")
-                                    + "/plugin_meta.json");
         // SSL bus comp is optional — older bundles don't ship it. If present,
         // load its meta so we can size per-channel ring buffers at activate.
         if (st->axon_meta.sub_bundles.count("ssl_comp")) {
@@ -2981,11 +2874,6 @@ static bool entry_init(const char* /*plugin_path*/) {
             throw std::runtime_error("axon_meta: auto_eq is empty");
         }
 
-        // Pull the DSP block payloads we need at chain construction time.
-        if (st->sat_meta.dsp_blocks.empty()) {
-            throw std::runtime_error("saturator sub-bundle has no dsp_blocks");
-        }
-        st->sat_rational = std::get<RationalAParams>(st->sat_meta.dsp_blocks[0].params);
         // Per-class DSP-block payloads (all spectral_mask_eq).
         st->autoeq_dsp_per_class.clear();
         st->autoeq_dsp_per_class.reserve(st->autoeq_metas.size());

@@ -78,8 +78,8 @@ target_link_libraries(nablafx_clap PRIVATE
     ${AXON_PLATFORM_LIBS}
 )
 
-# Composite Axon plugin: separate dylib that bundles auto-EQ + saturator +
-# ssl_comp behind a single AMT/TRM control surface, with the LUFS leveler and
+# Composite Axon plugin: separate dylib that bundles auto-EQ + ssl_comp
+# behind a single AMT/TRM control surface, with the LUFS leveler and
 # true-peak ceiling running in-host. spectral_mask_eq.hpp + rational_a.hpp
 # are header-only so they don't appear in the source list.
 #

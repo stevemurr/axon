@@ -5,7 +5,6 @@
   "sample_rate": 44100,
   "channels": 1,
   "sub_bundles": {
-    "saturator": "saturator",
     "ssl_comp": "ssl_comp"
   },
   "auto_eq": {
@@ -26,69 +25,6 @@
     ]
   },
   "controls": {
-    "SDR": {
-      "id": "SDR",
-      "name": "Sat Drive",
-      "min": 0.0,
-      "max": 24.0,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": "dB"
-    },
-    "SVO": {
-      "id": "SVO",
-      "name": "Sat Output",
-      "min": -24.0,
-      "max": 12.0,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": "dB"
-    },
-    "SMX": {
-      "id": "SMX",
-      "name": "Sat Mix",
-      "min": 0.0,
-      "max": 1.0,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": ""
-    },
-    "SHF": {
-      "id": "SHF",
-      "name": "Sat HPF",
-      "min": 20.0,
-      "max": 500.0,
-      "default": 20.0,
-      "skew": 1.0,
-      "unit": "Hz"
-    },
-    "SLF": {
-      "id": "SLF",
-      "name": "Sat LPF",
-      "min": 1000.0,
-      "max": 20000.0,
-      "default": 20000.0,
-      "skew": 1.0,
-      "unit": "Hz"
-    },
-    "STH": {
-      "id": "STH",
-      "name": "Sat Thresh",
-      "min": -24.0,
-      "max": 0.0,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": "dB"
-    },
-    "SBS": {
-      "id": "SBS",
-      "name": "Sat Bias",
-      "min": -0.5,
-      "max": 0.5,
-      "default": 0.0,
-      "skew": 1.0,
-      "unit": ""
-    },
     "SSC": {
       "id": "SSC",
       "name": "Bus Comp",
@@ -559,11 +495,6 @@
     }
   },
   "amount_mapping": {
-    "saturator": {
-      "pre_gain_db_max": 12.0,
-      "post_gain_db_max": -12.0,
-      "wet_mix_max": 1.0
-    },
     "auto_eq": {
       "wet_mix_max": 1.0
     },

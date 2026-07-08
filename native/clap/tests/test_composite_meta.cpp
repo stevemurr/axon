@@ -45,8 +45,6 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "  %s (%s) [%g..%g] def=%g unit=%s\n",
                      c.id.c_str(), c.name.c_str(), c.min, c.max, c.def, c.unit.c_str());
     }
-    std::fprintf(stderr, "sat:     pre=+%g dB max, post=%g dB, wet_mix_max=%g\n",
-                 m.amt_sat.pre_gain_db_max, m.amt_sat.post_gain_db_max, m.amt_sat.wet_mix_max);
     std::fprintf(stderr, "ssl_comp: wet_mix_max=%g\n", m.amt_ssl_comp.wet_mix_max);
     std::fprintf(stderr, "autoeq:  wet_mix_max=%g\n", m.amt_autoeq.wet_mix_max);
     std::fprintf(stderr, "leveler: target_lufs=%g\n", m.leveler.target_lufs);
@@ -57,10 +55,9 @@ int main(int argc, char** argv) {
     assert(m.schema_version == 2);
     assert(m.effect_name == "Axon");
     assert(m.sample_rate == 44100);
-    assert(m.sub_bundles.count("saturator") && m.sub_bundles.count("ssl_comp"));
+    assert(m.sub_bundles.count("ssl_comp"));
     assert(!m.sub_bundles.count("la2a"));
-    assert(m.amt_sat.pre_gain_db_max  == 12.0f);
-    assert(m.amt_sat.post_gain_db_max == -12.0f);
+    assert(!m.sub_bundles.count("saturator"));   // stage removed 2026-07
     assert(m.amt_ssl_comp.wet_mix_max == 1.0f);
     assert(m.leveler.target_lufs == -14.0f);
     assert(m.ceiling.ceiling_dbtp == -1.0f);

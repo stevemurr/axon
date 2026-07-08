@@ -10,7 +10,6 @@ Three modes:
           --auto-eq-vocals-bundle    artifacts/axon-bundles/auto_eq_vocals \\
           --auto-eq-other-bundle     artifacts/axon-bundles/auto_eq_other \\
           --auto-eq-full-mix-bundle  artifacts/axon-bundles/auto_eq_full_mix \\
-          --saturator-bundle         artifacts/axon-bundles/saturator \\
           --ssl-comp-bundle          artifacts/axon-bundles/ssl_comp \\
           --out                      build/axon-staging
 
@@ -22,7 +21,6 @@ Three modes:
       python scripts/export_axon.py from-runs \\
           --auto-eq-full-mix-run /shared/artifacts/auto_eq_musdb_full_mix/.../<ts> \\
           --auto-eq-bass-run     /shared/artifacts/auto_eq_musdb_bass/.../<ts> \\
-          --saturator-run        /shared/artifacts/saturator_synth/.../<ts> \\
           --ssl-comp-run         /shared/artifacts/ssl_comp/.../<ts> \\
           --default-class        full_mix \\
           --out                  build/axon-staging
@@ -32,7 +30,6 @@ Three modes:
 
       python scripts/export_axon.py from-class-dir \\
           --auto-eq-root /shared/artifacts \\
-          --saturator-run /shared/artifacts/saturator_synth/.../<ts> \\
           --ssl-comp-run  /shared/artifacts/ssl_comp/.../<ts> \\
           --out           build/axon-staging
 
@@ -133,7 +130,6 @@ def _from_bundles(args) -> int:
         return 2
     meta = export_composite_bundle(
         auto_eq_bundles={c: Path(p) for c, p in autoeq_bundles.items()},
-        saturator_bundle=Path(args.saturator_bundle),
         ssl_comp_bundle=Path(args.ssl_comp_bundle),
         out_dir=Path(args.out),
         effect_name=args.effect_name,
@@ -154,14 +150,8 @@ def _from_runs(args) -> int:
 
     work = Path(tempfile.mkdtemp(prefix="axon-export-"))
     try:
-        sat_dir      = work / "saturator"
         ssl_comp_dir = work / "ssl_comp"
 
-        _run([
-            "nablafx-export", "--run-dir", args.saturator_run,
-            *(["--ckpt", args.saturator_ckpt] if args.saturator_ckpt else []),
-            "--out", str(sat_dir),
-        ])
         _run([
             "nablafx-export", "--run-dir", args.ssl_comp_run,
             *(["--ckpt", args.ssl_comp_ckpt] if args.ssl_comp_ckpt else []),
@@ -171,7 +161,6 @@ def _from_runs(args) -> int:
 
         meta = export_composite_bundle(
             auto_eq_bundles=autoeq_bundles,
-            saturator_bundle=sat_dir,
             ssl_comp_bundle=ssl_comp_dir,
             out_dir=Path(args.out),
             effect_name=args.effect_name,
@@ -222,13 +211,7 @@ def _from_class_dir(args) -> int:
 
     work = Path(tempfile.mkdtemp(prefix="axon-export-"))
     try:
-        sat_dir      = work / "saturator"
         ssl_comp_dir = work / "ssl_comp"
-        _run([
-            "nablafx-export", "--run-dir", args.saturator_run,
-            *(["--ckpt", args.saturator_ckpt] if args.saturator_ckpt else []),
-            "--out", str(sat_dir),
-        ])
         _run([
             "nablafx-export", "--run-dir", args.ssl_comp_run,
             *(["--ckpt", args.ssl_comp_ckpt] if args.ssl_comp_ckpt else []),
@@ -239,7 +222,6 @@ def _from_class_dir(args) -> int:
         )
         meta = export_composite_bundle(
             auto_eq_bundles=autoeq_bundles,
-            saturator_bundle=sat_dir,
             ssl_comp_bundle=ssl_comp_dir,
             out_dir=Path(args.out),
             effect_name=args.effect_name,
@@ -289,7 +271,6 @@ def main(argv: list[str] | None = None) -> int:
                        help="compose pre-exported per-stage bundles")
     _add_common_args(pb)
     _add_class_run_args(pb, "bundle")
-    pb.add_argument("--saturator-bundle", required=True)
     pb.add_argument("--ssl-comp-bundle",  required=True)
     pb.add_argument("--out",              required=True)
     pb.set_defaults(func=_from_bundles)
@@ -299,8 +280,6 @@ def main(argv: list[str] | None = None) -> int:
     _add_common_args(pr)
     _add_class_run_args(pr, "run")
     _add_class_run_args(pr, "ckpt")
-    pr.add_argument("--saturator-run",  required=True)
-    pr.add_argument("--saturator-ckpt", default=None)
     pr.add_argument("--ssl-comp-run",   required=True)
     pr.add_argument("--ssl-comp-ckpt",  default=None)
     pr.add_argument("--out",            required=True)
@@ -312,8 +291,6 @@ def main(argv: list[str] | None = None) -> int:
     _add_common_args(pc)
     pc.add_argument("--auto-eq-root", required=True,
                     help="Parent dir holding auto_eq_musdb_<class>/ subdirs.")
-    pc.add_argument("--saturator-run",  required=True)
-    pc.add_argument("--saturator-ckpt", default=None)
     pc.add_argument("--ssl-comp-run",   required=True)
     pc.add_argument("--ssl-comp-ckpt",  default=None)
     pc.add_argument("--out",            required=True)

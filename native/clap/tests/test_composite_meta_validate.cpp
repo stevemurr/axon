@@ -377,10 +377,9 @@ void test_ssl_comp_section_optional() {
     auto m_set = nablafx::load_composite_meta(
         write_temp(make_meta_json_parts(p), "sslc_set"));
     assert(m_set.amt_ssl_comp.wet_mix_max == 0.25f);
-    // The sibling sections must be read from the same object, not defaults.
-    assert(m_set.amt_sat.pre_gain_db_max == 6.0f);
-    assert(m_set.amt_sat.post_gain_db_max == -6.0f);
-    assert(m_set.amt_sat.wet_mix_max == 0.5f);
+    // The sibling section must be read from the same object, not defaults.
+    // (A legacy amount_mapping.saturator, if present, is ignored — the stage
+    // was removed 2026-07.)
     assert(m_set.amt_autoeq.wet_mix_max == 0.75f);
     std::fprintf(stderr, "[ssl_comp] PASS (absent/empty/explicit)\n");
 }
@@ -451,9 +450,6 @@ void test_full_fixture_roundtrip_and_determinism() {
     assert(m2.auto_eq.class_order == m.auto_eq.class_order);
     assert(m2.auto_eq.classes == m.auto_eq.classes);
     assert(m2.controls.size() == m.controls.size());
-    assert(m2.amt_sat.pre_gain_db_max == m.amt_sat.pre_gain_db_max);
-    assert(m2.amt_sat.post_gain_db_max == m.amt_sat.post_gain_db_max);
-    assert(m2.amt_sat.wet_mix_max == m.amt_sat.wet_mix_max);
     assert(m2.amt_autoeq.wet_mix_max == m.amt_autoeq.wet_mix_max);
     assert(m2.amt_ssl_comp.wet_mix_max == m.amt_ssl_comp.wet_mix_max);
     assert(m2.leveler.target_lufs == m.leveler.target_lufs);

@@ -74,7 +74,7 @@ struct axon_stage_timing {
 enum {
     AXON_ST_UNUSED          = 0,   // mirrors the unused StageID 0
     AXON_ST_AUTO_EQ         = 1,   // StageID::AutoEQ
-    AXON_ST_SATURATOR       = 2,   // StageID::Saturator (dormant)
+    AXON_ST_RETIRED_2       = 2,   // retired StageID 2 (was Saturator; removed 2026-07)
     AXON_ST_SSL_EQ          = 3,   // StageID::SslEq
     AXON_ST_SSL_COMP        = 4,   // StageID::SslComp
     AXON_ST_MEL_LIMITER     = 5,   // StageID::MelLimiter
@@ -96,7 +96,7 @@ enum {
 
 static const char* const axon_stage_timing_slot_names[AXON_ST_SLOT_COUNT] = {
     "Unused",
-    "AutoEQ", "Saturator", "SslEq", "SslComp", "MelLimiter",
+    "AutoEQ", "Retired2", "SslEq", "SslComp", "MelLimiter",
     "BassMono", "Retired7", "Reverb", "Widener",
     "MeterIn", "SpectrumPush", "TrimCeiling", "MeterOut", "AutoGain",
     "SslOrtForward", "AutoEqOrtCtrl",

@@ -49,18 +49,16 @@ REPO_ROOT = HERE.parent.parent.parent  # native/clap/bench/ -> repo root
 FULL_CHAIN = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,SSC=1.0,CLS=4,LVL=1.0,LVT=-14,OLV=1.0,OLT=-14,TRM=0"
 
 # Single-stage isolations: zero everything else so attribution is clean.
-EQ_ONLY      = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
-SAT_ONLY     = "EQ=0,SDR=12,SVO=0,SMX=1.0,STH=-12,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
-BUS_COMP_ONLY = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=1.0,CLS=4,LVL=0,OLV=0,TRM=0"
+EQ_ONLY      = "EQ=1.0,EQR=1.0,EQB=1.0,EQS=100,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
+BUS_COMP_ONLY = "EQ=0,SSC=1.0,CLS=4,LVL=0,OLV=0,TRM=0"
 
 # Bypass: every stage's amount at 0 to measure plumbing overhead only.
-BYPASS = "EQ=0,SDR=0,SVO=0,SMX=0,STH=0,SBS=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
+BYPASS = "EQ=0,SSC=0,CLS=4,LVL=0,OLV=0,TRM=0"
 
 # Everything-on: FULL_CHAIN leaves several gated stages off (SslEq via SEQ_ON,
 # BassMono via BMI, Reverb via RVB_MIX, Widener via WID_ON all default 0).
 # This scenario enables every stage that is wired into processor_order —
-# SslEq gets non-flat band gains so its biquads do real work. (The Saturator
-# is dormant: not in processor_order, so it cannot be enabled.)
+# SslEq gets non-flat band gains so its biquads do real work.
 FULL_CHAIN_ALL = (
     FULL_CHAIN
     + ",SEQ_ON=1,SEQ_LF_G=3,SEQ_HMF_G=-2.5,SEQ_HF_G=2,SEQ_HPF_ON=1"
@@ -72,7 +70,6 @@ FULL_CHAIN_ALL = (
 SCENARIOS: List[tuple[str, str]] = [
     ("full_chain",    FULL_CHAIN),
     ("eq_only",       EQ_ONLY),
-    ("sat_only",      SAT_ONLY),
     ("bus_comp_only", BUS_COMP_ONLY),
     ("bypass",        BYPASS),
     ("full_chain_all", FULL_CHAIN_ALL),

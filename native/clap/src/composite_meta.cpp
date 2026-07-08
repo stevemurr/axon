@@ -76,10 +76,6 @@ CompositeMeta load_composite_meta(const std::string& path) {
     }
 
     const auto& am = j.at("amount_mapping");
-    const auto& sat = am.at("saturator");
-    m.amt_sat.pre_gain_db_max  = sat.at("pre_gain_db_max").get<float>();
-    m.amt_sat.post_gain_db_max = sat.at("post_gain_db_max").get<float>();
-    m.amt_sat.wet_mix_max      = sat.at("wet_mix_max").get<float>();
 
     const auto& aeq = am.at("auto_eq");
     m.amt_autoeq.wet_mix_max = aeq.at("wet_mix_max").get<float>();

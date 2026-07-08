@@ -5,9 +5,9 @@
 //   4× polyphase FIR upsample -> peak detect -> lookahead delay -> gain smooth
 //   -> apply gain to delayed sample -> hard-clip safety net at the ceiling.
 //
-// This is a deterministic backstop for the TONE chain — the LA-2A comp and
-// saturator can overshoot peak targets; this stage makes the ceiling
-// non-negotiable without coloring the dynamics.
+// This is a deterministic backstop for the chain — upstream stages can
+// overshoot peak targets; this stage makes the ceiling non-negotiable
+// without coloring the dynamics.
 //
 // Pure C++; no CLAP/ORT dependencies so it unit-tests standalone.
 

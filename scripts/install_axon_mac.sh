@@ -7,7 +7,7 @@
 #
 # What it does:
 #   1. Locates a pre-built composite staging directory containing
-#      axon_meta.json + saturator/ + ssl_comp/ + auto_eq_<class>/ sub-bundle
+#      axon_meta.json + ssl_comp/ + auto_eq_<class>/ sub-bundle
 #      directories. Lookup order:
 #         1. --bundle DIR (CLI override)
 #         2. ./weights/axon_bundle/   (git-tracked, populated by training host)
@@ -76,7 +76,6 @@ To produce one (typically on the training host, not your Mac):
 
   python scripts/export_axon.py from-class-dir \\
       --auto-eq-root /shared/artifacts \\
-      --saturator-run /shared/artifacts/saturator_synth/.../<ts> \\
       --ssl-comp-run  /shared/artifacts/ssl_comp/.../<ts> \\
       --out           weights/axon_bundle
 

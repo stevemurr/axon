@@ -10,7 +10,7 @@
 #   composite Axon: build.sh axon <staging_dir> <out.clap>
 #                   stages the composite Axon plugin from a
 #                   `scripts/export_axon.py` bundle (axon_meta.json +
-#                   sub-bundle dirs: auto_eq/, saturator/, ssl_comp/).
+#                   sub-bundle dirs: auto_eq/, ssl_comp/).
 #
 # Behavior:
 #   - On first run (or after cmake inputs change) configures and builds the

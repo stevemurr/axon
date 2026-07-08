@@ -174,7 +174,7 @@
       const mag2 = (nR * nR + nI * nI) / (dR * dR + dI * dI);
       return 10 * Math.log10(Math.max(mag2, 1e-20));
     },
-    // 1st-order section |H(f)|² → dB (b2=a2=0). Matches the saturator filter viz.
+    // 1st-order section |H(f)|² → dB (b2=a2=0).
     firstOrderDb(f, sr, b0, b1, a1) {
       const w = 2 * Math.PI * f / sr;
       const cw = Math.cos(w), sw = Math.sin(w);

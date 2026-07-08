@@ -1026,10 +1026,25 @@ static bool state_save(const clap_plugin_t* p, const clap_ostream_t* stream) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     nlohmann::json j;
     j["version"] = 2;
+    // Save control_values as-is. state_save MUST round-trip get_value() exactly
+    // (clap-validator's state-reproducibility check), and get_value reads
+    // control_values un-merged — so do NOT overlay the param queue here. GUI
+    // edits reach control_values synchronously (axon_on_param_change writes it)
+    // and are also reported to the host as output param events, so they persist
+    // without the save needing to race the audio-thread drain.
     for (size_t i = 0; i < plug->meta->controls.size(); ++i)
         j["controls"][plug->meta->controls[i].id] = plug->control_values[i];
+    // A drag-and-drop reorder is only applied to processor_order on the audio
+    // thread; overlay a still-pending reorder so a save that races the drain
+    // captures the user's latest chain order (order has no get()/param to
+    // conflict with, so this stays consistent).
+    std::array<int, kNumStages> order = plug->processor_order;
+    {
+        std::lock_guard<std::mutex> lk(plug->order_mutex);
+        if (plug->order_pending) order = plug->pending_order;
+    }
     auto& jo = j["processor_order"];
-    for (int i = 0; i < kNumStages; ++i) jo.push_back(plug->processor_order[i]);
+    for (int i = 0; i < kNumStages; ++i) jo.push_back(order[i]);
     std::string txt = j.dump();
     // clap_ostream::write may accept FEWER bytes than requested; loop until the
     // whole buffer is written. A host that streams state in small chunks (e.g.
@@ -2286,6 +2301,12 @@ static void axon_on_param_change(void* plug_ptr, const char* param_id, float val
     auto* plug = static_cast<Plugin*>(plug_ptr);
     for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
         if (plug->meta->controls[i].id == param_id) {
+            // Reflect the GUI edit in control_values immediately (main thread) so
+            // get_value()/state_save capture it even if the transport is stopped
+            // and process() never drains the queue. Same category of cross-thread
+            // float access get_value already performs. The queue still carries it
+            // to the audio thread, which emits the host-facing output param event.
+            plug->control_values[i] = value;
             std::lock_guard<std::mutex> lk(plug->param_mutex);
             plug->param_queue.emplace_back(static_cast<int>(i), value);
             break;
@@ -2304,12 +2325,43 @@ static clap_process_status plugin_process(const clap_plugin_t* p, const clap_pro
     auto* plug = static_cast<Plugin*>(p->plugin_data);
     apply_events_(plug, process->in_events);
 
-    // Drain GUI param queue (try_lock — never blocks audio thread).
+    // Drain GUI param queue (try_lock — never blocks audio thread). Apply each
+    // change to control_values AND report it to the host as an output param
+    // event (bracketed by a gesture) so the host records automation, marks the
+    // project dirty, and — crucially — PERSISTS the GUI-driven value on save.
+    // Host-originated changes (apply_events_ above) are NOT echoed back.
     {
         std::unique_lock<std::mutex> lk(plug->param_mutex, std::try_to_lock);
         if (lk.owns_lock() && !plug->param_queue.empty()) {
-            for (auto& [idx, val] : plug->param_queue)
+            const clap_output_events_t* oe = process->out_events;
+            for (auto& [idx, val] : plug->param_queue) {
                 plug->control_values[idx] = val;
+                if (oe) {
+                    const clap_id pid = param_id_for(plug->meta->effect_name,
+                                                     plug->meta->controls[idx].id);
+                    clap_event_param_gesture_t gb{};
+                    gb.header = { sizeof(gb), 0, CLAP_CORE_EVENT_SPACE_ID,
+                                  CLAP_EVENT_PARAM_GESTURE_BEGIN, 0 };
+                    gb.param_id = pid;
+                    oe->try_push(oe, &gb.header);
+                    clap_event_param_value_t pev{};
+                    pev.header = { sizeof(pev), 0, CLAP_CORE_EVENT_SPACE_ID,
+                                   CLAP_EVENT_PARAM_VALUE, 0 };
+                    pev.param_id   = pid;
+                    pev.cookie     = nullptr;
+                    pev.note_id    = -1;
+                    pev.port_index = -1;
+                    pev.channel    = -1;
+                    pev.key        = -1;
+                    pev.value      = val;
+                    oe->try_push(oe, &pev.header);
+                    clap_event_param_gesture_t ge{};
+                    ge.header = { sizeof(ge), 0, CLAP_CORE_EVENT_SPACE_ID,
+                                  CLAP_EVENT_PARAM_GESTURE_END, 0 };
+                    ge.param_id = pid;
+                    oe->try_push(oe, &ge.header);
+                }
+            }
             plug->param_queue.clear();
         }
     }

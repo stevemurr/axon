@@ -74,15 +74,16 @@
     hideAllViz();
     if (!desc) return;
     if (grouped) {
-      for (const g of desc.groups) {
+      desc.groups.forEach((g, groupIndex) => {
         const col = document.createElement('div');
         col.className = 'ax-group';
+        col.dataset.helpGroup = String(groupIndex);
         if (g.label) { const h = document.createElement('div'); h.className = 'ax-group__label'; h.textContent = g.label; col.appendChild(h); }
         let host = col;
         if (horiz) { host = document.createElement('div'); host.className = 'ax-group__row'; col.appendChild(host); }
         for (const id of g.params) addWidget(desc, id, host);
         controlsEl.appendChild(col);
-      }
+      });
     } else {
       for (const id of desc.params) addWidget(desc, id, controlsEl);
     }
@@ -90,6 +91,7 @@
       desc.visualizer.build(vizHost);
       AX.loop.setModule(() => desc.visualizer.draw());
     }
+    if (helpOpen) renderHelp();
   }
 
   /* ── Chain strip ───────────────────────────────────────────────────────*/
@@ -130,6 +132,114 @@
   }
   function syncSelection() { for (const c of cards) c.ctrl.setSelected(c.id === AX.state.selected); }
   function refreshChainActive() { for (const c of cards) c.ctrl.setActive(AX.modules.isActive(c.desc)); }
+
+  /* ── Operable module help ─────────────────────────────────────────────*/
+  const helpBtn = $('help-toggle');
+  const helpOverlay = $('help-overlay');
+  const helpTopics = $('help-topics');
+  const helpLines = $('help-lines');
+  let helpOpen = false;
+
+  function clearHelpTargets() {
+    document.querySelectorAll('.help-target').forEach((el) => el.classList.remove('help-target'));
+  }
+
+  function topicTargets(topic) {
+    const found = [];
+    for (const i of (topic.groups || [])) {
+      const el = controlsEl.querySelector(`.ax-group[data-help-group="${i}"]`);
+      if (el) found.push(el);
+    }
+    for (const id of (topic.visualizers || [])) {
+      const el = document.getElementById(id);
+      if (el && el.classList.contains('is-shown')) found.push(el);
+    }
+    if (!found.length && controlsEl.children.length) found.push(controlsEl);
+    return found;
+  }
+
+  function drawHelpLines(desc) {
+    helpLines.innerHTML = '';
+    if (!helpOpen || !desc || !desc.help) return;
+    const root = helpOverlay.getBoundingClientRect();
+    const ns = 'http://www.w3.org/2000/svg';
+    (desc.help.topics || []).forEach((topic, i) => {
+      const source = helpTopics.querySelector(`[data-help-topic="${i}"]`);
+      if (!source) return;
+      const sr = source.getBoundingClientRect();
+      const sx = sr.left + sr.width / 2 - root.left;
+      const sy = sr.bottom - root.top;
+      topicTargets(topic).forEach((target) => {
+        target.classList.add('help-target');
+        target.style.setProperty('--help-accent', desc.accent);
+        const tr = target.getBoundingClientRect();
+        const tx = tr.left + tr.width / 2 - root.left;
+        const ty = tr.top - root.top - 3;
+        const bend = Math.min(ty - 7, sy + 10);
+        const path = document.createElementNS(ns, 'path');
+        path.setAttribute('d', `M ${sx.toFixed(1)} ${sy.toFixed(1)} L ${sx.toFixed(1)} ${bend.toFixed(1)} L ${tx.toFixed(1)} ${ty.toFixed(1)}`);
+        helpLines.appendChild(path);
+        const dot = document.createElementNS(ns, 'circle');
+        dot.setAttribute('cx', tx.toFixed(1));
+        dot.setAttribute('cy', ty.toFixed(1));
+        dot.setAttribute('r', '2.5');
+        helpLines.appendChild(dot);
+      });
+    });
+  }
+
+  function renderHelp() {
+    clearHelpTargets();
+    const desc = AX.modules.get(AX.state.selected);
+    const help = desc && desc.help;
+    if (!helpOpen || !help) {
+      helpOverlay.setAttribute('aria-hidden', 'true');
+      helpLines.innerHTML = '';
+      return;
+    }
+    helpOverlay.style.setProperty('--help-accent', desc.accent);
+    $('help-name').textContent = desc.name;
+    $('help-summary').textContent = help.summary || '';
+    helpTopics.innerHTML = '';
+    const topics = help.topics || [];
+    helpTopics.style.setProperty('--help-columns', String(Math.max(1, Math.min(4, topics.length))));
+    topics.forEach((topic, i) => {
+      const box = document.createElement('div');
+      box.className = 'help-topic';
+      box.dataset.helpTopic = String(i);
+      const title = document.createElement('div');
+      title.className = 'help-topic__title';
+      title.textContent = topic.title;
+      const body = document.createElement('div');
+      body.className = 'help-topic__body';
+      body.textContent = topic.body;
+      box.append(title, body);
+      helpTopics.appendChild(box);
+    });
+    helpOverlay.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(() => drawHelpLines(desc));
+  }
+
+  function setHelpOpen(open) {
+    helpOpen = !!open;
+    document.body.classList.toggle('help-open', helpOpen);
+    helpBtn.setAttribute('aria-pressed', String(helpOpen));
+    helpBtn.setAttribute('aria-label', helpOpen ? 'Close module help' : 'Show module help');
+    helpBtn.setAttribute('title', helpOpen ? 'Close module help (Esc)' : 'Show module help (?)');
+    renderHelp();
+  }
+
+  helpBtn.addEventListener('click', () => setHelpOpen(!helpOpen));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && helpOpen) {
+      setHelpOpen(false);
+      e.preventDefault();
+    } else if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      setHelpOpen(!helpOpen);
+      e.preventDefault();
+    }
+  });
+  window.addEventListener('resize', () => { if (helpOpen) renderHelp(); });
 
   /* ── Panel toggles (Auto Gain / Bypass — meta switches, fixed placement)*/
   const PANEL_TOGGLES = [['auto-gain-btn', 'AGN'], ['bypass-btn', 'BYP']];

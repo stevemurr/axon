@@ -139,6 +139,14 @@
       { label: 'OUTPUT',   params: ['MLD', 'MLC'] },
       { label: 'ADAPTIVE', params: ['MLA', 'MLG', 'MLS'] },
     ],
+    help: {
+      summary: 'A 26-band perceptual limiter that redistributes gain reduction across the spectrum, followed by a lookahead peak safety stage.',
+      topics: [
+        { title: 'Output', body: 'Drive pushes level into the limiter; Ceiling sets the highest permitted output sample.', groups: [0] },
+        { title: 'Adaptive', body: 'Choose even or dynamic peak control, then shape spectral adaptation and its timing.', groups: [1] },
+        { title: 'Meters', body: 'The upper strip shows gain reduction over time; the band display reveals where limiting occurs.', visualizers: ['lim-gr-wrap', 'lim-viz-wrap'] },
+      ],
+    },
     rebuildOn: ['MLA'],
     dynLabel: (id) => {
       const dyn = AX.val('MLA') >= 0.5;

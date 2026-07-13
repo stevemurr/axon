@@ -12,7 +12,12 @@
 <div id="app">
   <div id="header">
     <div id="logo">A<span>X</span>ON</div>
-    <div id="header-meta">Mastering Chain</div>
+    <div id="header-actions">
+      <div id="header-meta">Mastering Chain</div>
+      <button id="help-toggle" type="button" aria-label="Show module help" aria-pressed="false" title="Show module help (?)">
+        <span class="help-toggle__mark">?</span><span class="help-toggle__label">HELP</span>
+      </button>
+    </div>
   </div>
   <div id="body-row">
     <div id="main-col">
@@ -45,6 +50,17 @@
         <div id="bypass-btn" class="pill" title="Audition the raw input (level-aligned, no DAW bypass)">BYPASS</div>
       </div>
     </div>
+  </div>
+  <div id="help-overlay" aria-hidden="true" aria-live="polite">
+    <div class="help-overlay__scrim"></div>
+    <svg id="help-lines" aria-hidden="true"></svg>
+    <div id="help-overview">
+      <div id="help-eyebrow">MODULE GUIDE</div>
+      <div id="help-name"></div>
+      <div id="help-summary"></div>
+      <div id="help-hint">Choose another module above to keep exploring · controls stay live</div>
+    </div>
+    <div id="help-topics"></div>
   </div>
 </div>
 

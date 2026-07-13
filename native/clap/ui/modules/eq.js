@@ -45,5 +45,14 @@
       { label: 'ASSIST', params: ['SEQ_AUTO', 'SEQ_SPLIT'] },
       { label: 'SOLVE',  params: ['SEQ_CAL', 'SEQ_RESET'] },
     ],
+    help: {
+      summary: 'A zero-latency SSL 9000 J-style channel EQ for deliberate tone shaping, plus an assist system that can share work with Auto EQ.',
+      topics: [
+        { title: 'Filters', body: 'High-pass rumble and low-pass excess top end. Each section has a switch and cutoff.', groups: [0, 5] },
+        { title: 'Tone bands', body: 'LF/HF switch between shelves and bells; LMF/HMF add variable-Q midrange control.', groups: [1, 2, 3, 4] },
+        { title: 'Main', body: 'Enable the complete strip and add console colour after the filter cascade.', groups: [6] },
+        { title: 'Assist + solve', body: 'Share correction with Auto EQ, then calibrate the visible band gains or reset the solution.', groups: [7, 8] },
+      ],
+    },
   });
 })();

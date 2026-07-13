@@ -102,6 +102,14 @@
     groups: [
       { label: 'COMP', params: ['SSC', 'SSC_IN'] },
     ],
+    help: {
+      summary: 'Applies the learned glue and movement of an SSL-style mix-bus compressor, with a live view of its program-dependent character.',
+      topics: [
+        { title: 'Comp', body: 'Enable the model and drive its input. More input produces more compression, colour, and movement.', groups: [0] },
+        { title: 'Distortion', body: 'The bright trace estimates nonlinear character; higher on the graph means more model coloration.', visualizers: ['bc-crunch-wrap'] },
+        { title: 'Crest reduction', body: 'The faint companion trace shows how strongly the compressor is reducing transient crest.', visualizers: ['bc-crunch-wrap'] },
+      ],
+    },
     visualizer: { build, draw() { drawCrunch(); return false; } },
     telemetry: {
       axonBusComp(d) {

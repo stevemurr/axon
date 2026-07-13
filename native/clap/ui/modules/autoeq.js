@@ -29,5 +29,14 @@
       { label: 'SPEED',  params: ['EQS'] },
       { label: 'MODE',   params: ['EQ_ENGINE', 'EQ_RENDER', 'EQ_FREEZE'] },
     ],
+    help: {
+      summary: 'Listens to the program and continuously shapes a class-aware correction curve. The spectrum above shows the result in real time.',
+      topics: [
+        { title: 'Target', body: 'Choose the source family whose learned or measured tonal target should guide the curve.', groups: [0] },
+        { title: 'Amount', body: 'Blend the correction, constrain its range, and decide how much upward boost is allowed.', groups: [1] },
+        { title: 'Speed', body: 'Sets how quickly the rendered curve follows new tonal information. Slower values feel steadier.', groups: [2] },
+        { title: 'Mode', body: 'Pick Neural or Adaptive analysis, STFT or low-latency IIR rendering, and freeze a useful curve.', groups: [3] },
+      ],
+    },
   });
 })();

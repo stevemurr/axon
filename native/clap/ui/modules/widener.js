@@ -19,5 +19,12 @@
       { label: 'WIDTH', params: ['WID_ON', 'WID_AMT', 'WID_FREQ'] },
       { label: 'AIR',   params: ['WID_AIR'] },
     ],
+    help: {
+      summary: 'Expands stereo side information above a protected low-frequency crossover, preserving centre focus and mono compatibility.',
+      topics: [
+        { title: 'Width', body: 'Enable widening, set side gain with Amount, and keep everything below Low anchored in the centre.', groups: [0] },
+        { title: 'Air', body: 'Adds extra high-frequency side lift for openness without widening the protected low end.', groups: [1] },
+      ],
+    },
   });
 })();

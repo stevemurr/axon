@@ -24,6 +24,10 @@
  *        draw() -> bool,              //   paint; return true while animating
  *     },
  *     telemetry: { axonLimiter(d){...} },  // native push endpoints this module owns
+ *     help: {                              // operable overlay documentation
+ *       summary: 'What this stage does',
+ *       topics: [{ title, body, groups:[0], visualizers:['wrap-id'] }],
+ *     },
  *   }
  * ==========================================================================*/
 (function () {

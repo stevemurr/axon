@@ -20,5 +20,13 @@
       { label: 'SPACE', params: ['RVB_SIZE', 'RVB_WIDTH'] },
       { label: 'TONE',  params: ['RVB_DAMP', 'RVB_LOWCUT'] },
     ],
+    help: {
+      summary: 'Adds a decorrelated mastering ambience for depth and cohesion without moving the dry signal or its transients.',
+      topics: [
+        { title: 'Mix', body: 'Blends the reverb return with the dry program. Small moves are usually enough on a master.', groups: [0] },
+        { title: 'Space', body: 'Size changes decay and density; Width controls how broadly the ambience opens around the mix.', groups: [1] },
+        { title: 'Tone', body: 'Damping softens the tail above its cutoff; Low Cut keeps bass energy out of the wet path.', groups: [2] },
+      ],
+    },
   });
 })();

@@ -29,6 +29,12 @@ Apple vDSP. Drag to reorder, dial in, and read it all on a live in/out
 LUFS / RMS / peak meter plus an EQ overlay that shows the total curve and each
 EQ stage's contribution.
 
+<div align="center">
+
+<img src="help.png" alt="Axon contextual module help" width="760">
+
+</div>
+
 Built on [nablafx](https://github.com/stevemurr/nablafx) (our fork of
 [mcomunita/nablafx](https://github.com/mcomunita/nablafx)).
 
@@ -474,7 +480,8 @@ axon/                       (repo root)
 │   ├── axon_bundle/        shipped per-stage bundles (model.onnx + meta) + axon_meta.json
 │   └── auto_eq_refs/       per-class long-term spectrum references
 ├── docs/                   deep dives (docs/deep-dives/) + future work (docs/future/)
-└── demo.png
+├── demo.png                main UI screenshot
+└── help.png                contextual help screenshot
 ```
 
 ## 🧱 Architecture notes

@@ -165,6 +165,42 @@
     return { el: wrap, update(v) { idx = clamp(Math.round(v), 0, options.length - 1); if (sel.selectedIndex !== idx) sel.selectedIndex = idx; } };
   }
 
+  /* ── StackSelect (compact vertical enum buttons) ──────────────────────*/
+  function StackSelect(opts) {
+    const m = opts.meta;
+    const options = m.enumOptions || [];
+    const colors = opts.colors || [];
+    let idx = clamp(Math.round(opts.value != null ? opts.value : m.def), 0, options.length - 1);
+
+    const wrap = el('div', 'ax-stack-select');
+    const buttons = el('div', 'ax-stack-select__buttons');
+    const btns = options.map((o, i) => {
+      const btn = el('button', 'ax-stack-select__btn');
+      btn.type = 'button';
+      btn.textContent = opts.pretty ? opts.pretty(o) : o;
+      btn.style.setProperty('--bank-accent', colors[i] || T.accent);
+      btn.addEventListener('click', () => {
+        if (idx === i) return;
+        idx = i; paint(); opts.onInput && opts.onInput(i);
+      });
+      buttons.appendChild(btn);
+      return btn;
+    });
+    const label = el('div', 'ax-stack-select__label');
+    label.textContent = opts.label || m.name;
+    wrap.append(buttons, label);
+
+    function paint() {
+      btns.forEach((btn, i) => {
+        btn.classList.toggle('is-active', i === idx);
+        btn.setAttribute('aria-pressed', i === idx ? 'true' : 'false');
+      });
+    }
+    paint();
+
+    return { el: wrap, update(v) { idx = clamp(Math.round(v), 0, options.length - 1); paint(); } };
+  }
+
   /* ── Button (momentary action; e.g. CALIBRATE / RESET) ─────────────────*/
   function Button(opts) {
     const wrap = el('div', 'ax-toggle');
@@ -195,6 +231,7 @@
   AX.Knob = Knob;
   AX.Toggle = Toggle;
   AX.EnumSelect = EnumSelect;
+  AX.StackSelect = StackSelect;
   AX.Button = Button;
   AX.Card = Card;
   AX.knobSvg = knobSvg; // exported for the gallery

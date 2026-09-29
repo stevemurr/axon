@@ -82,6 +82,29 @@ def _ctl(cid: str, name: str, mn: float, mx: float, default: float,
             "default": default, "skew": skew, "unit": unit}
 
 
+def _eq_bank_controls(prefix: str, label: str) -> List[Dict[str, Any]]:
+    """Manual controls for one independent Mid or Side EQ bank."""
+    return [
+        _ctl(f"{prefix}LF_G",    f"{label} LF Gain",   -18.0,    18.0,     0.0, "dB"),
+        _ctl(f"{prefix}LF_F",    f"{label} LF Freq",    30.0,   600.0,   100.0, "Hz"),
+        _ctl(f"{prefix}LF_BELL", f"{label} LF Bell",     0.0,     1.0,     0.0, "switch"),
+        _ctl(f"{prefix}LMF_G",   f"{label} LMF Gain",  -18.0,    18.0,     0.0, "dB"),
+        _ctl(f"{prefix}LMF_F",   f"{label} LMF Freq",   60.0,  3000.0,   500.0, "Hz"),
+        _ctl(f"{prefix}LMF_Q",   f"{label} LMF Q",       0.1,     4.0,     1.0),
+        _ctl(f"{prefix}HMF_G",   f"{label} HMF Gain",  -18.0,    18.0,     0.0, "dB"),
+        _ctl(f"{prefix}HMF_F",   f"{label} HMF Freq",  400.0, 20000.0,  3000.0, "Hz"),
+        _ctl(f"{prefix}HMF_Q",   f"{label} HMF Q",       0.1,     4.0,     1.0),
+        _ctl(f"{prefix}HF_G",    f"{label} HF Gain",   -18.0,    18.0,     0.0, "dB"),
+        _ctl(f"{prefix}HF_F",    f"{label} HF Freq",  1500.0, 20000.0, 10000.0, "Hz"),
+        _ctl(f"{prefix}HF_BELL", f"{label} HF Bell",     0.0,     1.0,     0.0, "switch"),
+        _ctl(f"{prefix}HPF_ON",  f"{label} HPF",         0.0,     1.0,     0.0, "switch"),
+        _ctl(f"{prefix}HPF_F",   f"{label} HPF Freq",   20.0,   500.0,    80.0, "Hz"),
+        _ctl(f"{prefix}LPF_ON",  f"{label} LPF",         0.0,     1.0,     0.0, "switch"),
+        _ctl(f"{prefix}LPF_F",   f"{label} LPF Freq", 3000.0, 22000.0, 20000.0, "Hz"),
+        _ctl(f"{prefix}DRIVE",   f"{label} Colour",      0.0,     1.0,     0.0),
+    ]
+
+
 def _build_default_meta(
     model_id: str,
     sample_rate: int,
@@ -163,6 +186,7 @@ def _build_default_meta(
         # box); flat bands keep it near-transparent. SEQ_AUTO/SPLIT/CAL/RESET are
         # the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
         _ctl("SEQ_ON",      "EQ",            0.0,     1.0,     1.0, "switch"),
+        _ctl("SEQ_MODE",    "Edit Bank",     0.0,     2.0,     0.0, "enum"),
         _ctl("SEQ_LF_G",    "LF Gain",     -18.0,    18.0,     0.0, "dB"),
         _ctl("SEQ_LF_F",    "LF Freq",      30.0,   600.0,   100.0, "Hz"),
         _ctl("SEQ_LF_BELL", "LF Bell",       0.0,     1.0,     0.0, "switch"),
@@ -180,6 +204,8 @@ def _build_default_meta(
         _ctl("SEQ_LPF_ON",  "LPF",           0.0,     1.0,     0.0, "switch"),
         _ctl("SEQ_LPF_F",   "LPF Freq",   3000.0, 22000.0, 20000.0, "Hz"),
         _ctl("SEQ_DRIVE",   "Colour",        0.0,     1.0,     0.0),
+        *_eq_bank_controls("SEQ_MID_", "Mid"),
+        *_eq_bank_controls("SEQ_SIDE_", "Side"),
         _ctl("SEQ_AUTO",    "Auto Assist",   0.0,     1.0,     1.0),
         _ctl("SEQ_SPLIT",   "Split",         0.0,     1.0,     0.6),
         _ctl("SEQ_CAL",     "Recalibrate",   0.0,     1.0,     0.0, "switch"),

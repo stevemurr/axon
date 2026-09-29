@@ -83,6 +83,27 @@
 .ax-enum__select:focus { outline: none; border-color: var(--accent); background-color: var(--accent-weak); }
 .ax-enum__label { font-size: var(--fs-9); color: var(--text-dim); letter-spacing: var(--ls-caps); text-transform: uppercase; }
 
+/* ── Compact stacked enum buttons ───────────────────────────────────────*/
+.ax-stack-select { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); padding-top: 1px; }
+.ax-stack-select__buttons { width: 64px; display: grid; grid-template-rows: repeat(3, 20px); gap: 2px; }
+.ax-stack-select__btn {
+  --bank-accent: var(--accent);
+  width: 64px; height: 20px; padding: 0;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text-dim);
+  font: var(--fw-bold) 8px var(--font-ui); letter-spacing: var(--ls-label);
+  text-transform: uppercase; cursor: pointer;
+  transition: color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast), box-shadow var(--dur-fast);
+}
+.ax-stack-select__btn:hover { color: var(--text); border-color: var(--text-mute); background: var(--surface-hover); }
+.ax-stack-select__btn:focus-visible { outline: none; box-shadow: var(--ring); }
+.ax-stack-select__btn.is-active {
+  color: var(--bank-accent); border-color: var(--bank-accent);
+  background: color-mix(in srgb, var(--bank-accent) 14%, var(--surface));
+  box-shadow: 0 0 7px color-mix(in srgb, var(--bank-accent) 28%, transparent);
+}
+.ax-stack-select__label { font-size: var(--fs-9); color: var(--text-dim); letter-spacing: var(--ls-caps); text-transform: uppercase; }
+
 /* ── Chain card ──────────────────────────────────────────────────────────*/
 .ax-card {
   --c-accent: var(--accent);

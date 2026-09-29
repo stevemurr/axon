@@ -41,6 +41,13 @@ double rms(const std::vector<float>& x, int skip) {
     double s = 0; for (int i = skip; i < (int)x.size(); ++i) s += (double)x[i] * x[i];
     return std::sqrt(s / (x.size() - skip));
 }
+double max_abs_diff(const std::vector<float>& a, const std::vector<float>& b) {
+    assert(a.size() == b.size());
+    double d = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        d = std::max(d, (double)std::fabs(a[i] - b[i]));
+    return d;
+}
 
 SslEqParamsRT neutral() {
     SslEqParamsRT p; p.eq_on = true; p.hpf_on = false; p.lpf_on = false;
@@ -84,6 +91,79 @@ void test_process_matches_magnitude() {
     double meas_db = 20.0 * std::log10(goertzel(y, skip, f, 48000.0) / goertzel(x, skip, f, 48000.0));
     printf("[process==mag] measured %.3f dB vs model %.3f dB\n", meas_db, eq.magnitude_db(f));
     assert(std::fabs(meas_db - eq.magnitude_db(f)) < 0.15);
+}
+
+void test_stereo_mid_side_modes() {
+    const double fs = 48000.0;
+    const int n = 16384, skip = 4000;
+    const auto x = sine(1000.0, 0.2, n, fs);
+    auto boosted = neutral();
+    boosted.lmf_gain = 9.f; boosted.lmf_hz = 1000.f; boosted.lmf_q = 1.f;
+
+    // Stereo is the backward-compatible default and processes both channels.
+    {
+        SslChannelEq eq; eq.prepare(fs); eq.set_params(boosted);
+        auto l = x, r = x;
+        eq.process(l.data(), r.data(), n);
+        const double gl = 20.0 * std::log10(rms(l, skip) / rms(x, skip));
+        const double gr = 20.0 * std::log10(rms(r, skip) / rms(x, skip));
+        printf("[mode stereo] L=%.2f dB R=%.2f dB\n", gl, gr);
+        assert(gl > 8.5 && gr > 8.5);
+        assert(max_abs_diff(l, r) < 1e-6);
+    }
+
+    // Mid mode changes mono-compatible content and leaves pure side untouched.
+    {
+        SslChannelEq eq; eq.prepare(fs);
+        auto p = boosted; p.mode = SslEqMode::Mid; eq.set_params(p);
+        auto l = x, r = x;
+        eq.process(l.data(), r.data(), n);
+        const double g = 20.0 * std::log10(rms(l, skip) / rms(x, skip));
+        assert(g > 8.5 && max_abs_diff(l, r) < 1e-6);
+    }
+    {
+        SslChannelEq eq; eq.prepare(fs);
+        auto p = boosted; p.mode = SslEqMode::Mid; eq.set_params(p);
+        auto l = x, r = x;
+        for (float& v : r) v = -v;
+        const auto in_l = l, in_r = r;
+        eq.process(l.data(), r.data(), n);
+        printf("[mode mid] pure-side max|dev|=%.3e\n",
+               std::max(max_abs_diff(l, in_l), max_abs_diff(r, in_r)));
+        assert(max_abs_diff(l, in_l) < 1e-6);
+        assert(max_abs_diff(r, in_r) < 1e-6);
+    }
+
+    // Side mode is the mirror image: pure mid stays dry; pure side is EQ'd.
+    {
+        SslChannelEq eq; eq.prepare(fs);
+        auto p = boosted; p.mode = SslEqMode::Side; eq.set_params(p);
+        auto l = x, r = x;
+        const auto in_l = l, in_r = r;
+        eq.process(l.data(), r.data(), n);
+        assert(max_abs_diff(l, in_l) < 1e-6);
+        assert(max_abs_diff(r, in_r) < 1e-6);
+    }
+    {
+        SslChannelEq eq; eq.prepare(fs);
+        auto p = boosted; p.mode = SslEqMode::Side; eq.set_params(p);
+        auto l = x, r = x;
+        for (float& v : r) v = -v;
+        eq.process(l.data(), r.data(), n);
+        const double g = 20.0 * std::log10(rms(l, skip) / rms(x, skip));
+        printf("[mode side] pure-side gain=%.2f dB\n", g);
+        assert(g > 8.5);
+        for (int i = skip; i < n; ++i) assert(std::fabs(l[i] + r[i]) < 1e-6f);
+    }
+
+    // Mono has no side component, so Side processing is transparent.
+    {
+        SslChannelEq eq; eq.prepare(fs);
+        auto p = boosted; p.mode = SslEqMode::Side; eq.set_params(p);
+        auto mono = x;
+        eq.process(mono.data(), nullptr, n);
+        assert(max_abs_diff(mono, x) == 0.0);
+    }
 }
 
 void test_sample_rate_correct() {
@@ -272,6 +352,7 @@ int main() {
     test_neutral_is_transparent();
     test_bell_placement_and_gain();
     test_process_matches_magnitude();
+    test_stereo_mid_side_modes();
     test_sample_rate_correct();
     test_shelf_vs_bell();
     test_hpf_lpf();

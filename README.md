@@ -72,7 +72,7 @@ Default order (drag to reorder; the True-Peak Ceiling is always final):
 | # | Stage | What it does | Key controls |
 |---|-------|--------------|--------------|
 | 1 | **Bass Mono** | Mono below a cutoff; mono sum preserved exactly | `Bass Mono` (on/off), `Frequency` |
-| 2 | **EQ** | Broadband parametric channel EQ — LF/LMF/HMF/HF (shelf↔bell), HPF/LPF and a harmonic Colour; can calibrate against the Auto-EQ | `EQ` (on/off), per-band `Gain`/`Freq`/`Q`, `HPF`/`LPF`, `Colour`, `Auto Assist`, `Split`, `Recalibrate`, `Reset` |
+| 2 | **EQ** | Three independent broadband EQ banks run together: Stereo, Mid, and Side, each with LF/LMF/HMF/HF, HPF/LPF, and Colour; distinct curves share the spectrum display | `EQ` (on/off), `Edit Bank`, per-bank `Gain`/`Freq`/`Q`, `HPF`/`LPF`, `Colour`, plus Stereo `Auto Assist`/`Split`/`Recalibrate`/`Reset` |
 | 3 | **Auto EQ** 🧠 | Per-class adaptive corrective EQ; neural **or** deterministic engine; zero-latency IIR **or** STFT renderer | `Auto EQ`, `Class`, `Range`, `Boost`, `Speed`, `Engine`, `Renderer` |
 | 4 | **Reverb** | Transparent 8-line FDN room (bass-excluded, damped, mono-compatible) | `Mix`, `Size`, `Width`, `Damp`, `Low Cut` |
 | 5 | **Widener** | Frequency-dependent M/S "shuffler" — wider mids/highs, mono sum invariant | `Width` (on/off), `Amount`, `Low`, `Air` |

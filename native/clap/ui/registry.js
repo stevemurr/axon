@@ -93,6 +93,9 @@
     get: (id) => byId[id],
     list: () => modules.slice(),
     ids: () => modules.map((m) => m.id),
+    accent(desc) {
+      return desc && desc.dynAccent ? desc.dynAccent(AX.state.values) : (desc ? desc.accent : AX.tokens.accent);
+    },
     // Is any wet/enable param for this module engaged?
     isActive(desc) {
       return (desc.wetParams || []).some((id) => stateVal(id) > 0);

@@ -40,9 +40,10 @@ prove it.
  out ◄───────┴─ (solver-driven, currently dormant — §7)
 ```
 
-7 SSL sections + 6 assist bells = `kNumBq = 13` biquads per channel
-(`ssl_channel_eq.hpp:136-138`), all run every sample, identity-coefficient
-sections included.
+7 SSL sections + 6 assist bells = `kNumBq = 13` biquads per processed
+channel/component (`ssl_channel_eq.hpp`), identity-coefficient sections included.
+Across the three banks that is 26 Stereo sections plus 13 Mid plus 13 Side =
+52 biquad steps per stereo sample.
 
 ---
 
@@ -71,11 +72,11 @@ Two properties every other stage envies:
   `test_sample_rate_correct` asserts the magnitude at 1 kHz matches across
   44.1/48/96 k within 0.05 dB (`tests/test_ssl_channel_eq.cpp:89`).
 
-Defaults make the stage a **bit-identical no-op**: `SEQ_ON` defaults off and
-the flush case breaks before touching the buffer (`axon_plugin.cpp:1534`,
-control injection `:2798-2823`). `test_ssl_integration.py` proves it on the
-real built plugin: with `SEQ_ON=0`, cranking `SEQ_LF_G=12` changes *zero*
-output bits (`tests/test_ssl_integration.py:98-101`).
+`SEQ_ON` defaults on, but the bands are flat, the filters and Colour stage are
+off, and all three banks are flat, so the initial response is neutral.
+Turning `SEQ_ON` off is still a bit-identical master bypass:
+`test_ssl_integration.py` proves that cranking `SEQ_LF_G=12` with the stage off
+changes *zero* output bits.
 
 ---
 
@@ -182,28 +183,45 @@ inside the unit circle; and the plugin currently only ever feeds 0 or 1 —
 the resolved params are identical to the last design (`:168-172`). Exact
 float equality is correct here — it's a cache key, not a tolerance. When a
 redesign does happen, the new coefficients are copied into both channels'
-sections **preserving each channel's z-state** (`:235-238`), so twisting a
-knob mid-note doesn't click from a state reset. `reset()` clears state and
-invalidates the guard so the next `set_params` always redesigns (`:155-160`),
-verified by `test_reset_clears_state` (`tests/test_ssl_channel_eq.cpp:150`).
+sections **preserving each channel's z-state**, so twisting a knob mid-note
+doesn't click from a state reset. The plugin owns three engine instances whose
+domains are fixed to Stereo, Mid, and Side; changing `SEQ_MODE` only changes
+which bank the GUI edits and never touches DSP state. `reset()` clears state and
+invalidates the guard so the next `set_params` always redesigns, verified by
+`test_reset_clears_state`.
 
 The per-sample hot loop is dead simple (`process_ch_`,
 `ssl_channel_eq.hpp:254-263`): promote to double, run sections 0-6 (the SSL
 core), optionally crossfade the Colour waveshaper, run sections 7-12 (the
-assist bells), narrow to float. Stereo is two independent mono passes over
-per-channel state (`:186-190`).
+assist bells), narrow to float. The stage runs the Stereo bank first over L/R,
+then runs both independent component banks. Mid and Side use `M=(L+R)/2`,
+`S=(L-R)/2`, process their own component, then decode with `L=M+S`, `R=M-S`.
+Thus a Stereo curve can combine with a different Mid curve and a different Side
+curve in the same block. A mono input is treated as Mid, so the Side bank safely
+bypasses it.
 
 ---
 
-## 3. The control surface: 22 `SEQ_*` ids under contract
+## 3. The control surface: 57 `SEQ_*` ids under contract
 
-The stage exposes 22 controls, injected with safe defaults at load so old
-bundles acquire them automatically (`axon_plugin.cpp:2798-2823`): `SEQ_ON`
-(default **off** — the bit-identical bypass), per-band gain/freq (+Q for
-LMF/HMF, +BELL switch for LF/HF), HPF/LPF on/off + cutoff, `SEQ_DRIVE`
-("Colour"), and the calibration cluster `SEQ_AUTO` ("Auto Assist"),
+The stage exposes 57 controls: six globals plus 17 manual controls in each of
+the Stereo, Mid, and Side banks. The original `SEQ_*` band ids remain the
+Stereo bank for session/automation compatibility; Mid uses `SEQ_MID_*` and Side
+uses `SEQ_SIDE_*`. `SEQ_MODE` is an editor-bank selector, not a routing switch.
+Each bank owns gain/freq (+Q for LMF/HMF, +BELL for LF/HF), HPF/LPF and Colour.
+The calibration cluster `SEQ_AUTO` ("Auto Assist"),
 `SEQ_SPLIT` (default 0.6), `SEQ_CAL` ("Recalibrate", momentary), `SEQ_RESET`
-(momentary). Gains span ±18 dB; LMF/HMF Q spans 0.1-4.
+(momentary) belongs to Stereo only. Gains span ±18 dB; LMF/HMF Q spans 0.1-4.
+
+The editor selector is a compact vertical stack of Stereo/Mid/Side buttons.
+Selecting a bank shifts the EQ page accent to the same bank color, including
+knob arcs, toggles, help highlights, and the EQ chain card.
+
+The spectrum overlay publishes all three bank responses at the same 50 log
+frequencies: Stereo is sky blue, Mid is cyan, and Side is magenta. The bank
+currently selected for editing is drawn heavier. The white `AUTO+ST` reference
+uses Auto EQ plus Stereo; a single Mid/Side total would be misleading because
+those totals depend on the signal's M/S content.
 
 `resolve_amount_` maps them into the engine's `SslEqParamsRT`
 (`axon_plugin.cpp:1426-1436`, `:1472-1488`), with LF/HF Q pinned at 0.707 and
@@ -215,9 +233,9 @@ Because `export/composite.py` (which generates the shipped
 `tests/test_control_contract.cpp` regex-extracts every literal
 `c.id == "..."` compare from `axon_plugin.cpp` and asserts the meta's control
 set equals it exactly — no missing knobs (stage stalls at default), no dead
-knobs — plus an explicit spot-check that all 22 `SEQ_*` ids exist, `SEQ_ON`
-defaults off, and `SEQ_SPLIT` defaults 0.6
-(`tests/test_control_contract.cpp:39-44,82-101`).
+knobs — plus an explicit spot-check that all 57 `SEQ_*` ids exist, `SEQ_ON`
+defaults on, `SEQ_MODE` defaults to the Stereo editor, and `SEQ_SPLIT` defaults
+0.6.
 
 One rename to be aware of when reading history: commit `de69dab` de-branded
 the GUI stage from "SSL EQ" to "EQ" (tab, stage names, toggle label). The

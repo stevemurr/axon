@@ -150,6 +150,8 @@ enum class StageID : int {
 // stage twice against shared state).
 constexpr std::array<int, kNumStages> kDefaultStageOrder{6, 3, 1, 8, 9, 4, 5};
 
+constexpr std::array<const char*, 3> kSslEqModeNames{"stereo", "mid", "side"};
+
 // ---------------------------------------------------------------------------
 // Spectrum analyzer — Goertzel-based, runs on main thread
 // ---------------------------------------------------------------------------
@@ -660,9 +662,10 @@ struct ChannelChain {
     // wet with the current dry produces hop-rate comb-filter flutter.
     std::vector<float>                     ssl_comp_dry_delay;
     int                                    ssl_comp_dry_write{0};
-    // SSL 9000 J channel EQ — native biquad cascade, per channel (holds its own
-    // z-state). Zero latency; coeffs recomputed at host SR inside set_params.
-    nablafx::SslChannelEq                  ssl_eq;
+    // Three independent SSL 9000 J EQ banks: Stereo, Mid, Side. The stage uses
+    // chains[0]'s instances as shared stereo processors; keeping them here also
+    // preserves the existing per-chain lifecycle/prepare plumbing.
+    std::array<nablafx::SslChannelEq, 3>   ssl_eq;
     // Long-smoothed assist-band gains (ramp toward the main-thread solve; ~2.7 s
     // one-pole per block so a re-solve can't zipper).
     std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_smooth{};
@@ -800,10 +803,9 @@ struct Plugin {
     std::array<float, nablafx::SslChannelEq::kNumAssist> ssl_asg_published{};
     bool ssl_recal_prev{false};
     bool ssl_reset_prev{false};
-    // Main-thread scratch SSL EQ used only to compute the display curve (manual
-    // bands + the published assist gains) so the UI can show the SSL's TOTAL
-    // contribution, incl. the coupling assist bands. Never touched by audio.
-    nablafx::SslChannelEq ssl_viz_eq;
+    // Main-thread scratch EQ banks used only to compute the three display
+    // curves. Stereo also includes the published coupling assist gains.
+    std::array<nablafx::SslChannelEq, 3> ssl_viz_eq;
 
     // In/out level meters (audio thread updates; published to UI via atomics).
     nablafx::LoudnessMeter  meter_in;
@@ -880,6 +882,7 @@ static bool params_get_info(const clap_plugin_t* p, uint32_t index, clap_param_i
     const auto& c = plug->meta->controls[index];
     info->id        = param_id_for(plug->meta->effect_name, c.id);
     info->flags     = CLAP_PARAM_IS_AUTOMATABLE;
+    if (c.unit == "enum") info->flags |= CLAP_PARAM_IS_STEPPED;
     info->cookie    = nullptr;
     info->min_value = c.min;
     info->max_value = c.max;
@@ -902,14 +905,21 @@ static bool params_get_value(const clap_plugin_t* p, clap_id id, double* value) 
 
 static bool params_value_to_text(const clap_plugin_t* p, clap_id id, double value, char* out, uint32_t out_size) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
-    // CLS displays the class name instead of the integer index.
     for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
-        if (param_id_for(plug->meta->effect_name, plug->meta->controls[i].id) == id
-            && plug->meta->controls[i].id == "CLS") {
+        if (param_id_for(plug->meta->effect_name, plug->meta->controls[i].id) != id)
+            continue;
+        // CLS displays the class name instead of the integer index.
+        if (plug->meta->controls[i].id == "CLS") {
             const auto& classes = g_state->axon_meta.auto_eq.class_order;
             int idx = std::clamp(static_cast<int>(std::lround(value)),
                                  0, static_cast<int>(classes.size()) - 1);
             std::snprintf(out, out_size, "%s", classes[idx].c_str());
+            return true;
+        }
+        if (plug->meta->controls[i].id == "SEQ_MODE") {
+            const int idx = std::clamp(static_cast<int>(std::lround(value)), 0,
+                                       static_cast<int>(kSslEqModeNames.size()) - 1);
+            std::snprintf(out, out_size, "%s", kSslEqModeNames[idx]);
             return true;
         }
     }
@@ -919,10 +929,11 @@ static bool params_value_to_text(const clap_plugin_t* p, clap_id id, double valu
 
 static bool params_text_to_value(const clap_plugin_t* p, clap_id id, const char* text, double* out) {
     auto* plug = static_cast<Plugin*>(p->plugin_data);
-    // CLS accepts a class name and converts it to the canonical index.
     for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
-        if (param_id_for(plug->meta->effect_name, plug->meta->controls[i].id) == id
-            && plug->meta->controls[i].id == "CLS") {
+        if (param_id_for(plug->meta->effect_name, plug->meta->controls[i].id) != id)
+            continue;
+        // CLS accepts a class name and converts it to the canonical index.
+        if (plug->meta->controls[i].id == "CLS") {
             const auto& classes = g_state->axon_meta.auto_eq.class_order;
             for (size_t k = 0; k < classes.size(); ++k) {
                 if (classes[k] == text) {
@@ -931,6 +942,15 @@ static bool params_text_to_value(const clap_plugin_t* p, clap_id id, const char*
                 }
             }
             // Fall through to numeric parse if the text isn't a class name.
+        }
+        if (plug->meta->controls[i].id == "SEQ_MODE") {
+            for (size_t k = 0; k < kSslEqModeNames.size(); ++k) {
+                if (kSslEqModeNames[k] == std::string(text)) {
+                    *out = static_cast<double>(k);
+                    return true;
+                }
+            }
+            // Fall through to numeric parse if the text isn't a mode name.
         }
     }
     char* end = nullptr;
@@ -1077,6 +1097,34 @@ static bool state_load(const clap_plugin_t* p, const clap_istream_t* stream) {
             const auto& id = plug->meta->controls[i].id;
             if (jc.contains(id))
                 plug->control_values[i] = jc.at(id).get<float>();
+        }
+        // Migrate sessions saved by the short-lived single-bank M/S version:
+        // it had SEQ_MODE but no persistent MID/SIDE ids. Move that one curve
+        // into the domain it previously processed and leave Stereo flat, so the
+        // audible result survives the upgrade. Older Stereo-only sessions have
+        // no SEQ_MODE entry and naturally keep using the original SEQ_* ids.
+        if (jc.contains("SEQ_MODE") && !jc.contains("SEQ_MID_LF_G") &&
+            !jc.contains("SEQ_SIDE_LF_G")) {
+            const int old_mode = std::clamp(
+                static_cast<int>(std::lround(jc.at("SEQ_MODE").get<float>())), 0, 2);
+            if (old_mode > 0) {
+                static const char* kSuffixes[] = {
+                    "LF_G","LF_F","LF_BELL","LMF_G","LMF_F","LMF_Q",
+                    "HMF_G","HMF_F","HMF_Q","HF_G","HF_F","HF_BELL",
+                    "HPF_ON","HPF_F","LPF_ON","LPF_F","DRIVE"
+                };
+                const std::string dst_prefix = old_mode == 1 ? "SEQ_MID_" : "SEQ_SIDE_";
+                for (const char* suffix : kSuffixes) {
+                    const std::string src = std::string("SEQ_") + suffix;
+                    const std::string dst = dst_prefix + suffix;
+                    for (size_t i = 0; i < plug->meta->controls.size(); ++i) {
+                        if (plug->meta->controls[i].id == dst && jc.contains(src))
+                            plug->control_values[i] = jc.at(src).get<float>();
+                        if (plug->meta->controls[i].id == src)
+                            plug->control_values[i] = plug->meta->controls[i].def;
+                    }
+                }
+            }
         }
         if (j.contains("processor_order")) {
             auto& jo = j.at("processor_order");
@@ -1289,7 +1337,7 @@ static bool plugin_activate_impl(const clap_plugin_t* p, double sample_rate) {
         ch.ceiling.reset(sample_rate);
 
         // SSL channel EQ: recompute biquad coeffs at the host SR; clear z-state.
-        ch.ssl_eq.prepare(sample_rate);
+        for (auto& eq : ch.ssl_eq) eq.prepare(sample_rate);
         ch.ssl_asg_smooth.fill(0.f);
 
         ch.in_fill   = 0;
@@ -1323,7 +1371,7 @@ static bool plugin_activate_impl(const clap_plugin_t* p, double sample_rate) {
     plug->bass_mono.prepare(plug->sample_rate);
     plug->reverb.prepare(plug->sample_rate);
     plug->widener.prepare(plug->sample_rate);
-    plug->ssl_viz_eq.prepare(plug->sample_rate);   // main-thread display-curve scratch
+    for (auto& eq : plug->ssl_viz_eq) eq.prepare(plug->sample_rate);
     plug->auto_gain.reset();
     plug->bc_coherence.prepare(plug->sample_rate);
     plug->meter_in.reset(plug->sample_rate);
@@ -1413,6 +1461,15 @@ static void plugin_reset(const clap_plugin_t* p) {
 
 namespace {
 
+struct EqBankValues {
+    float lfg=0.f, lff=100.f, lfb=0.f;
+    float lmg=0.f, lmf=500.f, lmq=1.f;
+    float hmg=0.f, hmf=3000.f, hmq=1.f;
+    float hfg=0.f, hff=10000.f, hfb=0.f;
+    float hpon=0.f, hpf=80.f, lpon=0.f, lpf=20000.f;
+    float drive=0.f;
+};
+
 struct AmountSnapshot {
     float autoeq_wet_mix;
     int   autoeq_cls_idx;
@@ -1438,10 +1495,12 @@ struct AmountSnapshot {
     float wid_amt, wid_freq, wid_air;
     bool  auto_gain_on;
     bool  bypass_on;
-    // SSL 9000 J channel EQ (SEQ_*). ssl_eq_on = stage master enable; ssl_eq holds
-    // the resolved biquad params built from the manual band/filter/harmonic knobs.
-    bool                    ssl_eq_on;
-    nablafx::SslEqParamsRT  ssl_eq;
+    // Three independent SSL 9000 J channel-EQ banks. Bank 0 is the existing
+    // Stereo automation surface; banks 1/2 are Mid/Side. ssl_edit_mode only
+    // selects which bank the GUI displays and never changes DSP routing.
+    bool                                      ssl_eq_on;
+    int                                       ssl_edit_mode;
+    std::array<nablafx::SslEqParamsRT, 3>     ssl_eq;
     // Auto-EQ coupling: ssl_auto = assist amount / enable, ssl_split = α (how much
     // of the auto-EQ curve the SSL absorbs), ssl_recal = momentary recalibrate.
     float                   ssl_auto;
@@ -1474,13 +1533,8 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float ssc=0.f;
     float ssc_in_db=0.f;
     // SSL channel EQ (SEQ_*). Defaults = flat / filters off / no colour.
-    float seon=0.f;
-    float slfg=0.f,slff=100.f,slfb=0.f;
-    float slmg=0.f,slmf=500.f,slmq=1.f;
-    float shmg=0.f,shmf=3000.f,shmq=1.f;
-    float shfg=0.f,shff=10000.f,shfb=0.f;
-    float shpon=0.f,shpf=80.f,slpon=0.f,slpf=20000.f;
-    float sdrv=0.f;
+    float seon=0.f,semode=0.f;
+    EqBankValues stereo, mid, side;
     float sauto=0.f,ssplit=0.6f,srecal=0.f,sreset=0.f;   // auto-EQ coupling (SEQ_AUTO/SPLIT/CAL/RESET)
     int   cls_idx=plug.active_autoeq_cls;
     for (size_t i=0;i<plug.meta->controls.size();++i) {
@@ -1509,13 +1563,28 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="WID_AIR") war=v;
         else if(c.id=="AGN") agn=v; else if(c.id=="BYP") byp=v;
         else if(c.id=="SEQ_ON") seon=v;
-        else if(c.id=="SEQ_LF_G") slfg=v; else if(c.id=="SEQ_LF_F") slff=v; else if(c.id=="SEQ_LF_BELL") slfb=v;
-        else if(c.id=="SEQ_LMF_G") slmg=v; else if(c.id=="SEQ_LMF_F") slmf=v; else if(c.id=="SEQ_LMF_Q") slmq=v;
-        else if(c.id=="SEQ_HMF_G") shmg=v; else if(c.id=="SEQ_HMF_F") shmf=v; else if(c.id=="SEQ_HMF_Q") shmq=v;
-        else if(c.id=="SEQ_HF_G") shfg=v; else if(c.id=="SEQ_HF_F") shff=v; else if(c.id=="SEQ_HF_BELL") shfb=v;
-        else if(c.id=="SEQ_HPF_ON") shpon=v; else if(c.id=="SEQ_HPF_F") shpf=v;
-        else if(c.id=="SEQ_LPF_ON") slpon=v; else if(c.id=="SEQ_LPF_F") slpf=v;
-        else if(c.id=="SEQ_DRIVE") sdrv=v;
+        else if(c.id=="SEQ_MODE") semode=v;
+        else if(c.id=="SEQ_LF_G") stereo.lfg=v; else if(c.id=="SEQ_LF_F") stereo.lff=v; else if(c.id=="SEQ_LF_BELL") stereo.lfb=v;
+        else if(c.id=="SEQ_LMF_G") stereo.lmg=v; else if(c.id=="SEQ_LMF_F") stereo.lmf=v; else if(c.id=="SEQ_LMF_Q") stereo.lmq=v;
+        else if(c.id=="SEQ_HMF_G") stereo.hmg=v; else if(c.id=="SEQ_HMF_F") stereo.hmf=v; else if(c.id=="SEQ_HMF_Q") stereo.hmq=v;
+        else if(c.id=="SEQ_HF_G") stereo.hfg=v; else if(c.id=="SEQ_HF_F") stereo.hff=v; else if(c.id=="SEQ_HF_BELL") stereo.hfb=v;
+        else if(c.id=="SEQ_HPF_ON") stereo.hpon=v; else if(c.id=="SEQ_HPF_F") stereo.hpf=v;
+        else if(c.id=="SEQ_LPF_ON") stereo.lpon=v; else if(c.id=="SEQ_LPF_F") stereo.lpf=v;
+        else if(c.id=="SEQ_DRIVE") stereo.drive=v;
+        else if(c.id=="SEQ_MID_LF_G") mid.lfg=v; else if(c.id=="SEQ_MID_LF_F") mid.lff=v; else if(c.id=="SEQ_MID_LF_BELL") mid.lfb=v;
+        else if(c.id=="SEQ_MID_LMF_G") mid.lmg=v; else if(c.id=="SEQ_MID_LMF_F") mid.lmf=v; else if(c.id=="SEQ_MID_LMF_Q") mid.lmq=v;
+        else if(c.id=="SEQ_MID_HMF_G") mid.hmg=v; else if(c.id=="SEQ_MID_HMF_F") mid.hmf=v; else if(c.id=="SEQ_MID_HMF_Q") mid.hmq=v;
+        else if(c.id=="SEQ_MID_HF_G") mid.hfg=v; else if(c.id=="SEQ_MID_HF_F") mid.hff=v; else if(c.id=="SEQ_MID_HF_BELL") mid.hfb=v;
+        else if(c.id=="SEQ_MID_HPF_ON") mid.hpon=v; else if(c.id=="SEQ_MID_HPF_F") mid.hpf=v;
+        else if(c.id=="SEQ_MID_LPF_ON") mid.lpon=v; else if(c.id=="SEQ_MID_LPF_F") mid.lpf=v;
+        else if(c.id=="SEQ_MID_DRIVE") mid.drive=v;
+        else if(c.id=="SEQ_SIDE_LF_G") side.lfg=v; else if(c.id=="SEQ_SIDE_LF_F") side.lff=v; else if(c.id=="SEQ_SIDE_LF_BELL") side.lfb=v;
+        else if(c.id=="SEQ_SIDE_LMF_G") side.lmg=v; else if(c.id=="SEQ_SIDE_LMF_F") side.lmf=v; else if(c.id=="SEQ_SIDE_LMF_Q") side.lmq=v;
+        else if(c.id=="SEQ_SIDE_HMF_G") side.hmg=v; else if(c.id=="SEQ_SIDE_HMF_F") side.hmf=v; else if(c.id=="SEQ_SIDE_HMF_Q") side.hmq=v;
+        else if(c.id=="SEQ_SIDE_HF_G") side.hfg=v; else if(c.id=="SEQ_SIDE_HF_F") side.hff=v; else if(c.id=="SEQ_SIDE_HF_BELL") side.hfb=v;
+        else if(c.id=="SEQ_SIDE_HPF_ON") side.hpon=v; else if(c.id=="SEQ_SIDE_HPF_F") side.hpf=v;
+        else if(c.id=="SEQ_SIDE_LPF_ON") side.lpon=v; else if(c.id=="SEQ_SIDE_LPF_F") side.lpf=v;
+        else if(c.id=="SEQ_SIDE_DRIVE") side.drive=v;
         else if(c.id=="SEQ_AUTO") sauto=v; else if(c.id=="SEQ_SPLIT") ssplit=v;
         else if(c.id=="SEQ_CAL") srecal=v;
         else if(c.id=="SEQ_RESET") sreset=v;
@@ -1552,19 +1621,25 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     s.wid_air      = war;    // extra high-frequency side width (above ~6 kHz)
     s.auto_gain_on = (agn >= 0.5f);
     s.bypass_on    = (byp >= 0.5f);
-    // SSL channel EQ: build resolved biquad params from the manual knobs.
+    // SSL channel EQ: build three independent resolved banks from their manual knobs.
     s.ssl_eq_on = (seon >= 0.5f);
-    {
-        nablafx::SslEqParamsRT& e = s.ssl_eq;
+    s.ssl_edit_mode = std::clamp(static_cast<int>(std::lround(semode)), 0, 2);
+    auto resolve_bank = [](const EqBankValues& v, nablafx::SslEqMode mode) {
+        nablafx::SslEqParamsRT e;
+        e.mode = mode;
         e.eq_on   = true;                              // bands active whenever the stage runs
-        e.hpf_on  = (shpon >= 0.5f); e.hpf_hz = shpf; e.hpf_q = 0.70710678f;
-        e.lpf_on  = (slpon >= 0.5f); e.lpf_hz = slpf; e.lpf_q = 0.70710678f;
-        e.lf_gain = slfg; e.lf_hz = slff; e.lf_q = 0.70710678f; e.lf_bellmix = (slfb >= 0.5f) ? 1.f : 0.f;
-        e.lmf_gain = slmg; e.lmf_hz = slmf; e.lmf_q = slmq;
-        e.hmf_gain = shmg; e.hmf_hz = shmf; e.hmf_q = shmq;
-        e.hf_gain = shfg; e.hf_hz = shff; e.hf_q = 0.70710678f; e.hf_bellmix = (shfb >= 0.5f) ? 1.f : 0.f;
-        e.harmonic_mix = sdrv;                          // SEQ_DRIVE: 0 = no colour
-    }
+        e.hpf_on  = (v.hpon >= 0.5f); e.hpf_hz = v.hpf; e.hpf_q = 0.70710678f;
+        e.lpf_on  = (v.lpon >= 0.5f); e.lpf_hz = v.lpf; e.lpf_q = 0.70710678f;
+        e.lf_gain = v.lfg; e.lf_hz = v.lff; e.lf_q = 0.70710678f; e.lf_bellmix = (v.lfb >= 0.5f) ? 1.f : 0.f;
+        e.lmf_gain = v.lmg; e.lmf_hz = v.lmf; e.lmf_q = v.lmq;
+        e.hmf_gain = v.hmg; e.hmf_hz = v.hmf; e.hmf_q = v.hmq;
+        e.hf_gain = v.hfg; e.hf_hz = v.hff; e.hf_q = 0.70710678f; e.hf_bellmix = (v.hfb >= 0.5f) ? 1.f : 0.f;
+        e.harmonic_mix = v.drive;
+        return e;
+    };
+    s.ssl_eq[0] = resolve_bank(stereo, nablafx::SslEqMode::Stereo);
+    s.ssl_eq[1] = resolve_bank(mid,    nablafx::SslEqMode::Mid);
+    s.ssl_eq[2] = resolve_bank(side,   nablafx::SslEqMode::Side);
     s.ssl_auto  = sauto;
     s.ssl_split = ssplit;
     s.ssl_recal = (srecal >= 0.5f);
@@ -1628,17 +1703,19 @@ void flush_chain_block_(Plugin& plug,
                     if (plug.ssl_asg_gen.load(std::memory_order_acquire) == g0) break;
                 }
             }
-            float* ch_buf[2] = {work_l, work_r};
-            for (uint32_t ch = 0; ch < n_ch; ++ch) {
-                auto& e = plug.chains[ch].ssl_eq;
-                e.set_params(amt.ssl_eq);
-                // Ramp the assist gains toward the published target (~2.7 s one-pole
-                // per 128-sample block) so the static solve engages smoothly.
-                auto& sm = plug.chains[ch].ssl_asg_smooth;
-                for (int b = 0; b < kNA; ++b)
-                    sm[b] = 0.999f * sm[b] + 0.001f * (amt.ssl_auto * asg[b]);
-                e.set_assist_gains(sm.data(), kNA);
-                e.process(ch_buf[ch], nullptr, kBlockSize);   // in place, this channel's state
+            // Ramp the assist gains toward the published target (~2.7 s one-pole
+            // per 128-sample block) so the static solve engages smoothly.
+            auto& sm = plug.chains[0].ssl_asg_smooth;
+            for (int b = 0; b < kNA; ++b)
+                sm[b] = 0.999f * sm[b] + 0.001f * (amt.ssl_auto * asg[b]);
+            // Stereo runs first, then the independent Mid and Side banks.
+            // Assist belongs only to Stereo so the corrective curve is not
+            // multiplied across all three domains.
+            for (int bank = 0; bank < 3; ++bank) {
+                auto& e = plug.chains[0].ssl_eq[bank];
+                e.set_params(amt.ssl_eq[bank]);
+                if (bank == 0) e.set_assist_gains(sm.data(), kNA);
+                e.process(work_l, n_ch >= 2 ? work_r : nullptr, kBlockSize);
             }
             break;
         }
@@ -2253,7 +2330,7 @@ static void solve_ssl_coupling_(Plugin& plug, bool /*spec_ready*/) {
 
     // Solver bands = the 4 real SSL bands at their CURRENT freq/Q/type (LF/HF follow
     // the shelf<->bell switch). type: 0 bell, 1 lo-shelf, 2 hi-shelf.
-    const nablafx::SslEqParamsRT& e = amt.ssl_eq;
+    const nablafx::SslEqParamsRT& e = amt.ssl_eq[0];
     std::vector<nablafx::SslSolverBand> bands = {
         { e.lf_bellmix >= 0.5f ? 0 : 1, (double)e.lf_hz,  (double)e.lf_q  },
         { 0,                            (double)e.lmf_hz, (double)e.lmf_q },
@@ -2507,6 +2584,9 @@ static void gui_send_full_state_(Plugin* plug) {
         if (c.id == "CLS" && !class_ptrs.empty()) {
             params[i].enum_options   = class_ptrs.data();
             params[i].n_enum_options = static_cast<int>(class_ptrs.size());
+        } else if (c.id == "SEQ_MODE") {
+            params[i].enum_options   = kSslEqModeNames.data();
+            params[i].n_enum_options = static_cast<int>(kSslEqModeNames.size());
         }
     }
     axon_gui_send_init(plug->gui_state,
@@ -2666,14 +2746,10 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
         axon_gui_eval_js(plug->gui_state, js.c_str());
     }
 
-    // SSL EQ display curve: the stage's TOTAL magnitude response — manual bands
-    // PLUS the published coupling assist gains (scaled by SEQ_AUTO) — at the same
-    // 50 log bins as the auto-EQ curve. This is what lets the UI show what the SSL
-    // contributes incl. the assist bands, which is what makes SEQ_CAL visible.
+    // Publish all three independent EQ-bank curves. Stereo additionally includes
+    // the coupling assist gains; Mid and Side are their manual bank responses.
     {
         const AmountSnapshot amt = resolve_amount_(*plug);
-        auto& e = plug->ssl_viz_eq;
-        e.set_params(amt.ssl_eq);
         constexpr int NA = nablafx::SslChannelEq::kNumAssist;
         std::array<float, NA> asg{};
         if (amt.ssl_auto > 0.f) {
@@ -2686,17 +2762,26 @@ static void plugin_on_main_thread(const clap_plugin_t* p) {
             }
             for (int b = 0; b < NA; ++b) asg[b] *= amt.ssl_auto;
         }
-        e.set_assist_gains(asg.data(), NA);
         constexpr int NB = SpectrumAnalyzer::kNumBins;
         std::string js = "axonSslCurve({\"on\":";
         js += amt.ssl_eq_on ? "true" : "false";
-        js += ",\"bins\":[";
+        js += ",\"selected\":" + std::to_string(amt.ssl_edit_mode);
+        js += ",\"banks\":[";
         char buf[16];
-        for (int k = 0; k < NB; ++k) {
-            if (k) js += ',';
-            const double hz = 20.0 * std::pow(1000.0, (double)k / (NB - 1));
-            std::snprintf(buf, sizeof(buf), "%.2f", e.magnitude_db(hz));
-            js += buf;
+        std::array<float, NA> zero{};
+        for (int bank = 0; bank < 3; ++bank) {
+            if (bank) js += ',';
+            auto& e = plug->ssl_viz_eq[bank];
+            e.set_params(amt.ssl_eq[bank]);
+            e.set_assist_gains(bank == 0 ? asg.data() : zero.data(), NA);
+            js += '[';
+            for (int k = 0; k < NB; ++k) {
+                if (k) js += ',';
+                const double hz = 20.0 * std::pow(1000.0, (double)k / (NB - 1));
+                std::snprintf(buf, sizeof(buf), "%.2f", e.magnitude_db(hz));
+                js += buf;
+            }
+            js += ']';
         }
         js += "]});";
         axon_gui_eval_js(plug->gui_state, js.c_str());
@@ -2872,6 +2957,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             // via *_BELL; LMF/HMF carry Q; HPF/LPF have on/off + cutoff. SEQ_AUTO/SPLIT/
             // CAL are the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
             inject(ControlSpec{"SEQ_ON",     "EQ",           0.0f,     1.0f,    1.0f,  1.0f, "switch"});
+            inject(ControlSpec{"SEQ_MODE",   "Edit Bank",    0.0f,     2.0f,    0.0f,  1.0f, "enum"});
             inject(ControlSpec{"SEQ_LF_G",   "LF Gain",    -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
             inject(ControlSpec{"SEQ_LF_F",   "LF Freq",     30.0f,   600.0f,  100.0f,  1.0f, "Hz"});
             inject(ControlSpec{"SEQ_LF_BELL","LF Bell",      0.0f,     1.0f,    0.0f,  1.0f, "switch"});
@@ -2889,6 +2975,27 @@ static bool entry_init(const char* /*plugin_path*/) {
             inject(ControlSpec{"SEQ_LPF_ON", "LPF",          0.0f,     1.0f,    0.0f,  1.0f, "switch"});
             inject(ControlSpec{"SEQ_LPF_F",  "LPF Freq",  3000.0f, 22000.0f,20000.0f,  1.0f, "Hz"});
             inject(ControlSpec{"SEQ_DRIVE",  "Colour",       0.0f,     1.0f,    0.0f,  1.0f, ""});
+            auto inject_eq_bank = [&](const std::string& prefix, const std::string& label) {
+                inject(ControlSpec{prefix+"LF_G",    label+"LF Gain",   -18.0f,    18.0f,    0.0f, 1.0f, "dB"});
+                inject(ControlSpec{prefix+"LF_F",    label+"LF Freq",    30.0f,   600.0f,  100.0f, 1.0f, "Hz"});
+                inject(ControlSpec{prefix+"LF_BELL", label+"LF Bell",     0.0f,     1.0f,    0.0f, 1.0f, "switch"});
+                inject(ControlSpec{prefix+"LMF_G",   label+"LMF Gain",  -18.0f,    18.0f,    0.0f, 1.0f, "dB"});
+                inject(ControlSpec{prefix+"LMF_F",   label+"LMF Freq",   60.0f,  3000.0f,  500.0f, 1.0f, "Hz"});
+                inject(ControlSpec{prefix+"LMF_Q",   label+"LMF Q",       0.1f,     4.0f,    1.0f, 1.0f, ""});
+                inject(ControlSpec{prefix+"HMF_G",   label+"HMF Gain",  -18.0f,    18.0f,    0.0f, 1.0f, "dB"});
+                inject(ControlSpec{prefix+"HMF_F",   label+"HMF Freq",  400.0f, 20000.0f, 3000.0f, 1.0f, "Hz"});
+                inject(ControlSpec{prefix+"HMF_Q",   label+"HMF Q",       0.1f,     4.0f,    1.0f, 1.0f, ""});
+                inject(ControlSpec{prefix+"HF_G",    label+"HF Gain",   -18.0f,    18.0f,    0.0f, 1.0f, "dB"});
+                inject(ControlSpec{prefix+"HF_F",    label+"HF Freq",  1500.0f, 20000.0f,10000.0f, 1.0f, "Hz"});
+                inject(ControlSpec{prefix+"HF_BELL", label+"HF Bell",     0.0f,     1.0f,    0.0f, 1.0f, "switch"});
+                inject(ControlSpec{prefix+"HPF_ON",  label+"HPF",         0.0f,     1.0f,    0.0f, 1.0f, "switch"});
+                inject(ControlSpec{prefix+"HPF_F",   label+"HPF Freq",   20.0f,   500.0f,   80.0f, 1.0f, "Hz"});
+                inject(ControlSpec{prefix+"LPF_ON",  label+"LPF",         0.0f,     1.0f,    0.0f, 1.0f, "switch"});
+                inject(ControlSpec{prefix+"LPF_F",   label+"LPF Freq", 3000.0f, 22000.0f,20000.0f, 1.0f, "Hz"});
+                inject(ControlSpec{prefix+"DRIVE",   label+"Colour",      0.0f,     1.0f,    0.0f, 1.0f, ""});
+            };
+            inject_eq_bank("SEQ_MID_",  "Mid ");
+            inject_eq_bank("SEQ_SIDE_", "Side ");
             inject(ControlSpec{"SEQ_AUTO",   "Auto Assist",  0.0f,     1.0f,    1.0f,  1.0f, ""});
             inject(ControlSpec{"SEQ_SPLIT",  "Split",        0.0f,     1.0f,    0.6f,  1.0f, ""});
             inject(ControlSpec{"SEQ_CAL",    "Recalibrate",  0.0f,     1.0f,    0.0f,  1.0f, "switch"});

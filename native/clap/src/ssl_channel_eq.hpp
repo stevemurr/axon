@@ -104,9 +104,16 @@ inline SslBiquad ssl_design(int type, double gain_db, double freq_hz, double q, 
     return bq;
 }
 
+enum class SslEqMode : int {
+    Stereo = 0,   // process left and right independently
+    Mid    = 1,   // process (L + R) / 2; leave side unchanged
+    Side   = 2,   // process (L - R) / 2; leave mid unchanged
+};
+
 // Resolved per-band parameters fed to the cascade (from analytic map, learned
 // controller, or user knobs). Frequencies/gains/Q are physical.
 struct SslEqParamsRT {
+    SslEqMode mode = SslEqMode::Stereo;
     bool  eq_on   = false;
     bool  hpf_on  = false;  float hpf_hz = 100.f;   float hpf_q = 0.70710678f;
     bool  lpf_on  = false;  float lpf_hz = 20000.f; float lpf_q = 0.70710678f;
@@ -117,7 +124,7 @@ struct SslEqParamsRT {
     float harmonic_mix = 0.f;   // 0 = no colour (bypass), 1 = full waveshaper
 
     bool operator==(const SslEqParamsRT& o) const {
-        return eq_on == o.eq_on && hpf_on == o.hpf_on && lpf_on == o.lpf_on &&
+        return mode == o.mode && eq_on == o.eq_on && hpf_on == o.hpf_on && lpf_on == o.lpf_on &&
                hpf_hz == o.hpf_hz && hpf_q == o.hpf_q && lpf_hz == o.lpf_hz && lpf_q == o.lpf_q &&
                lf_gain == o.lf_gain && lf_hz == o.lf_hz && lf_q == o.lf_q && lf_bellmix == o.lf_bellmix &&
                lmf_gain == o.lmf_gain && lmf_hz == o.lmf_hz && lmf_q == o.lmf_q &&
@@ -153,8 +160,7 @@ public:
     }
 
     void reset() {
-        for (auto& ch : ch_)
-            for (auto& b : ch) b.clear();
+        clear_state_();
         // force redesign on next set_params
         have_last_ = false;
         dirty_ = true;
@@ -167,6 +173,9 @@ public:
 
     void set_params(const SslEqParamsRT& p) {
         if (have_last_ && p == last_) return;   // change-guard
+        // Channel state has different meanings in L/R and M/S modes. Never
+        // reinterpret filter history across a mode switch.
+        if (have_last_ && p.mode != last_.mode) clear_state_();
         last_ = p; have_last_ = true;
         design_(p);
     }
@@ -183,10 +192,35 @@ public:
         if (changed) design_assist_();
     }
 
-    // In place, stereo. r may be null (mono).
+    // In place. Stereo processes L/R independently. Mid and Side encode to
+    // M/S, process only the selected component, then decode. r may be null;
+    // mono is treated as Mid, so Side mode is a transparent bypass.
     void process(float* l, float* r, int n) {
-        process_ch_(0, l, n);
-        if (r) process_ch_(1, r, n);
+        if (!l || n <= 0) return;
+        if (!r) {
+            if (last_.mode != SslEqMode::Side) process_ch_(0, l, n);
+            return;
+        }
+        if (last_.mode == SslEqMode::Stereo) {
+            process_ch_(0, l, n);
+            process_ch_(1, r, n);
+            return;
+        }
+
+        // The 0.5 encode / unity decode convention preserves the component's
+        // original signal level at the nonlinear colour stage.
+        for (int i = 0; i < n; ++i) {
+            const float li = l[i], ri = r[i];
+            l[i] = 0.5f * (li + ri);   // Mid
+            r[i] = 0.5f * (li - ri);   // Side
+        }
+        if (last_.mode == SslEqMode::Mid) process_ch_(0, l, n);
+        else                              process_ch_(1, r, n);
+        for (int i = 0; i < n; ++i) {
+            const float mid = l[i], side = r[i];
+            l[i] = mid + side;
+            r[i] = mid - side;
+        }
     }
 
     // Linear-cascade magnitude in dB at `hz` (excludes the harmonic stage).
@@ -203,6 +237,11 @@ public:
 
 private:
     static SslBiquad identity_() { SslBiquad b; b.set(1, 0, 0, 0, 0); return b; }
+
+    void clear_state_() {
+        for (auto& ch : ch_)
+            for (auto& b : ch) b.clear();
+    }
 
     // Shelf<->bell blend: linear in the (a0-normalized) coefficients; exact at
     // mix∈{0,1} and a smooth differentiable morph between (matches SSLConsoleEQ).

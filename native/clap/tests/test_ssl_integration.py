@@ -3,8 +3,10 @@
 
 Covers the plugin<->engine glue that the C++ unit tests can't reach:
 resolve_amount_ mapping SEQ_* -> SslEqParamsRT, the flush_chain SslEq case,
-and the SEQ_ON master-bypass path. Complements tests/test_ssl_channel_eq.cpp
-(engine + solver in isolation) and tests/test_control_contract.cpp (meta<->C++).
+the SEQ_ON master-bypass path, independent Stereo/Mid/Side bank routing, and
+SEQ_MODE's editor-only behavior. Complements
+tests/test_ssl_channel_eq.cpp (engine + solver in isolation) and
+tests/test_control_contract.cpp (meta<->C++).
 
 Requires a built plugin. Run after building:
     bash native/clap/build.sh axon "$PWD/weights/axon_bundle" "$PWD/build/Axon.clap"
@@ -28,18 +30,19 @@ def skip(msg):
     print(f"SKIP: {msg}"); sys.exit(77)
 
 
-def make_wav(path, sr=44100, n=None):
+def make_wav(path, sr=44100, n=None, side=False, clean=False):
     n = n or sr
     import random
     random.seed(12345)
     frames = bytearray()
     for i in range(n):
         t = i / sr
-        s = 0.3 * (random.random() * 2 - 1) + 0.25 * math.sin(2 * math.pi * 100 * t) \
+        s = 0.2 * math.sin(2 * math.pi * 1000 * t) if clean else \
+            0.3 * (random.random() * 2 - 1) + 0.25 * math.sin(2 * math.pi * 100 * t) \
             + 0.2 * math.sin(2 * math.pi * 1000 * t)
         s = max(-0.99, min(0.99, s))
         v = int(s * 32767)
-        frames += struct.pack("<hh", v, v)
+        frames += struct.pack("<hh", v, -v if side else v)
     with open(path, "wb") as f:
         import wave
         w = wave.open(f, "wb"); w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr)
@@ -87,11 +90,22 @@ def main():
     off_flat = os.path.join(d, "off_fl.wav")
     on_cranked = os.path.join(d, "on_cr.wav")
     on_flat = os.path.join(d, "on_fl.wav")
+    mid_boost = os.path.join(d, "mid_boost.wav")
+    side_on_mid = os.path.join(d, "side_on_mid.wav")
+    combo_in = os.path.join(d, "combo_in.wav")
+    combo_flat = os.path.join(d, "combo_flat.wav")
+    stereo_mid_combo = os.path.join(d, "stereo_mid_combo.wav")
+    make_wav(combo_in, clean=True)
 
     run(inp, off_cranked, f"{COMMON},SEQ_ON=0,SEQ_LF_G=12")
     run(inp, off_flat,    f"{COMMON},SEQ_ON=0,SEQ_LF_G=0")
     run(inp, on_cranked,  f"{COMMON},SEQ_ON=1,SEQ_LF_F=300,SEQ_LF_G=12")
     run(inp, on_flat,     f"{COMMON},SEQ_ON=1,SEQ_LF_F=300,SEQ_LF_G=0")
+    run(inp, mid_boost,   f"{COMMON},SEQ_ON=1,SEQ_MODE=0,SEQ_MID_LMF_F=1000,SEQ_MID_LMF_G=9")
+    run(inp, side_on_mid, f"{COMMON},SEQ_ON=1,SEQ_MODE=1,SEQ_SIDE_LMF_F=1000,SEQ_SIDE_LMF_G=9")
+    run(combo_in, combo_flat, f"{COMMON},SEQ_ON=1,SEQ_LMF_G=0,SEQ_MID_LMF_G=0")
+    run(combo_in, stereo_mid_combo,
+        f"{COMMON},SEQ_ON=1,SEQ_MODE=2,SEQ_LMF_F=1000,SEQ_LMF_G=3,SEQ_MID_LMF_F=1000,SEQ_MID_LMF_G=6")
 
     A, B = read_left(off_cranked), read_left(off_flat)
     C, D = read_left(on_cranked), read_left(on_flat)
@@ -107,6 +121,39 @@ def main():
     boost = 20 * math.log10(goertzel(C, 100) / goertzel(D, 100))
     print(f"[ssl-it] LF shelf +12 @corner300, measured @100Hz = {boost:.2f} dB")
     assert 6.0 < boost < 12.0, f"LF shelf boost {boost:.2f} dB out of expected range"
+
+    # 3) Mid-only input: its independent Mid bank changes it, Side stays transparent.
+    # SEQ_MODE deliberately differs between renders: it is editor state, not routing.
+    M = read_left(mid_boost)
+    S_on_M = read_left(side_on_mid)
+    CF = read_left(combo_flat)
+    SM = read_left(stereo_mid_combo)
+    d_mid = max(abs(m - dd) for m, dd in zip(M, D))
+    d_side_on_mid = max(abs(s - dd) for s, dd in zip(S_on_M, D))
+    print(f"[ssl-it] mid input: Mid max|d|={d_mid:.3e}, Side max|d|={d_side_on_mid:.3e}")
+    assert d_mid > 0.0, "independent Mid bank did not process mid content"
+    assert d_side_on_mid < 1e-12, "independent Side bank changed pure-mid content"
+    combo_gain = 20 * math.log10(goertzel(SM, 1000) / goertzel(CF, 1000))
+    print(f"[ssl-it] simultaneous Stereo +3 / Mid +6 @1k = {combo_gain:.2f} dB")
+    assert 8.5 < combo_gain < 9.5, "Stereo and Mid banks did not cascade independently"
+
+    # 4) Pure-side input: its independent Side bank changes it, Mid stays transparent.
+    side_inp = os.path.join(d, "side_in.wav")
+    side_flat = os.path.join(d, "side_flat.wav")
+    mid_on_side = os.path.join(d, "mid_on_side.wav")
+    side_boost = os.path.join(d, "side_boost.wav")
+    make_wav(side_inp, side=True)
+    run(side_inp, side_flat,   f"{COMMON},SEQ_ON=1,SEQ_MODE=2,SEQ_SIDE_LMF_G=0")
+    run(side_inp, mid_on_side, f"{COMMON},SEQ_ON=1,SEQ_MODE=0,SEQ_MID_LMF_F=1000,SEQ_MID_LMF_G=9")
+    run(side_inp, side_boost,  f"{COMMON},SEQ_ON=1,SEQ_MODE=1,SEQ_SIDE_LMF_F=1000,SEQ_SIDE_LMF_G=9")
+    SF = read_left(side_flat)
+    M_on_S = read_left(mid_on_side)
+    SB = read_left(side_boost)
+    d_mid_on_side = max(abs(m - f) for m, f in zip(M_on_S, SF))
+    d_side = max(abs(s - f) for s, f in zip(SB, SF))
+    print(f"[ssl-it] side input: Mid max|d|={d_mid_on_side:.3e}, Side max|d|={d_side:.3e}")
+    assert d_mid_on_side < 1e-12, "independent Mid bank changed pure-side content"
+    assert d_side > 0.0, "independent Side bank did not process side content"
 
     print("ALL SSL INTEGRATION TESTS PASSED")
 

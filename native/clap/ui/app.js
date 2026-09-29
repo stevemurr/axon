@@ -18,6 +18,19 @@
   const controlsEl = $('controls');
   const vizHost = $('viz');
 
+  const moduleAccent = (desc) => AX.modules.accent(desc);
+  function applyPageAccent(desc) {
+    // Dynamic page theming is opt-in (currently the EQ bank selector). Other
+    // modules retain the design system's canonical cyan chrome.
+    const color = desc && desc.dynAccent ? moduleAccent(desc) : T.accent;
+    const root = document.documentElement.style;
+    root.setProperty('--accent', color);
+    root.setProperty('--accent-dim', AX.rgba(color, 0.55));
+    root.setProperty('--accent-weak', AX.rgba(color, 0.12));
+    root.setProperty('--accent-glow', AX.rgba(color, 0.35));
+    root.setProperty('--ring', `0 0 0 1px ${color}, 0 0 0 4px ${AX.rgba(color, 0.35)}`);
+  }
+
   /* ── Control surface ───────────────────────────────────────────────────*/
   let widgets = {};        // id -> component (for host pushes)
   let cards = [];          // { desc, ctrl } for chain active/selected updates
@@ -25,19 +38,26 @@
   function onEdit(desc, id, v) {
     AX.bridge.sendParam(id, v);
     refreshChainActive();
-    if (desc.rebuildOn && desc.rebuildOn.indexOf(id) >= 0) renderSurface();
+    if (desc.rebuildOn && desc.rebuildOn.indexOf(id) >= 0) { renderChain(); renderSurface(); }
     AX.loop.requestPaint();
   }
 
   function buildWidget(desc, id) {
     const m = AX.state.meta[id];
     if (!m) return null;
-    const base = { meta: m, value: AX.val(id), accent: desc.accent };
+    const base = { meta: m, value: AX.val(id), accent: moduleAccent(desc) };
+    if (desc.stackSelect && desc.stackSelect[id]) {
+      const cfg = desc.stackSelect[id];
+      return AX.StackSelect(Object.assign({}, base, {
+        pretty: AX.prettyEnum, colors: cfg.colors, label: m.name,
+        onInput: (v) => onEdit(desc, id, v),
+      }));
+    }
     if (m.unit === 'enum' && Array.isArray(m.enumOptions) && m.enumOptions.length) {
       return AX.EnumSelect(Object.assign({}, base, { pretty: AX.prettyEnum, onInput: (v) => onEdit(desc, id, v) }));
     }
     if (m.unit === 'switch') {
-      return AX.Toggle(Object.assign({}, base, { labels: AX.modules.toggleLabels(desc, id), label: m.name, onInput: (v) => onEdit(desc, id, v) }));
+      return AX.Toggle(Object.assign({}, base, { labels: AX.modules.toggleLabels(desc, id), label: AX.modules.knobLabel(desc, id), onInput: (v) => onEdit(desc, id, v) }));
     }
     return AX.Knob(Object.assign({}, base, {
       label: AX.modules.knobLabel(desc, id),
@@ -57,6 +77,7 @@
 
   function renderSurface() {
     const desc = AX.modules.get(AX.state.selected);
+    applyPageAccent(desc);
     controlsEl.innerHTML = '';
     widgets = {};
     // Layout modes:
@@ -104,7 +125,7 @@
       if (i > 0) { const a = document.createElement('span'); a.className = 'arrow'; a.textContent = '›'; chainEl.appendChild(a); }
       const desc = AX.modules.get(id);
       if (!desc) return;
-      const ctrl = AX.Card({ name: desc.name, accent: desc.accent });
+      const ctrl = AX.Card({ name: desc.name, accent: moduleAccent(desc) });
       ctrl.setSelected(id === AX.state.selected);
       ctrl.setActive(AX.modules.isActive(desc));
       const card = ctrl.el;
@@ -171,7 +192,7 @@
       const sy = sr.bottom - root.top;
       topicTargets(topic).forEach((target) => {
         target.classList.add('help-target');
-        target.style.setProperty('--help-accent', desc.accent);
+        target.style.setProperty('--help-accent', moduleAccent(desc));
         const tr = target.getBoundingClientRect();
         const tx = tr.left + tr.width / 2 - root.left;
         const ty = tr.top - root.top - 3;
@@ -197,7 +218,7 @@
       helpLines.innerHTML = '';
       return;
     }
-    helpOverlay.style.setProperty('--help-accent', desc.accent);
+    helpOverlay.style.setProperty('--help-accent', moduleAccent(desc));
     $('help-name').textContent = desc.name;
     $('help-summary').textContent = help.summary || '';
     helpTopics.innerHTML = '';
@@ -270,10 +291,12 @@
 
     let mode = localStorage.getItem('eqViewMode') || 'bins';
     let raw = null;                                   // latest push (silhouette + order)
-    let tGains = null, tBins = null, tSsl = null;     // targets
+    let tGains = null, tBins = null, tSslBanks = null; // targets
+    let sslSelected = 0;
     const dGains = [0, 0, 0, 0, 0];
     const dBins = new Float32Array(N_BINS);
-    const dSsl = new Float32Array(N_BINS);
+    const dSslBanks = [new Float32Array(N_BINS), new Float32Array(N_BINS), new Float32Array(N_BINS)];
+    const sslColors = AX.eqBankColors || [AX.stageAccent(3), T.accent, '#F07BC6'];
 
     const toggleBtn = $('eq-view-toggle');
     const curveLbl = $('eq-view-curve'), binsLbl = $('eq-view-bins');
@@ -317,7 +340,11 @@
       // Ease targets.
       if (tGains) for (let i = 0; i < 5; i++) { dGains[i] = AX.ease(dGains[i], tGains[i], 0.35); if (!AX.settled(dGains[i], tGains[i], 0.01)) moving = true; }
       if (tBins) for (let i = 0; i < N_BINS; i++) { dBins[i] = AX.ease(dBins[i], tBins[i], 0.35); if (!AX.settled(dBins[i], tBins[i], 0.02)) moving = true; }
-      for (let i = 0; i < N_BINS; i++) { const tv = tSsl ? tSsl[i] : 0; dSsl[i] = AX.ease(dSsl[i], tv, 0.35); if (!AX.settled(dSsl[i], tv, 0.02)) moving = true; }
+      for (let b = 0; b < 3; b++) for (let i = 0; i < N_BINS; i++) {
+        const tv = tSslBanks && tSslBanks[b] ? tSslBanks[b][i] : 0;
+        dSslBanks[b][i] = AX.ease(dSslBanks[b][i], tv, 0.35);
+        if (!AX.settled(dSslBanks[b][i], tv, 0.02)) moving = true;
+      }
 
       grid.ensure(W, H, 'sg', drawGrid).blit(ctx);
 
@@ -355,8 +382,9 @@
         if (mode === 'bins') { ctx.save(); for (let i = 0; i < N; i++) { ctx.fillStyle = ys[i] <= CY ? AX.rgba(T.accent, 0.85) : AX.rgba(T.danger, 0.85); ctx.beginPath(); ctx.arc(xs[i], ys[i], 2, 0, Math.PI * 2); ctx.fill(); } ctx.restore(); }
       }
 
-      // Overlay: SSL contribution (dashed) + TOTAL (Auto EQ + SSL).
-      const haveSsl = !!tSsl;
+      // Overlay: three independently colored EQ banks. The white reference is
+      // Auto EQ + Stereo; Mid/Side totals depend on the signal domain.
+      const haveSsl = !!tSslBanks;
       const haveAuto = !!tBins;
       if (haveSsl || haveAuto) {
         const bx = binFreqs.map((f) => FS.toX(f, W));
@@ -366,20 +394,30 @@
           ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash);
           if (glow) { ctx.shadowBlur = 6; ctx.shadowColor = glow; } ctx.stroke(); ctx.restore();
         };
-        if (haveSsl) drawLine(dSsl, AX.stageAccent(3), 1.5, [5, 3], null);
-        const tot = Array.from({ length: N_BINS }, (_, i) => (haveAuto ? dBins[i] : 0) + (haveSsl ? dSsl[i] : 0));
+        if (haveSsl) {
+          const dashes = [[6, 3], [3, 3], [9, 3, 2, 3]];
+          for (let b = 0; b < 3; b++)
+            drawLine(dSslBanks[b], sslColors[b], b === sslSelected ? 2.4 : 1.35, dashes[b], b === sslSelected ? AX.rgba(sslColors[b], 0.35) : null);
+        }
+        const tot = Array.from({ length: N_BINS }, (_, i) => (haveAuto ? dBins[i] : 0) + (haveSsl ? dSslBanks[0][i] : 0));
         if (haveSsl || haveAuto) drawLine(tot, T.text, 2, [], AX.rgba(T.text, 0.3));
         AX.canvas.legend(ctx, [
-          { color: T.text, label: 'TOTAL' },
+          { color: T.text, label: 'AUTO+ST' },
           { color: AX.stageAccent(1), label: 'AUTO EQ' },
-          { color: haveSsl ? AX.stageAccent(3) : AX.rgba(AX.stageAccent(3), 0.4), label: 'EQ', dashed: true },
+          { color: sslColors[0], label: 'STEREO', dashed: true },
+          { color: sslColors[1], label: 'MID', dashed: true },
+          { color: sslColors[2], label: 'SIDE', dashed: true },
         ], 6, 8);
       }
       return moving;
     }
 
     window.axonSpectrum = function (data) { raw = data; if (data && data.eq) tGains = data.eq; if (data && data.eq_bins) tBins = data.eq_bins; AX.loop.requestPaint(); };
-    window.axonSslCurve = function (d) { tSsl = (d && d.on) ? d.bins : null; AX.loop.requestPaint(); };
+    window.axonSslCurve = function (d) {
+      tSslBanks = (d && d.on) ? (d.banks || (d.bins ? [d.bins, null, null] : null)) : null;
+      sslSelected = d && Number.isFinite(d.selected) ? Math.max(0, Math.min(2, Math.round(d.selected))) : 0;
+      AX.loop.requestPaint();
+    };
     window.axonRenderSpectrum = function () { AX.loop.requestPaint(); };
     return { draw };
   })();
@@ -506,7 +544,7 @@
     if (widgets[id]) widgets[id].update(value);
     if (id === 'AGN' || id === 'BYP') refreshPanelToggles();
     const desc = AX.modules.get(AX.state.selected);
-    if (desc && desc.rebuildOn && desc.rebuildOn.indexOf(id) >= 0) renderSurface();
+    if (desc && desc.rebuildOn && desc.rebuildOn.indexOf(id) >= 0) { renderChain(); renderSurface(); }
     refreshChainActive();
     AX.loop.requestPaint();
   };

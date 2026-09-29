@@ -25,6 +25,7 @@ input ─▶ Bass Mono ─▶ EQ ─▶ Auto EQ ─▶ Reverb ─▶ Widener ─
 |---|-------|-----------|----------|
 | 1 | Bass Mono | [bass-mono.md](deep-dives/bass-mono.md) | The 4.7-nanosecond stage that cannot break your mono sum |
 | 2 | EQ (channel strip) | [ssl-channel-eq.md](deep-dives/ssl-channel-eq.md) | An SSL 9000 J strip in 13 biquads, with a seqlock-coupled auto-calibration that turns the knobs for you — plus the Rational-A waveshaper math |
+| 2b | EQ — Broad voicing | [broad-eq-voicing.md](deep-dives/broad-eq-voicing.md) | A console EQ fitted from 8,300 measured transfer functions, held-out to 0.25 dB |
 | 3 | Auto EQ 🧠 | [auto-eq.md](deep-dives/auto-eq.md) | Two controllers, two renderers, and the mode-collapse diagnosis we had to retract |
 | 4 | Reverb | [reverb.md](deep-dives/reverb.md) | An 8-line FDN designed by subtraction — no bass, no colour, no latency, no loudness |
 | 5 | Widener | [widener.md](deep-dives/widener.md) | A Blumlein shuffler where mono-compatibility is algebra, not aspiration |

@@ -72,7 +72,7 @@ Default order (drag to reorder; the True-Peak Ceiling is always final):
 | # | Stage | What it does | Key controls |
 |---|-------|--------------|--------------|
 | 1 | **Bass Mono** | Mono below a cutoff; mono sum preserved exactly | `Bass Mono` (on/off), `Frequency` |
-| 2 | **EQ** | Three independent broadband EQ banks run together: Stereo, Mid, and Side, each with LF/LMF/HMF/HF, HPF/LPF, and Colour; distinct curves share the spectrum display | `EQ` (on/off), `Edit Bank`, per-bank `Gain`/`Freq`/`Q`, `HPF`/`LPF`, `Colour`, plus Stereo `Auto Assist`/`Split`/`Recalibrate`/`Reset` |
+| 2 | **EQ** | Three independent broadband EQ banks run together: Stereo, Mid, and Side, each with LF/LMF/HMF/HF, HPF/LPF, and Colour; distinct curves share the spectrum display. Two voicings: **Classic** (precise textbook cascade) and **Broad** (fitted to measured console curves — wide bells, knee'd shelves, 18 dB/oct filters) | `EQ` (on/off), `EQ Type`, `Edit Bank`, per-bank `Gain`/`Freq`/`Q`, `HPF`/`LPF`, `Colour`, plus Stereo `Auto Assist`/`Split`/`Recalibrate`/`Reset` |
 | 3 | **Auto EQ** 🧠 | Per-class adaptive corrective EQ; neural **or** deterministic engine; zero-latency IIR **or** STFT renderer | `Auto EQ`, `Class`, `Range`, `Boost`, `Speed`, `Engine`, `Renderer` |
 | 4 | **Reverb** | Transparent 8-line FDN room (bass-excluded, damped, mono-compatible) | `Mix`, `Size`, `Width`, `Damp`, `Low Cut` |
 | 5 | **Widener** | Frequency-dependent M/S "shuffler" — wider mids/highs, mono sum invariant | `Width` (on/off), `Amount`, `Low`, `Air` |
@@ -191,6 +191,7 @@ the training↔plugin seams against the *shipped* artifacts:
 | [`test_composite_contract.py`](axon/export/test_composite_contract.py) | `composite.py`'s generated control set == the shipped meta, so a re-export can't silently drop or resurrect knobs |
 | [`test_ssl_hop_contract.cpp`](native/clap/tests/test_ssl_hop_contract.cpp) | `kSslHop ≤ trace_len − receptive_field` against the shipped ssl_comp bundle (the margin is exactly 0: 1655 − 631 == 1024) |
 | [`test_autoeq_param_guard.cpp`](native/clap/tests/test_autoeq_param_guard.cpp) | auto-EQ `num_control_params` fits the fixed 64-slot audio-thread buffers (`kEqParamsStorage`) |
+| [`test_amek_eq.cpp`](native/clap/tests/test_amek_eq.cpp) | the Broad EQ voicing == `scripts/fit_amek_eq.py`'s fitted model (golden vectors, 44.1/48/96 kHz) and ≤ 0.4 dB median RMS vs held-out measured console curves |
 
 CTest also runs
 [`native/clap/tests/test_ssl_integration.py`](native/clap/tests/test_ssl_integration.py),

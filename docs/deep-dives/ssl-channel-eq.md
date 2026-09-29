@@ -40,10 +40,12 @@ prove it.
  out ◄───────┴─ (solver-driven, currently dormant — §7)
 ```
 
-7 SSL sections + 6 assist bells = `kNumBq = 13` biquads per processed
-channel/component (`ssl_channel_eq.hpp`), identity-coefficient sections included.
-Across the three banks that is 26 Stereo sections plus 13 Mid plus 13 Side =
-52 biquad steps per stereo sample.
+7 SSL sections + 6 assist bells = 13 biquads per processed channel/component
+(`ssl_channel_eq.hpp`), identity-coefficient sections included. Across the
+three banks that is 26 Stereo sections plus 13 Mid plus 13 Side = 52 biquad
+steps per stereo sample. The engine reserves `kNumBq = 14` slots: the 8th core
+slot is only run by the alternative **Broad** voicing (its second LPF section,
+§10); Classic skips it, so its cost and output are unchanged.
 
 ---
 
@@ -202,12 +204,14 @@ bypasses it.
 
 ---
 
-## 3. The control surface: 57 `SEQ_*` ids under contract
+## 3. The control surface: 58 `SEQ_*` ids under contract
 
-The stage exposes 57 controls: six globals plus 17 manual controls in each of
+The stage exposes 58 controls: seven globals plus 17 manual controls in each of
 the Stereo, Mid, and Side banks. The original `SEQ_*` band ids remain the
 Stereo bank for session/automation compatibility; Mid uses `SEQ_MID_*` and Side
 uses `SEQ_SIDE_*`. `SEQ_MODE` is an editor-bank selector, not a routing switch.
+`SEQ_TYPE` ("EQ Type": `classic` / `broad`, default Classic) picks the voicing
+for all three banks — see §10.
 Each bank owns gain/freq (+Q for LMF/HMF, +BELL for LF/HF), HPF/LPF and Colour.
 The calibration cluster `SEQ_AUTO` ("Auto Assist"),
 `SEQ_SPLIT` (default 0.6), `SEQ_CAL` ("Recalibrate", momentary), `SEQ_RESET`
@@ -233,9 +237,9 @@ Because `export/composite.py` (which generates the shipped
 `tests/test_control_contract.cpp` regex-extracts every literal
 `c.id == "..."` compare from `axon_plugin.cpp` and asserts the meta's control
 set equals it exactly — no missing knobs (stage stalls at default), no dead
-knobs — plus an explicit spot-check that all 57 `SEQ_*` ids exist, `SEQ_ON`
-defaults on, `SEQ_MODE` defaults to the Stereo editor, and `SEQ_SPLIT` defaults
-0.6.
+knobs — plus an explicit spot-check that all 58 `SEQ_*` ids exist, `SEQ_ON`
+defaults on, `SEQ_MODE` defaults to the Stereo editor, `SEQ_TYPE` defaults to
+Classic, and `SEQ_SPLIT` defaults 0.6.
 
 One rename to be aware of when reading history: commit `de69dab` de-branded
 the GUI stage from "SSL EQ" to "EQ" (tab, stage names, toggle label). The
@@ -628,6 +632,16 @@ main-thread-only by construction — §6).
   sides of the transfer, which is the point). Frequencies past 0.49·fs clamp
   rather than error. Per-press calibration will not converge to *zero*
   Auto-EQ residual by design — that's the transparency contract, not a bug.
+
+## 10. The Broad voicing (`SEQ_TYPE = broad`)
+
+The same knobs can drive a second voicing fitted to measured transfer functions
+of an AMEK 9099 console EQ: broad constant-Q mid bells, proportional-Q LF/HF
+bells, shelves with a resonant knee, ~18 dB/oct filters and a decramped top
+end. The type toggle keeps every band in place (freq/gain mean the same
+physical thing in both voicings) and changes only the shapes. It lives in
+`amek_eq.hpp`, plugs into `design_()` above, and has its own dive:
+[`broad-eq-voicing.md`](broad-eq-voicing.md).
 
 ## Superseded / related docs
 

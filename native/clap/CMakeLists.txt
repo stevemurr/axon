@@ -430,6 +430,10 @@ target_link_libraries(test_spectral_mask_eq PRIVATE ${AXON_DSP_LIBS})
 # (header-only, plain biquads — no Accelerate).
 axon_add_test(test_ssl_channel_eq tests/test_ssl_channel_eq.cpp)
 
+# test_amek_eq — the "Broad" EQ voicing (amek_eq.hpp): golden vectors from
+# scripts/fit_amek_eq.py, held-out measured console curves, stability, identity.
+axon_add_test(test_amek_eq tests/test_amek_eq.cpp)
+
 # test_adaptive_eq — AdaptiveEqController (productionized C1→C2 cascade auto-EQ):
 # stability, adaptivity (no mode collapse), tonal direction, determinism, bypass.
 axon_add_test(test_adaptive_eq tests/test_adaptive_eq.cpp ${AXON_SHIM_SRC})

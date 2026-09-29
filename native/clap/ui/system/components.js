@@ -178,7 +178,7 @@
       const btn = el('button', 'ax-stack-select__btn');
       btn.type = 'button';
       btn.textContent = opts.pretty ? opts.pretty(o) : o;
-      btn.style.setProperty('--bank-accent', colors[i] || T.accent);
+      btn.style.setProperty('--bank-accent', colors[i] || opts.accent || T.accent);
       btn.addEventListener('click', () => {
         if (idx === i) return;
         idx = i; paint(); opts.onInput && opts.onInput(i);

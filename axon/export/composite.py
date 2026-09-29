@@ -187,6 +187,9 @@ def _build_default_meta(
         # the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
         _ctl("SEQ_ON",      "EQ",            0.0,     1.0,     1.0, "switch"),
         _ctl("SEQ_MODE",    "Edit Bank",     0.0,     2.0,     0.0, "enum"),
+        # EQ voicing for all three banks: 0 Classic (RBJ cascade), 1 Broad
+        # (console shapes fitted by scripts/fit_amek_eq.py).
+        _ctl("SEQ_TYPE",    "EQ Type",       0.0,     1.0,     0.0, "enum"),
         _ctl("SEQ_LF_G",    "LF Gain",     -18.0,    18.0,     0.0, "dB"),
         _ctl("SEQ_LF_F",    "LF Freq",      30.0,   600.0,   100.0, "Hz"),
         _ctl("SEQ_LF_BELL", "LF Bell",       0.0,     1.0,     0.0, "switch"),

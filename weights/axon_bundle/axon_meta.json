@@ -313,6 +313,15 @@
       "skew": 1.0,
       "unit": "enum"
     },
+    "SEQ_TYPE": {
+      "id": "SEQ_TYPE",
+      "name": "EQ Type",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "skew": 1.0,
+      "unit": "enum"
+    },
     "SEQ_LF_G": {
       "id": "SEQ_LF_G",
       "name": "LF Gain",

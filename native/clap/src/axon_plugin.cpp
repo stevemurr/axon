@@ -151,6 +151,8 @@ enum class StageID : int {
 constexpr std::array<int, kNumStages> kDefaultStageOrder{6, 3, 1, 8, 9, 4, 5};
 
 constexpr std::array<const char*, 3> kSslEqModeNames{"stereo", "mid", "side"};
+// SEQ_TYPE: EQ voicing for all three banks (nablafx::EqVoicing order).
+constexpr std::array<const char*, 2> kEqTypeNames{"classic", "broad"};
 
 // ---------------------------------------------------------------------------
 // Spectrum analyzer — Goertzel-based, runs on main thread
@@ -922,6 +924,12 @@ static bool params_value_to_text(const clap_plugin_t* p, clap_id id, double valu
             std::snprintf(out, out_size, "%s", kSslEqModeNames[idx]);
             return true;
         }
+        if (plug->meta->controls[i].id == "SEQ_TYPE") {
+            const int idx = std::clamp(static_cast<int>(std::lround(value)), 0,
+                                       static_cast<int>(kEqTypeNames.size()) - 1);
+            std::snprintf(out, out_size, "%s", kEqTypeNames[idx]);
+            return true;
+        }
     }
     std::snprintf(out, out_size, "%.3f", value);
     return true;
@@ -951,6 +959,15 @@ static bool params_text_to_value(const clap_plugin_t* p, clap_id id, const char*
                 }
             }
             // Fall through to numeric parse if the text isn't a mode name.
+        }
+        if (plug->meta->controls[i].id == "SEQ_TYPE") {
+            for (size_t k = 0; k < kEqTypeNames.size(); ++k) {
+                if (kEqTypeNames[k] == std::string(text)) {
+                    *out = static_cast<double>(k);
+                    return true;
+                }
+            }
+            // Fall through to numeric parse if the text isn't a type name.
         }
     }
     char* end = nullptr;
@@ -1500,6 +1517,7 @@ struct AmountSnapshot {
     // selects which bank the GUI displays and never changes DSP routing.
     bool                                      ssl_eq_on;
     int                                       ssl_edit_mode;
+    nablafx::EqVoicing                        ssl_voicing;   // SEQ_TYPE, shared by all banks
     std::array<nablafx::SslEqParamsRT, 3>     ssl_eq;
     // Auto-EQ coupling: ssl_auto = assist amount / enable, ssl_split = α (how much
     // of the auto-EQ curve the SSL absorbs), ssl_recal = momentary recalibrate.
@@ -1533,7 +1551,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     float ssc=0.f;
     float ssc_in_db=0.f;
     // SSL channel EQ (SEQ_*). Defaults = flat / filters off / no colour.
-    float seon=0.f,semode=0.f;
+    float seon=0.f,semode=0.f,setype=0.f;
     EqBankValues stereo, mid, side;
     float sauto=0.f,ssplit=0.6f,srecal=0.f,sreset=0.f;   // auto-EQ coupling (SEQ_AUTO/SPLIT/CAL/RESET)
     int   cls_idx=plug.active_autoeq_cls;
@@ -1564,6 +1582,7 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
         else if(c.id=="AGN") agn=v; else if(c.id=="BYP") byp=v;
         else if(c.id=="SEQ_ON") seon=v;
         else if(c.id=="SEQ_MODE") semode=v;
+        else if(c.id=="SEQ_TYPE") setype=v;
         else if(c.id=="SEQ_LF_G") stereo.lfg=v; else if(c.id=="SEQ_LF_F") stereo.lff=v; else if(c.id=="SEQ_LF_BELL") stereo.lfb=v;
         else if(c.id=="SEQ_LMF_G") stereo.lmg=v; else if(c.id=="SEQ_LMF_F") stereo.lmf=v; else if(c.id=="SEQ_LMF_Q") stereo.lmq=v;
         else if(c.id=="SEQ_HMF_G") stereo.hmg=v; else if(c.id=="SEQ_HMF_F") stereo.hmf=v; else if(c.id=="SEQ_HMF_Q") stereo.hmq=v;
@@ -1624,9 +1643,11 @@ AmountSnapshot resolve_amount_(const Plugin& plug) {
     // SSL channel EQ: build three independent resolved banks from their manual knobs.
     s.ssl_eq_on = (seon >= 0.5f);
     s.ssl_edit_mode = std::clamp(static_cast<int>(std::lround(semode)), 0, 2);
-    auto resolve_bank = [](const EqBankValues& v, nablafx::SslEqMode mode) {
+    s.ssl_voicing = std::lround(setype) >= 1 ? nablafx::EqVoicing::Amek : nablafx::EqVoicing::Ssl;
+    auto resolve_bank = [&s](const EqBankValues& v, nablafx::SslEqMode mode) {
         nablafx::SslEqParamsRT e;
         e.mode = mode;
+        e.voicing = s.ssl_voicing;
         e.eq_on   = true;                              // bands active whenever the stage runs
         e.hpf_on  = (v.hpon >= 0.5f); e.hpf_hz = v.hpf; e.hpf_q = 0.70710678f;
         e.lpf_on  = (v.lpon >= 0.5f); e.lpf_hz = v.lpf; e.lpf_q = 0.70710678f;
@@ -2328,14 +2349,15 @@ static void solve_ssl_coupling_(Plugin& plug, bool /*spec_ready*/) {
         tgt[k] = amt.ssl_split * (double)plug.spectrum.mt_eq_bins[k];
     }
 
-    // Solver bands = the 4 real SSL bands at their CURRENT freq/Q/type (LF/HF follow
-    // the shelf<->bell switch). type: 0 bell, 1 lo-shelf, 2 hi-shelf.
+    // Solver bands = the 4 real bands at their CURRENT freq/Q/type (LF/HF follow
+    // the shelf<->bell switch), shaped by the active voicing (SEQ_TYPE).
+    // type: 0 bell, 1 lo-shelf, 2 hi-shelf.
     const nablafx::SslEqParamsRT& e = amt.ssl_eq[0];
     std::vector<nablafx::SslSolverBand> bands = {
-        { e.lf_bellmix >= 0.5f ? 0 : 1, (double)e.lf_hz,  (double)e.lf_q  },
-        { 0,                            (double)e.lmf_hz, (double)e.lmf_q },
-        { 0,                            (double)e.hmf_hz, (double)e.hmf_q },
-        { e.hf_bellmix >= 0.5f ? 0 : 2, (double)e.hf_hz,  (double)e.hf_q  },
+        { e.lf_bellmix >= 0.5f ? 0 : 1, (double)e.lf_hz,  (double)e.lf_q,  e.voicing, 0 },
+        { 0,                            (double)e.lmf_hz, (double)e.lmf_q, e.voicing, 1 },
+        { 0,                            (double)e.hmf_hz, (double)e.hmf_q, e.voicing, 2 },
+        { e.hf_bellmix >= 0.5f ? 0 : 2, (double)e.hf_hz,  (double)e.hf_q,  e.voicing, 3 },
     };
     nablafx::SslEqSolver solver(std::move(bands));
     const std::vector<double> dg = solver.solve(f, tgt, NB, plug.sample_rate, 9.0);
@@ -2587,6 +2609,9 @@ static void gui_send_full_state_(Plugin* plug) {
         } else if (c.id == "SEQ_MODE") {
             params[i].enum_options   = kSslEqModeNames.data();
             params[i].n_enum_options = static_cast<int>(kSslEqModeNames.size());
+        } else if (c.id == "SEQ_TYPE") {
+            params[i].enum_options   = kEqTypeNames.data();
+            params[i].n_enum_options = static_cast<int>(kEqTypeNames.size());
         }
     }
     axon_gui_send_init(plug->gui_state,
@@ -2958,6 +2983,7 @@ static bool entry_init(const char* /*plugin_path*/) {
             // CAL are the Auto-EQ coupling (assist bands absorb the Auto-EQ correction).
             inject(ControlSpec{"SEQ_ON",     "EQ",           0.0f,     1.0f,    1.0f,  1.0f, "switch"});
             inject(ControlSpec{"SEQ_MODE",   "Edit Bank",    0.0f,     2.0f,    0.0f,  1.0f, "enum"});
+            inject(ControlSpec{"SEQ_TYPE",   "EQ Type",      0.0f,     1.0f,    0.0f,  1.0f, "enum"});
             inject(ControlSpec{"SEQ_LF_G",   "LF Gain",    -18.0f,    18.0f,    0.0f,  1.0f, "dB"});
             inject(ControlSpec{"SEQ_LF_F",   "LF Freq",     30.0f,   600.0f,  100.0f,  1.0f, "Hz"});
             inject(ControlSpec{"SEQ_LF_BELL","LF Bell",      0.0f,     1.0f,    0.0f,  1.0f, "switch"});

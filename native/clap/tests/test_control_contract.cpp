@@ -8,7 +8,7 @@
 //   - meta declares a control C++ ignores -> a dead automation knob.
 //
 // This test extracts BOTH sets and asserts they are identical, and separately
-// asserts the 57 SEQ_* controls (global + three independent EQ banks) are present.
+// asserts the 58 SEQ_* controls (global + three independent EQ banks) are present.
 //
 // NOTE the extractor contract: axon_plugin.cpp must spell every control read
 // as a literal `c.id == "..."` compare (see the comment above resolve_amount_
@@ -81,7 +81,7 @@ int main() {
 
     // 3) Global EQ controls + 17 manual controls in each Stereo/Mid/Side bank.
     std::set<std::string> seq_expected = {
-        "SEQ_ON", "SEQ_MODE", "SEQ_AUTO", "SEQ_SPLIT", "SEQ_CAL", "SEQ_RESET"
+        "SEQ_ON", "SEQ_MODE", "SEQ_TYPE", "SEQ_AUTO", "SEQ_SPLIT", "SEQ_CAL", "SEQ_RESET"
     };
     static const char* kPrefixes[] = {"SEQ_", "SEQ_MID_", "SEQ_SIDE_"};
     static const char* kSuffixes[] = {
@@ -92,7 +92,7 @@ int main() {
     for (const char* prefix : kPrefixes)
         for (const char* suffix : kSuffixes)
             seq_expected.insert(std::string(prefix) + suffix);
-    assert(seq_expected.size() == 57 && "EQ bank contract count drifted");
+    assert(seq_expected.size() == 58 && "EQ bank contract count drifted");
     const auto& controls = meta.at("controls");
     for (const auto& id : seq_expected) {
         assert(controls.contains(id) && "SSL EQ control missing from meta");
@@ -107,9 +107,13 @@ int main() {
     assert(double(controls.at("SEQ_ON").at("default")) == 1.0 && "SEQ_ON must default on");
     assert(double(controls.at("SEQ_MODE").at("default")) == 0.0 && "SEQ_MODE must default to Stereo");
     assert(double(controls.at("SEQ_MODE").at("max")) == 2.0 && "SEQ_MODE must expose Stereo/Mid/Side");
+    // SEQ_TYPE: 0 Classic (default, so existing sessions keep their sound), 1 Broad.
+    assert(double(controls.at("SEQ_TYPE").at("default")) == 0.0 && "SEQ_TYPE must default to Classic");
+    assert(double(controls.at("SEQ_TYPE").at("max")) == 1.0 && "SEQ_TYPE must expose Classic/Broad");
+    assert(controls.at("SEQ_TYPE").at("unit") == "enum" && "SEQ_TYPE must be an enum");
     // SEQ_SPLIT (coupling alpha) default = 0.6.
     assert(double(controls.at("SEQ_SPLIT").at("default")) == 0.6 && "SEQ_SPLIT default drifted");
-    std::fprintf(stderr, "[contract] 57 SEQ_* controls (3 banks) present + specs sane PASS\n");
+    std::fprintf(stderr, "[contract] 58 SEQ_* controls (3 banks + type) present + specs sane PASS\n");
 
     std::fprintf(stderr, "ALL CONTROL-CONTRACT TESTS PASSED\n");
     return 0;

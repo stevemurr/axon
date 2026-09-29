@@ -21,6 +21,12 @@
 // SslEqSolver implements the auto-EQ -> SSL coupling: a closed-form least-squares
 // fit of the SSL band gains (fixed centres) to a target dB curve.
 //
+// Voicing: the same knobs can drive a second, measured console voicing
+// (EqVoicing::Amek, "Broad" in the GUI) whose sections are designed by
+// amek_eq.hpp from shape laws fitted to an AMEK 9099 transfer-function dataset.
+// The Classic (Ssl) cascade is unchanged: it runs its original 7 core sections
+// (the 8th slot, used by the Broad LPF, is skipped).
+//
 // Pure DSP — no CLAP/ORT/Accelerate deps, unit-testable standalone (cf.
 // bass_mono.hpp, rational_a.hpp).
 
@@ -32,6 +38,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "amek_eq.hpp"
 #include "biquad.hpp"
 #include "rational_a.hpp"
 
@@ -104,6 +111,11 @@ inline SslBiquad ssl_design(int type, double gain_db, double freq_hz, double q, 
     return bq;
 }
 
+enum class EqVoicing : int {
+    Ssl  = 0,   // "Classic": RBJ cascade mirroring nablafx SSLConsoleEQ
+    Amek = 1,   // "Broad": AMEK 9099 shapes fitted from measured transfer functions
+};
+
 enum class SslEqMode : int {
     Stereo = 0,   // process left and right independently
     Mid    = 1,   // process (L + R) / 2; leave side unchanged
@@ -114,6 +126,7 @@ enum class SslEqMode : int {
 // controller, or user knobs). Frequencies/gains/Q are physical.
 struct SslEqParamsRT {
     SslEqMode mode = SslEqMode::Stereo;
+    EqVoicing voicing = EqVoicing::Ssl;
     bool  eq_on   = false;
     bool  hpf_on  = false;  float hpf_hz = 100.f;   float hpf_q = 0.70710678f;
     bool  lpf_on  = false;  float lpf_hz = 20000.f; float lpf_q = 0.70710678f;
@@ -124,7 +137,7 @@ struct SslEqParamsRT {
     float harmonic_mix = 0.f;   // 0 = no colour (bypass), 1 = full waveshaper
 
     bool operator==(const SslEqParamsRT& o) const {
-        return mode == o.mode && eq_on == o.eq_on && hpf_on == o.hpf_on && lpf_on == o.lpf_on &&
+        return mode == o.mode && voicing == o.voicing && eq_on == o.eq_on && hpf_on == o.hpf_on && lpf_on == o.lpf_on &&
                hpf_hz == o.hpf_hz && hpf_q == o.hpf_q && lpf_hz == o.lpf_hz && lpf_q == o.lpf_q &&
                lf_gain == o.lf_gain && lf_hz == o.lf_hz && lf_q == o.lf_q && lf_bellmix == o.lf_bellmix &&
                lmf_gain == o.lmf_gain && lmf_hz == o.lmf_hz && lmf_q == o.lmf_q &&
@@ -140,9 +153,12 @@ struct SslEqParamsRT {
 // ---------------------------------------------------------------------------
 class SslChannelEq {
 public:
-    static constexpr int kNumSsl    = 7;   // hpf, hpf, lf, lmf, hmf, hf, lpf (character core)
+    // Character core, voicing-dependent layout:
+    //   Ssl : hpf, hpf, lf, lmf, hmf, hf, lpf, (identity)
+    //   Amek: hpf(2nd), hpf(1st), lf, lmf, hmf, hf, lpf, lpf
+    static constexpr int kNumSsl    = 8;
     static constexpr int kNumAssist = 6;   // interior solver-driven bells (auto-EQ offload)
-    static constexpr int kNumBq     = kNumSsl + kNumAssist;   // 13
+    static constexpr int kNumBq     = kNumSsl + kNumAssist;   // 14
 
     // Fixed centres/Q of the assist bands (peaking); the coupling solver fits
     // their gains to the auto-EQ target curve. Log-spaced to fill the SSL gaps.
@@ -173,9 +189,10 @@ public:
 
     void set_params(const SslEqParamsRT& p) {
         if (have_last_ && p == last_) return;   // change-guard
-        // Channel state has different meanings in L/R and M/S modes. Never
-        // reinterpret filter history across a mode switch.
-        if (have_last_ && p.mode != last_.mode) clear_state_();
+        // Channel state has different meanings in L/R and M/S modes, and the
+        // voicings lay out different sections. Never reinterpret filter history
+        // across a mode or voicing switch.
+        if (have_last_ && (p.mode != last_.mode || p.voicing != last_.voicing)) clear_state_();
         last_ = p; have_last_ = true;
         design_(p);
     }
@@ -255,9 +272,48 @@ private:
         return o;
     }
 
+    static SslBiquad from_(const amek::Coeffs& c) { SslBiquad b; b.set(c.b0, c.b1, c.b2, c.a1, c.a2); return b; }
+
     void design_(const SslEqParamsRT& p) {
+        if (p.voicing == EqVoicing::Amek) design_amek_(p);
+        else                              design_ssl_(p);
+        // Classic's 8th core section is an identity: skip it (same cost and
+        // bit-identical output as the original 7-section cascade).
+        n_core_ = p.voicing == EqVoicing::Amek ? kNumSsl : kNumSsl - 1;
+        // copy the core sections into both channels, preserving each channel's z-state
+        for (auto& ch : ch_)
+            for (int k = 0; k < kNumSsl; ++k)
+                ch[k].set(coeff_[k].b0, coeff_[k].b1, coeff_[k].b2, coeff_[k].a1, coeff_[k].a2);
+        hmix_ = std::min(std::max((double)p.harmonic_mix, 0.0), 1.0);
+        dirty_ = false;
+    }
+
+    // Measured-console voicing. The console's own laws replace the hpf/lpf/lf/hf
+    // Q fields; a band at exactly 0 dB is identity (as in the Python model).
+    void design_amek_(const SslEqParamsRT& p) {
+        amek::Coeffs two[2];
+        if (p.hpf_on) { amek::hpf(p.hpf_hz, sr_, two); coeff_[0] = from_(two[0]); coeff_[1] = from_(two[1]); }
+        else          { coeff_[0] = coeff_[1] = identity_(); }
+        coeff_[2] = coeff_[3] = coeff_[4] = coeff_[5] = identity_();
+        if (p.eq_on) {
+            const double lfm = std::min(std::max((double)p.lf_bellmix, 0.0), 1.0);
+            if (p.lf_gain != 0.f)
+                coeff_[2] = blend_(from_(amek::shelf(false, p.lf_gain, p.lf_hz, sr_)),
+                                   from_(amek::edge_bell(false, p.lf_gain, p.lf_hz, sr_)), lfm);
+            if (p.lmf_gain != 0.f) coeff_[3] = from_(amek::mid_bell(false, p.lmf_gain, p.lmf_hz, p.lmf_q, sr_));
+            if (p.hmf_gain != 0.f) coeff_[4] = from_(amek::mid_bell(true,  p.hmf_gain, p.hmf_hz, p.hmf_q, sr_));
+            const double hfm = std::min(std::max((double)p.hf_bellmix, 0.0), 1.0);
+            if (p.hf_gain != 0.f)
+                coeff_[5] = blend_(from_(amek::shelf(true, p.hf_gain, p.hf_hz, sr_)),
+                                   from_(amek::edge_bell(true, p.hf_gain, p.hf_hz, sr_)), hfm);
+        }
+        if (p.lpf_on) { amek::lpf(p.lpf_hz, sr_, two); coeff_[6] = from_(two[0]); coeff_[7] = from_(two[1]); }
+        else          { coeff_[6] = coeff_[7] = identity_(); }
+    }
+
+    void design_ssl_(const SslEqParamsRT& p) {
         coeff_[0] = p.hpf_on ? ssl_design(3, 0, p.hpf_hz, p.hpf_q, sr_) : identity_();
-        coeff_[1] = coeff_[0];   // second HPF section (18 dB/oct total)
+        coeff_[1] = coeff_[0];   // second HPF section (LR4: 24 dB/oct total)
         if (p.eq_on) {
             const double lfm = std::min(std::max((double)p.lf_bellmix, 0.0), 1.0);
             coeff_[2] = blend_(ssl_design(1, p.lf_gain, p.lf_hz, p.lf_q, sr_),
@@ -271,12 +327,7 @@ private:
             coeff_[2] = coeff_[3] = coeff_[4] = coeff_[5] = identity_();
         }
         coeff_[6] = p.lpf_on ? ssl_design(4, 0, p.lpf_hz, p.lpf_q, sr_) : identity_();
-        // copy the SSL sections into both channels, preserving each channel's z-state
-        for (auto& ch : ch_)
-            for (int k = 0; k < kNumSsl; ++k)
-                ch[k].set(coeff_[k].b0, coeff_[k].b1, coeff_[k].b2, coeff_[k].a1, coeff_[k].a2);
-        hmix_ = std::min(std::max((double)p.harmonic_mix, 0.0), 1.0);
-        dirty_ = false;
+        coeff_[7] = identity_();   // unused by Classic (n_core_ = 7); keeps magnitude_db exact
     }
 
     // Build the 6 assist sections (peaking at the fixed assist freqs) from the
@@ -295,7 +346,7 @@ private:
         const bool harm = hmix_ > 0.0 && !rational_.empty();
         for (int i = 0; i < n; ++i) {
             double x = (double)buf[i];
-            for (int k = 0; k < kNumSsl; ++k) x = ch[k].process(x);        // SSL character core
+            for (int k = 0; k < n_core_; ++k) x = ch[k].process(x);        // character core
             if (harm) x = (1.0 - hmix_) * x + hmix_ * rational_.eval(x);   // analog colour
             for (int k = kNumSsl; k < kNumBq; ++k) x = ch[k].process(x);   // assist bands (post-harmonic)
             buf[i] = (float)x;
@@ -308,6 +359,7 @@ private:
     std::array<float, kNumAssist> assist_gain_{};   // dB, from the coupling solver
     RationalA rational_{};
     double hmix_ = 0.0;
+    int n_core_ = kNumSsl - 1;   // core sections actually run (voicing-dependent)
     SslEqParamsRT last_{};
     bool have_last_ = false;
     bool dirty_ = true;
@@ -323,7 +375,14 @@ private:
 //   (BᵀB) g = Bᵀ t ,  B[k][b] = dB response of band b at 1 dB gain, freq k.
 // Solved by Gaussian elimination; gains clamped to ±max_gain_db.
 // ---------------------------------------------------------------------------
-struct SslSolverBand { int type; double freq; double q; };   // type: 0 bell,1 lo-shelf,2 hi-shelf
+// type: 0 bell, 1 lo-shelf, 2 hi-shelf. With the Amek voicing the basis uses
+// the measured console's band shapes; slot says which band's laws apply
+// (0 LF, 1 LMF, 2 HMF, 3 HF).
+struct SslSolverBand {
+    int type; double freq; double q;
+    EqVoicing voicing = EqVoicing::Ssl;
+    int slot = -1;
+};
 
 class SslEqSolver {
 public:
@@ -356,7 +415,7 @@ public:
         // basis[k][b] = (dB response of band b at ref_gain) / ref_gain
         std::vector<std::vector<double>> basis(n, std::vector<double>(B, 0.0));
         for (int b = 0; b < B; ++b) {
-            SslBiquad bq = ssl_design(bands_[b].type, ref_gain_db, bands_[b].freq, bands_[b].q, fs);
+            SslBiquad bq = band_design_(bands_[b], ref_gain_db, fs);
             for (int k = 0; k < n; ++k) {
                 double w = 2.0 * M_PI * freqs[k] / fs;
                 basis[k][b] = 20.0 * std::log10(bq.mag(w) > 1e-12 ? bq.mag(w) : 1e-12) / ref_gain_db;
@@ -378,6 +437,20 @@ public:
     }
 
 private:
+    static SslBiquad band_design_(const SslSolverBand& b, double g, double fs) {
+        if (b.voicing != EqVoicing::Amek || b.slot < 0 || b.slot > 3)
+            return ssl_design(b.type, g, b.freq, b.q, fs);
+        amek::Coeffs c;
+        switch (b.slot) {
+            case 0:  c = b.type == 0 ? amek::edge_bell(false, g, b.freq, fs) : amek::shelf(false, g, b.freq, fs); break;
+            case 1:  c = amek::mid_bell(false, g, b.freq, b.q, fs); break;
+            case 2:  c = amek::mid_bell(true,  g, b.freq, b.q, fs); break;
+            default: c = b.type == 0 ? amek::edge_bell(true, g, b.freq, fs) : amek::shelf(true, g, b.freq, fs); break;
+        }
+        SslBiquad o; o.set(c.b0, c.b1, c.b2, c.a1, c.a2);
+        return o;
+    }
+
     // Gaussian elimination with partial pivoting (small dense system).
     static std::vector<double> solve_dense_(std::vector<std::vector<double>> A,
                                             std::vector<double> b) {

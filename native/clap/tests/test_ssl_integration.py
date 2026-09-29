@@ -3,8 +3,8 @@
 
 Covers the plugin<->engine glue that the C++ unit tests can't reach:
 resolve_amount_ mapping SEQ_* -> SslEqParamsRT, the flush_chain SslEq case,
-the SEQ_ON master-bypass path, independent Stereo/Mid/Side bank routing, and
-SEQ_MODE's editor-only behavior. Complements
+the SEQ_ON master-bypass path, independent Stereo/Mid/Side bank routing,
+SEQ_MODE's editor-only behavior, and the SEQ_TYPE voicing switch. Complements
 tests/test_ssl_channel_eq.cpp (engine + solver in isolation) and
 tests/test_control_contract.cpp (meta<->C++).
 
@@ -30,16 +30,19 @@ def skip(msg):
     print(f"SKIP: {msg}"); sys.exit(77)
 
 
-def make_wav(path, sr=44100, n=None, side=False, clean=False):
+def make_wav(path, sr=44100, n=None, side=False, clean=False, tones=None):
     n = n or sr
     import random
     random.seed(12345)
     frames = bytearray()
     for i in range(n):
         t = i / sr
-        s = 0.2 * math.sin(2 * math.pi * 1000 * t) if clean else \
-            0.3 * (random.random() * 2 - 1) + 0.25 * math.sin(2 * math.pi * 100 * t) \
-            + 0.2 * math.sin(2 * math.pi * 1000 * t)
+        if tones:
+            s = sum(a * math.sin(2 * math.pi * f * t) for f, a in tones)
+        else:
+            s = 0.2 * math.sin(2 * math.pi * 1000 * t) if clean else \
+                0.3 * (random.random() * 2 - 1) + 0.25 * math.sin(2 * math.pi * 100 * t) \
+                + 0.2 * math.sin(2 * math.pi * 1000 * t)
         s = max(-0.99, min(0.99, s))
         v = int(s * 32767)
         frames += struct.pack("<hh", v, -v if side else v)
@@ -154,6 +157,34 @@ def main():
     print(f"[ssl-it] side input: Mid max|d|={d_mid_on_side:.3e}, Side max|d|={d_side:.3e}")
     assert d_mid_on_side < 1e-12, "independent Mid bank changed pure-side content"
     assert d_side > 0.0, "independent Side bank did not process side content"
+
+    # 5) SEQ_TYPE (Classic=0 / Broad=1) reaches all banks. Flat Broad matches flat
+    # Classic (Broad's flat sections are exact identities; Classic's 0 dB RBJ
+    # sections carry ~1e-15 rounding); with bands dialled in, the same knobs land
+    # the same peak (+9 dB at 1 kHz) but Broad's console bell is much wider
+    # (model: +0.87 dB at 100 Hz vs Classic's +0.11 dB).
+    broad_flat = os.path.join(d, "broad_flat.wav")
+    tones_in = os.path.join(d, "tones_in.wav")       # quiet: stays clear of the ceiling
+    tones_flat = os.path.join(d, "tones_flat.wav")
+    classic_bell = os.path.join(d, "classic_bell.wav")
+    broad_bell = os.path.join(d, "broad_bell.wav")
+    make_wav(tones_in, tones=[(100, 0.03), (1000, 0.03)])
+    run(inp, broad_flat, f"{COMMON},SEQ_ON=1,SEQ_TYPE=1,SEQ_LF_F=300,SEQ_LF_G=0")
+    run(tones_in, tones_flat,   f"{COMMON},SEQ_ON=1,SEQ_TYPE=0,SEQ_LMF_G=0")
+    run(tones_in, classic_bell, f"{COMMON},SEQ_ON=1,SEQ_TYPE=0,SEQ_LMF_F=1000,SEQ_LMF_Q=1,SEQ_LMF_G=9")
+    run(tones_in, broad_bell,   f"{COMMON},SEQ_ON=1,SEQ_TYPE=1,SEQ_LMF_F=1000,SEQ_LMF_Q=1,SEQ_LMF_G=9")
+    BF, CB, BB = read_left(broad_flat), read_left(classic_bell), read_left(broad_bell)
+    TF = read_left(tones_flat)
+    d_type_flat = max(abs(b - dd) for b, dd in zip(BF, D))
+    print(f"[ssl-it] flat Broad vs flat Classic max|d| = {d_type_flat:.3e}")
+    assert d_type_flat < 1e-12, "flat Broad voicing is not transparent"
+    c1k = 20 * math.log10(goertzel(CB, 1000) / goertzel(TF, 1000))
+    b1k = 20 * math.log10(goertzel(BB, 1000) / goertzel(TF, 1000))
+    c100 = 20 * math.log10(goertzel(CB, 100) / goertzel(TF, 100))
+    b100 = 20 * math.log10(goertzel(BB, 100) / goertzel(TF, 100))
+    print(f"[ssl-it] LMF +9 @1k: Classic {c1k:.2f}/{c100:.2f} dB, Broad {b1k:.2f}/{b100:.2f} dB (@1k/@100)")
+    assert abs(c1k - 9.0) < 0.3 and abs(b1k - 9.0) < 0.3, "EQ types disagree on peak placement/gain"
+    assert abs(c100 - 0.11) < 0.2 and abs(b100 - 0.87) < 0.2, "bell skirts off the model"
 
     print("ALL SSL INTEGRATION TESTS PASSED")
 

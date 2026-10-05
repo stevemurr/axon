@@ -35,6 +35,8 @@ EQ stage's contribution.
 
 </div>
 
+On macOS the editor is native Cocoa: the signal path along the top as chips (the light switches a stage, drag to reorder), a panel per stage with a graph drawn from that stage's own DSP, and the level meters on the right. Linux and Windows keep the shared web page.
+
 Built on [nablafx](https://github.com/stevemurr/nablafx) (our fork of
 [mcomunita/nablafx](https://github.com/mcomunita/nablafx)).
 
@@ -192,6 +194,7 @@ the training↔plugin seams against the *shipped* artifacts:
 | [`test_ssl_hop_contract.cpp`](native/clap/tests/test_ssl_hop_contract.cpp) | `kSslHop ≤ trace_len − receptive_field` against the shipped ssl_comp bundle (the margin is exactly 0: 1655 − 631 == 1024) |
 | [`test_autoeq_param_guard.cpp`](native/clap/tests/test_autoeq_param_guard.cpp) | auto-EQ `num_control_params` fits the fixed 64-slot audio-thread buffers (`kEqParamsStorage`) |
 | [`test_amek_eq.cpp`](native/clap/tests/test_amek_eq.cpp) | the Broad EQ voicing == `scripts/fit_amek_eq.py`'s fitted model (golden vectors, 44.1/48/96 kHz) and ≤ 0.4 dB median RMS vs held-out measured console curves |
+| [`test_gui_math.cpp`](native/clap/tests/test_gui_math.cpp) | the curves the editor draws (bass-mono and widener side gain, reverb decay by frequency) == what `BassMono`, `Widener` and `Reverb` do: ≤ 0.01 dB for the filters, decay times within the measurement's tolerance |
 
 CTest also runs
 [`native/clap/tests/test_ssl_integration.py`](native/clap/tests/test_ssl_integration.py),
@@ -471,7 +474,9 @@ axon/                       (repo root)
 ├── native/clap/            C++ CLAP plugin (macOS arm64)
 │   ├── src/                runtime, DSP blocks (mel_limiter, meter, bass_mono,
 │   │                       reverb, widener, iir_filterbank_eq, adaptive_eq…), ORT session
-│   ├── ui/                 WebKit GUI (index.html)
+│   ├── src/cocoa/          native macOS editor (chips, per-stage graphs, levels, help)
+│   ├── tools/              axon_editor_snapshot: render the editor / run its self-test headlessly
+│   ├── ui/                 WebKit GUI (index.html): Linux, Windows, and macOS with -DAXON_GUI_NATIVE=OFF
 │   ├── tests/              standalone DSP + contract unit tests
 │   ├── bench/              headless benchmarking harness
 │   └── docs/               cross-stage measured findings (perf ranking)

@@ -100,12 +100,22 @@ target_link_libraries(nablafx_clap PRIVATE
 #                       GUI build regression)
 option(AXON_GUI "Build the native GUI backend where available" ON)
 option(AXON_REQUIRE_GUI "Fail configure if no native GUI backend can be built" OFF)
+# macOS: draw the editor with Cocoa (src/axon_gui_cocoa.mm + src/cocoa/*), or with the WKWebView page that the Linux
+# and Windows backends share (src/axon_gui.mm + ui/). Both sit behind the same C ABI and receive the same telemetry.
+option(AXON_GUI_NATIVE "macOS: native Cocoa editor instead of the WebView page" ON)
+set(AXON_COCOA_SRC src/axon_gui_cocoa.mm src/cocoa/ax_ui.mm src/cocoa/ax_widgets.mm
+    src/cocoa/ax_graphs.mm src/cocoa/ax_meters.mm)
 
 set(AXON_GUI_BACKEND "none")
 set(AXON_GUI_LIBS "")
 if(AXON_GUI AND APPLE)
-    set(AXON_GUI_SRC src/axon_gui.mm)
-    set(AXON_GUI_BACKEND "cocoa")
+    if(AXON_GUI_NATIVE)
+        set(AXON_GUI_SRC ${AXON_COCOA_SRC})
+        set(AXON_GUI_BACKEND "cocoa-native")
+    else()
+        set(AXON_GUI_SRC src/axon_gui.mm)
+        set(AXON_GUI_BACKEND "cocoa")
+    endif()
 elseif(AXON_GUI AND WIN32)
     include(cmake/FetchWebView2.cmake)
     set(AXON_GUI_SRC src/axon_gui_win.cpp)
@@ -153,7 +163,7 @@ add_library(axon_clap MODULE
 )
 
 if(APPLE)
-    set_source_files_properties(src/axon_gui.mm PROPERTIES
+    set_source_files_properties(src/axon_gui.mm ${AXON_COCOA_SRC} PROPERTIES
         COMPILE_FLAGS "-fobjc-arc"
     )
 endif()
@@ -169,9 +179,12 @@ if(APPLE)
         ${ONNXRUNTIME_LIBRARY}
         "-framework CoreFoundation"
         "-framework Cocoa"
-        "-framework WebKit"
+        "-framework QuartzCore"
         "-framework Accelerate"   # vDSP_fft for SpectralMaskEq
     )
+    if(NOT AXON_GUI_NATIVE)
+        target_link_libraries(axon_clap PRIVATE "-framework WebKit")
+    endif()
 else()
     target_link_libraries(axon_clap PRIVATE
         ${ONNXRUNTIME_LIBRARY}
@@ -430,6 +443,9 @@ target_link_libraries(test_spectral_mask_eq PRIVATE ${AXON_DSP_LIBS})
 # (header-only, plain biquads — no Accelerate).
 axon_add_test(test_ssl_channel_eq tests/test_ssl_channel_eq.cpp)
 
+# test_gui_math — the functions behind the editor's graphs, checked against the DSP they describe.
+axon_add_test(test_gui_math tests/test_gui_math.cpp)
+
 # test_amek_eq — the "Broad" EQ voicing (amek_eq.hpp): golden vectors from
 # scripts/fit_amek_eq.py, held-out measured console curves, stability, identity.
 axon_add_test(test_amek_eq tests/test_amek_eq.cpp)
@@ -533,4 +549,16 @@ if(AXON_COVERAGE)
         endif()
     endforeach()
     message(STATUS "AXON_COVERAGE=ON: instrumented test targets: ${_axon_cov_targets}")
+endif()
+
+# axon_editor_snapshot — the native editor without a host: renders it to a PNG and runs its interaction self-test
+# (clicks, drags, typing) headlessly. macOS, native editor only.
+if(APPLE AND AXON_GUI AND AXON_GUI_NATIVE)
+    add_executable(axon_editor_snapshot tools/axon_editor_snapshot.mm ${AXON_COCOA_SRC})
+    target_compile_options(axon_editor_snapshot PRIVATE -fobjc-arc)
+    target_include_directories(axon_editor_snapshot PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_definitions(axon_editor_snapshot PRIVATE
+        AXON_META_PATH="${CMAKE_SOURCE_DIR}/../../weights/axon_bundle/axon_meta.json")
+    target_link_libraries(axon_editor_snapshot PRIVATE "-framework Cocoa" "-framework QuartzCore")
+    add_test(NAME axon_editor_selftest COMMAND axon_editor_snapshot --selftest)
 endif()

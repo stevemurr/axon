@@ -194,6 +194,38 @@ public:
     // This stage adds ZERO reported latency (dry is never delayed).
     int latency_samples() const { return 0; }
 
+    // What the knobs mean, shared with the editor's graphs (gui_math.hpp) so
+    // what is drawn is what is heard (tests/test_gui_math.cpp measures it).
+    //   rt60_seconds   — the decay time to -60 dB that Size names
+    //   rt60_at        — how long the tail lasts at one frequency: each pass
+    //                    round a line loses the broadband amount plus what the
+    //                    damping low-pass takes at that frequency
+    //   predelay_ms    — the wet pre-delay Size sets
+    static double rt60_seconds(double size) {
+        return kRt60Min + clamp01_(static_cast<float>(size)) * (kRt60Max - kRt60Min);
+    }
+    static double predelay_ms(double size) {
+        return kPredelayMinMs + clamp01_(static_cast<float>(size)) * (kMaxPredelayMs - kPredelayMinMs);
+    }
+    static double rt60_at(double size, double damp_hz, double hz, double sr) {
+        const double sz = clamp01_(static_cast<float>(size));
+        const double rt60 = rt60_seconds(sz);
+        double fc = damp_hz < 200.0 ? 200.0 : damp_hz;
+        if (fc > 0.49 * sr) fc = 0.49 * sr;
+        const double a = 1.0 - std::exp(-2.0 * M_PI * fc / sr);           // y += a (x - y)
+        const double w = 2.0 * M_PI * (hz < 1.0 ? 1.0 : (hz > 0.49 * sr ? 0.49 * sr : hz)) / sr;
+        const double c = 1.0 - a;                                         // pole
+        const double mag = a / std::sqrt(1.0 - 2.0 * c * std::cos(w) + c * c);
+        const double loss = -std::log10(mag < 1.0 ? mag : 1.0);           // log10 lost to damping, each pass
+        const double scale = 1.0 + sz * (kMaxSizeScale - 1.0);
+        double sum = 0.0;
+        for (int i = 0; i < kLines; ++i) {
+            const double dt = std::lround(kBaseLen[i] * scale * (sr / kDesignSR)) / sr;   // a line's delay, seconds
+            sum += 1.0 / (1.0 / rt60 + loss / (3.0 * dt));
+        }
+        return sum / kLines;
+    }
+
 private:
     // One-pole / biquad helpers ------------------------------------------------
     using Biquad = BiquadTDF2;
